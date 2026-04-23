@@ -1,690 +1,331 @@
-# screenshot-mcp
+# browser-mcp
 
-An MCP (Model Context Protocol) server for taking screenshots and inspecting web pages using Playwright. Designed for AI agents to verify designs and behavior of web pages.
+A real browser for AI agents — an MCP (Model Context Protocol) server that
+exposes navigation, interaction, inspection, and capture primitives built on
+[Playwright](https://playwright.dev/). Extensible via domain plugins.
 
-## Features
+Features:
 
-- **Multi-browser screenshots** — Chromium, Firefox, WebKit
-- **Multiple viewports** — Test responsive designs in one call
-- **Pre-screenshot actions** — Click, type, scroll, hover, wait, and more
-- **Assertion actions** — `assert_visible`, `assert_hidden`, `assert_attribute`, `assert_text`, `assert_count` collect pass/fail without aborting the sequence
-- **Console capture** — Capture browser console output
-- **DOM snapshot** — Get a simplified DOM tree
-- **Accessibility tree + rule asserts** — Inspect the accessibility structure; optionally check named WCAG-like rules
-- **Visual diff** — Pixel-by-pixel image comparison with top-N diff cluster breakdown
-- **Compare element / screenshot** — Ref-image diff with `boundsHandling:"intersect"` and `alignTo` shortcut
-- **Evaluate script** — Run JS in the page and return the JSON-serialized result
-- **Schema extract** — Parse + validate JSON-LD structured data with issue heuristics
-- **Network log** — Capture all network requests
-- **Page metadata** — Extract title, OG tags, meta tags
-- **Performance metrics** — Core Web Vitals and load timing
-- **Computed styles** — Get effective CSS styles of any element, with optional source file tracing
-- **Element screenshots** — Screenshot a specific CSS selector
-- **BrowserStack support** — Opt-in remote browser testing
-- **Relative URL support** — Configure a base URL to use relative paths
-- **Configurable output directory** — Set a default screenshot path
-- **Plugin system** — Extend with domain-specific tools (e.g. Gutenberg, Shopify)
-- **Gutenberg plugin** — Test WordPress block editor blocks: insert, inspect, screenshot, validate, compare against a Figma reference
+- **User-replicable core.** Every core tool corresponds to something a human
+  can do in a browser: navigate, click, type, hover, scroll, read text,
+  upload files, open tabs, capture screenshots, save PDFs.
+- **Persistent sessions.** `open_session` → use the same page across many
+  tool calls → `close_session`. Idle and wall-clock TTLs keep sessions from
+  outliving their usefulness; every session dies with the MCP server.
+- **Video recording.** Sessions opened with `record_video: true` capture a
+  `.webm` per tab. Wall-clock TTL is clamped short on purpose so you can't
+  accidentally record a 30-min video.
+- **Trace recording.** Start and stop Playwright tracing around any set of
+  actions in a session — returns a `trace.zip` you can scrub through in
+  Playwright's Trace Viewer.
+- **Plugin system.** Dev-only inspection, WordPress auth, and Gutenberg
+  workflows live in separate plugins you opt into via an env var.
+- **Multi-browser.** Chromium, Firefox, and WebKit for ephemeral calls and
+  persistent sessions alike. Optional BrowserStack for remote browsers.
 
-## Installation
+## Install
 
 ```bash
-# Install dependencies
-bun install
-
-# Install Playwright browsers
-npx playwright install chromium
-# Or install all browsers:
-npx playwright install
+bun install              # or npm install / pnpm install
+npx playwright install chromium   # or `playwright install` for all three
+bun run build
 ```
 
-## Usage
+## Use as an MCP server
 
-### As an MCP server
-
-Add to your MCP client configuration (e.g., Claude Desktop `claude_desktop_config.json`):
+Add to your MCP client configuration (e.g. Claude Desktop's
+`claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
-    "screenshot": {
+    "browser": {
       "command": "node",
-      "args": ["path/to/screenshot-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-#### Configuration
-
-You can configure the server using environment variables in your MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "screenshot": {
-      "command": "node",
-      "args": ["path/to/screenshot-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/browser-mcp/dist/index.js"],
       "env": {
-        "SCREENSHOT_MCP_BASE_URL": "https://mysite.com",
-        "SCREENSHOT_MCP_OUTPUT_DIR": "./screenshots"
+        "BROWSER_MCP_BASE_URL": "https://mysite.com",
+        "BROWSER_MCP_OUTPUT_DIR": ".browser",
+        "BROWSER_MCP_PLUGINS": "dev"
       }
     }
   }
 }
 ```
 
-| Environment Variable | Description | Default |
+Only the core primitives load by default. Enable plugins with
+`BROWSER_MCP_PLUGINS` (comma-separated, dependency-ordered).
+
+## Use from the command line
+
+Every core primitive is runnable directly:
+
+```bash
+# Ephemeral (spins up a browser, runs one action, shuts down)
+node dist/index.js navigate --url=https://example.com
+node dist/index.js get_text --url=https://example.com --selector=h1
+node dist/index.js screenshot --url=https://example.com --fullPage=true
+
+# With a plugin
+BROWSER_MCP_PLUGINS=dev node dist/index.js evaluate_script \
+  --url=https://example.com --script="return document.title"
+```
+
+`--help` lists every tool.
+
+JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
+
+> **Note on sessions via CLI.** `open_session` creates a session inside the
+> current process. That session dies with the CLI invocation, so multi-call
+> session flows are MCP-only. CLI use is best for one-shot ephemeral tools.
+
+## Core
+
+### Session lifecycle
+
+| Tool | Purpose |
+|---|---|
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`. |
+| `close_session` | Close a session by id. Returns video paths if recording was on. |
+| `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
+
+Every interactive primitive accepts an optional `session_id` (plus `tab_id`
+for multi-tab sessions). Without `session_id`, the primitive runs against a
+throwaway ephemeral context.
+
+#### Sessions + video
+
+Enabling `record_video: true` on `open_session` makes Playwright record the
+entire browser context. Because videos grow fast, video-enabled sessions
+default to a 2-minute wall TTL and cap at 10 minutes. Close the session to
+finalize the webm — `close_session` returns the file paths.
+
+#### Sessions + trace
+
+For step-level debugging (DOM snapshots, network, console, action timeline),
+enable the `dev` plugin and use `trace_start` / `trace_stop` around the
+actions you want to capture. The result is a `trace.zip` openable with
+`npx playwright show-trace <file>` — much richer than video when you want to
+understand what the agent did.
+
+#### Safeguards
+
+- **Idle TTL** — default 5 min. Reset on every tool call.
+- **Wall TTL** — default 30 min (2 min with video).
+- **Max concurrent sessions** — `BROWSER_MCP_MAX_SESSIONS` (default 5).
+- **Process lifetime** — sessions die when the MCP server does. SIGINT /
+  SIGTERM / `beforeExit` all run cleanup.
+
+### Navigation
+
+`navigate`, `go_back`, `go_forward`, `reload` — all accept `session_id`. The
+ephemeral `navigate` is useful as a "load this page, return status/title"
+probe. The session-bound variants require `session_id`.
+
+### Interaction
+
+`click`, `type_text`, `press_key`, `hover`, `scroll`, `drag`,
+`select_option`, `check`, `uncheck`, `upload_file`.
+
+```json
+{ "tool": "click", "params": { "session_id": "...", "selector": "#submit", "button": "left" } }
+{ "tool": "type_text", "params": { "session_id": "...", "selector": "#email", "text": "a@b.com", "press_enter": true } }
+{ "tool": "press_key", "params": { "session_id": "...", "key": "Control+A" } }
+{ "tool": "scroll", "params": { "session_id": "...", "to": "bottom" } }
+```
+
+### Waits
+
+`wait_for_selector`, `wait_for_url`, `wait_for_load_state`, `wait` (sleep).
+
+Pattern matching in `wait_for_url` is a substring by default; wrap the
+string in `/…/flags` form for a regex (e.g. `"/checkout-[0-9]+/i"`).
+
+### Reads
+
+`get_text`, `get_attribute`, `get_html`, `get_url` — all accept `session_id`
+or run ephemerally. Returned content is the element's visible text,
+attribute value, outerHTML, or the current URL + title.
+
+### Tabs (session-scoped)
+
+`open_tab`, `switch_tab`, `list_tabs`, `close_tab`. Each session holds an
+active tab; every subsequent primitive targets the active tab unless you
+pass an explicit `tab_id`.
+
+### Cookies + storage (session-scoped)
+
+`get_cookies`, `set_cookies`, `clear_cookies`, `get_storage`, `set_storage`,
+`clear_storage`. Storage tools accept `area: "local" | "session"`.
+
+### Capture + save
+
+| Tool | Scope | Notes |
 |---|---|---|
-| `SCREENSHOT_MCP_BASE_URL` | Base URL for resolving relative paths. When set, tools accept relative URLs like `/about` or `blog/post` in addition to absolute URLs. | _(none — only absolute URLs accepted)_ |
-| `SCREENSHOT_MCP_OUTPUT_DIR` | Default directory for saving screenshots and output files. | `.screenshots` |
-| `SCREENSHOT_MCP_MAX_BROWSERS` | Maximum number of concurrent browser instances. Limits parallel Playwright sessions to prevent resource exhaustion when multiple agents call tools simultaneously. Set to `0` for unlimited. | `3` |
-| `SCREENSHOT_MCP_LAUNCH_TIMEOUT` | Browser launch timeout in ms. If the browser doesn't connect within this time, the launch is considered failed. | `30000` |
-| `SCREENSHOT_MCP_LAUNCH_RETRIES` | Number of browser launch attempts. On failure, stale browser processes are killed before retrying with increasing backoff. | `2` |
-| `SCREENSHOT_MCP_TOOL_TIMEOUT` | Global timeout in ms for the entire tool execution. Ensures no tool call can hang indefinitely regardless of the cause. | `90000` |
-| `SCREENSHOT_MCP_NETWORK_IDLE_TIMEOUT` | Timeout in ms for `networkidle` navigation. If exceeded, falls back to `load` instead of failing. | `15000` |
-| `SCREENSHOT_MCP_PLUGINS` | Comma-separated list of plugins to enable (e.g. `gutenberg`). | _(none)_ |
-
-**Relative URLs:** When `SCREENSHOT_MCP_BASE_URL` is set to e.g. `https://mysite.com`, you can pass `/about` as the URL and it will be resolved to `https://mysite.com/about`. Absolute URLs (starting with `http://` or `https://`) are always accepted regardless of this setting.
-
-### Direct CLI usage
-
-You can also run tools directly from the command line without an MCP client:
-
-```bash
-# Take a screenshot
-node dist/index.js screenshot --url=https://example.com
-
-# Full page screenshot with multiple browsers
-node dist/index.js screenshot --url=https://example.com --fullPage=true --browsers='["chromium","firefox"]'
-
-# Mobile viewport
-node dist/index.js screenshot --url=https://example.com --viewports='[{"width":375,"height":812,"label":"mobile"}]'
-
-# Element screenshot
-node dist/index.js element_screenshot --url=https://example.com --selector="h1"
-
-# Capture console logs to file
-node dist/index.js console_capture --url=https://example.com --toFile=true
-
-# DOM snapshot
-node dist/index.js dom_snapshot --url=https://example.com --maxDepth=3
-
-# Visual diff
-node dist/index.js visual_diff --imageA=before.png --imageB=after.png
-
-# Page metadata
-node dist/index.js page_metadata --url=https://example.com
-
-# Performance metrics
-node dist/index.js performance_metrics --url=https://example.com
-
-# Computed styles (non-default only, mobile viewport)
-node dist/index.js computed_styles --url=https://example.com --selector=".hero" --viewport='{"width":375,"height":812}'
-
-# Show help
-node dist/index.js --help
-```
-
-Options are passed as `--key=value` or `--key value`. JSON values (arrays, objects) are supported.
-
-### Build and run
-
-```bash
-# Build TypeScript
-npm run build
-
-# Start the MCP server (stdio transport)
-npm run start
-
-# Or run a tool directly
-node dist/index.js screenshot --url=https://example.com
-```
-
-## Tools
-
-### `screenshot`
-
-Take screenshots of a URL across multiple browsers and viewports.
-
-```json
-{
-  "url": "https://example.com",
-  "browsers": ["chromium", "firefox"],
-  "viewports": [
-    { "width": 1280, "height": 720, "label": "desktop" },
-    { "width": 375, "height": 812, "label": "mobile" }
-  ],
-  "fullPage": true,
-  "actions": [
-    { "action": "click", "selector": "#accept-cookies" },
-    { "action": "wait", "ms": 500 }
-  ]
-}
-```
-
-With a base URL configured, you can use relative paths:
-
-```json
-{
-  "url": "/pricing",
-  "browsers": ["chromium"]
-}
-```
-
-### `element_screenshot`
-
-Screenshot a specific element on a page.
-
-```json
-{
-  "url": "https://example.com",
-  "selector": ".hero-banner",
-  "browser": "chromium"
-}
-```
-
-### `console_capture`
-
-Capture browser console output.
-
-```json
-{
-  "url": "https://example.com",
-  "toFile": true
-}
-```
-
-### `dom_snapshot`
-
-Get a simplified DOM tree.
-
-```json
-{
-  "url": "https://example.com",
-  "selector": "main",
-  "maxDepth": 3
-}
-```
-
-### `accessibility_snapshot`
-
-Get the page's accessibility tree. Optionally scope to a selector and run named rule checks against WCAG-like rules that commonly bite block-style UIs.
-
-```json
-{
-  "url": "https://example.com",
-  "scope": "main",
-  "assertRules": [
-    "section-has-name",
-    "details-summary-has-heading",
-    "region-has-roledescription",
-    "button-has-name",
-    "img-has-alt",
-    "form-control-has-label"
-  ],
-  "skipTree": false
-}
-```
-
-Each rule returns pass/fail with the list of failing elements (short selector + reason). Pair with `skipTree: true` when you only want pass/fail output.
-
-### `visual_diff`
-
-Compare two images pixel-by-pixel. Returns a diff image, mismatch percentage, and top-N contiguous diff clusters (bbox + pixel count) so you can tell a single layout regression apart from scattered anti-aliasing drift.
-
-```json
-{
-  "imageA": ".screenshots/before.png",
-  "imageB": ".screenshots/after.png",
-  "threshold": 0.1
-}
-```
-
-### `compare_screenshot`
-
-Take a screenshot and compare it against a reference image. Supports `ignoreRegions` with an optional `reason` field that's echoed back in the result (useful for keeping a reviewable mask trail).
-
-```json
-{
-  "url": "https://example.com",
-  "referenceImage": ".screenshots/reference.png",
-  "threshold": 0.1,
-  "ignoreRegions": [
-    { "x": 40, "y": 120, "width": 320, "height": 80, "reason": "hero video poster frame — content is dynamic" }
-  ]
-}
-```
-
-### `compare_element`
-
-Take a page screenshot, crop it to a CSS-selected element (with padding), and compare against a reference image. Options:
-
-- **`boundsHandling: "strict" | "intersect"`** — `"strict"` (default) errors when the element crop extends past the reference bounds; `"intersect"` clamps the crop to the reference's dimensions and compares only the overlapping region. Use `"intersect"` when the live element is slightly taller/wider than the Figma reference (e.g. mobile breakpoints).
-- **`alignTo: "top" | "center"`** — shift the reference crop so the element's top-left (or center) aligns with the reference's (0,0). The usual case: your Figma reference is cropped to a single block but the live page has a demo-container header above it. Mutually exclusive with `alignOn`.
-- **`alignOn`** — same idea but takes a named anchor pair (`referenceRect` + `frontendSelector`) for when the structural offset isn't at the element's own bbox origin.
-- **`ignoreRegions[].reason`** — same reviewable mask trail as `compare_screenshot`.
-- **`ignoreText: true`** — mask every rendered text line (per-line client-rect) in position-only mode. Hides glyph-interior pixels so Chromium-vs-Figma font rasterization drift stops polluting the score, while still catching layout regressions that move or resize the text. **Caveat:** a wrong string of text is undetectable under `ignoreText` — pair with `assert_text` or a skill-side computed-styles check against `style.letterSpacing` / `style.lineHeightPx` from the design source. `compare_screenshot` supports the same option.
-
-```json
-{
-  "url": "https://mysite.com/test-page",
-  "referenceImage": "./figma/cta-desktop.png",
-  "selector": ".wp-block-my-plugin-cta[id=\"cta-primary\"]",
-  "alignTo": "top",
-  "boundsHandling": "intersect",
-  "maxDiffPercent": 2
-}
-```
-
-Diff results include a top-N diff cluster breakdown (bbox + pixel count per cluster) so `0.83` can be attributed to specific regions rather than judged as a single opaque number.
-
-### `network_log`
-
-Capture network requests.
-
-```json
-{
-  "url": "https://example.com",
-  "filterUrl": "api\\.example\\.com"
-}
-```
-
-### `page_metadata`
-
-Extract page metadata and OG tags.
-
-```json
-{
-  "url": "https://example.com"
-}
-```
-
-### `performance_metrics`
-
-Measure Core Web Vitals and load performance.
-
-```json
-{
-  "url": "https://example.com",
-  "browser": "chromium"
-}
-```
-
-### `computed_styles`
-
-Get the computed/effective CSS styles of a DOM element. By default returns only properties that differ from the browser's defaults for that element type. Supports a specific viewport size for testing responsive styles.
-
-```json
-{
-  "url": "https://example.com",
-  "selector": ".hero-banner",
-  "filter": "non-default",
-  "viewport": { "width": 375, "height": 812 }
-}
-```
-
-Limit to specific properties:
-
-```json
-{
-  "url": "https://example.com",
-  "selector": ".hero-banner",
-  "properties": ["color", "font-size", "display", "background-color"]
-}
-```
-
-Trace styles back to their source CSS file and line number (Chromium only):
-
-```json
-{
-  "url": "https://example.com",
-  "selector": ".hero-banner",
-  "includeSource": true,
-  "includeInherited": true
-}
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `url` | string | required | URL to visit |
-| `selector` | string | required | CSS selector of the element to inspect |
-| `filter` | `"all"` \| `"non-default"` | `"non-default"` | Return all ~350 computed properties, or only those differing from browser defaults |
-| `properties` | string[] | — | Limit to specific properties. Overrides `filter` |
-| `includeSource` | boolean | `false` | Trace each property to its CSS file and line number (Chromium only) |
-| `includeInherited` | boolean | `false` | When `includeSource` is true, also show the ancestor inheritance chain |
-| `viewport` | object | `{width:1280, height:720}` | Viewport size — affects media queries, container queries, and viewport units |
-| `actions` | Action[] | — | Actions to run before inspecting (e.g. hover to capture `:hover` styles) |
-
-### `evaluate_script`
-
-Run a JavaScript snippet in the page context and return the JSON-serialized result. Unlike the `evaluate` action (fire-and-forget), this tool returns the value. `return` works at the top level — the script is wrapped in an IIFE under the hood, so both statement-style and function-body-style snippets work.
-
-```json
-{
-  "url": "https://example.com",
-  "script": "const items = [...document.querySelectorAll('.item')]; return items.map(el => el.dataset.id);"
-}
-```
-
-### `schema_extract`
-
-Parse and validate all `<script type="application/ld+json">` structured-data blocks on the page. Returns the parsed JSON, detected `@type` values, and heuristic issue flags (`json-parse-failed`, `whitespace-run`, `escape-chars-in-string`, `faq-question-in-answer`, `faq-empty-answer`). Intended to catch cases where a block looks present in `accessibility_snapshot` but is actually malformed or contains raw `\t\n` escape runs.
-
-```json
-{
-  "url": "https://example.com/faq"
-}
-```
-
-## Plugin-provided capabilities (`use` param)
-
-Every core tool accepts a `use` parameter that opts into named capabilities registered by loaded plugins. The most common example: the Gutenberg plugin registers a `wordpress` mode that attaches the cached wp-admin session cookie, letting any core tool reach login-gated URLs like `/wp-admin/*`, authenticated REST endpoints, or post preview URLs.
-
-```json
-{
-  "url": "https://mysite.com/wp-admin/plugins.php",
-  "use": "wordpress"
-}
-```
-
-Pass an array to stack multiple modes: `"use": ["wordpress", "some-other-mode"]`. Session hooks run in order before the tool executes.
-
-### `list_modes`
-
-Returns the modes available from currently-loaded plugins.
-
-```bash
-SCREENSHOT_MCP_PLUGINS=gutenberg node dist/index.js list_modes
-# [
-#   {
-#     "name": "wordpress",
-#     "plugin": "gutenberg",
-#     "description": "Authenticated WordPress session — injects the cached wp-admin cookie ..."
-#   }
-# ]
-```
-
-From the CLI, pass `--use=<mode>` to any core tool:
-
-```bash
-SCREENSHOT_MCP_PLUGINS=gutenberg \
-WP_URL=https://mysite.com WP_USERNAME=admin WP_PASSWORD=... \
-node dist/index.js screenshot --url=https://mysite.com/wp-admin/users.php --use=wordpress
-```
-
-Unknown mode names fail fast with the list of registered modes.
-
-## Pre-screenshot Actions
-
-All browser-based tools support an `actions` array to interact with the page before capturing:
-
-| Action | Params | Description |
-|--------|--------|-------------|
-| `click` | `selector`, `optional?`, `timeout?`, `force?` | Click an element |
-| `type` | `selector`, `text`, `optional?`, `timeout?` | Fill a text input |
-| `wait_for_selector` | `selector`, `optional?`, `timeout?` | Wait for element to appear |
-| `wait` | `ms` | Wait for a duration |
-| `scroll_to` | `selector`, `optional?`, `timeout?` | Scroll element into view |
-| `evaluate` | `script` | Run JavaScript on the page (fire-and-forget). `return` works at the top level; use `evaluate_script` tool to get the value back. |
-| `hover` | `selector`, `optional?`, `timeout?`, `force?` | Hover over an element |
-| `select` | `selector`, `value`, `optional?`, `timeout?` | Select a dropdown option |
-| `assert_visible` | `selector`, `timeout?` | Assert element is visible — collects pass/fail without aborting |
-| `assert_hidden` | `selector`, `timeout?` | Assert element is hidden — collects pass/fail without aborting |
-| `assert_attribute` | `selector`, `attribute`, `equals?` or `absent?` | Assert an attribute's value or absence |
-| `assert_text` | `selector`, `contains?` or `equals?` | Assert element's trimmed textContent |
-| `assert_count` | `selector`, `equals` | Assert the number of elements matching a selector |
-
-Assertion actions never throw or stop the sequence. Results are collected and returned alongside the tool's main output (e.g. "Assertions: 3 passed, 1 failed" with per-assertion detail). This lets flows like "click summary A, assert A open, click summary B, assert A closed and B open" run through a single tool call without bespoke plumbing.
-
-#### Optional actions and error handling
-
-Selector-based actions support `optional`, `timeout`, and `force` params for handling elements that may or may not be present on the page:
-
-- **`optional`** (boolean, default: `false`) — When `true`, the action is silently skipped if the element is not found, instead of failing the entire action sequence. Remaining actions continue to run.
-- **`timeout`** (number, ms) — How long to wait for the element. Defaults to 5000ms when `optional` is `true`, or the context default (30s) otherwise. When explicitly set and the action fails, remaining actions are skipped but the tool still completes its main work (e.g. takes the screenshot) and returns the error alongside the result. When not set, failures abort the tool entirely.
-- **`force`** (boolean, default: `false`, `click` and `hover` only) — Skip Playwright's actionability checks (visible, enabled, stable) and act immediately. Useful for clicking disabled buttons or elements obscured by overlays.
-
-```json
-{
-  "actions": [
-    { "action": "click", "selector": "#dismiss-modal", "optional": true },
-    { "action": "click", "selector": "#dismiss-modal", "optional": true, "timeout": 2000 },
-    { "action": "click", "selector": "#required-btn", "timeout": 10000 },
-    { "action": "click", "selector": ".next-slide", "force": true }
-  ]
-}
-```
-
-## BrowserStack
-
-To use BrowserStack for remote browser testing:
-
-1. Set environment variables:
-   ```
-   BROWSERSTACK_USERNAME=your_username
-   BROWSERSTACK_ACCESS_KEY=your_key
-   ```
-
-2. Pass `useBrowserStack: true` to any tool. BrowserStack is never used unless explicitly requested.
-
-## Output
-
-Screenshots and files are saved to the configured output directory (default: `.screenshots/`). Override the default with the `SCREENSHOT_MCP_OUTPUT_DIR` environment variable, or per-call with the `outputDir` parameter. Each file is named with a timestamp and metadata (browser, viewport size) for easy identification.
+| `screenshot` | Ephemeral multi-browser / multi-viewport | Keeps the existing multi-browser / multi-viewport flow. Returns each result as text + preview image. |
+| `element_screenshot` | Ephemeral | Screenshot one CSS-selected element. |
+| `capture` | Session-bound | Screenshot a session's active (or named) tab. Optional `selector`, `full_page`. |
+| `save_pdf` | Any | Chromium-only PDF export. |
+| `save_html` | Any | Writes `page.content()` to disk. |
+
+### Dialogs
+
+`handle_next_dialog` pre-arms a one-shot handler (`accept` / `dismiss`,
+optional prompt text) for the next `alert` / `confirm` / `prompt` raised
+on the session's active tab.
 
 ## Plugins
 
-The plugin system extends screenshot-mcp with domain-specific tools. Enable plugins via the `SCREENSHOT_MCP_PLUGINS` environment variable.
+Plugins are opt-in. Enable with `BROWSER_MCP_PLUGINS=name1,name2,…` —
+dependencies must come before dependents.
 
-### Gutenberg Plugin
+### `dev` — developer inspection
 
-Tools for testing WordPress Gutenberg blocks. Handles WordPress authentication, editor navigation, block insertion via `wp.data`, and visual verification.
+Tools that only DevTools can deliver — stuff a real user can't see.
 
-#### Setup
+| Tool | Description |
+|---|---|
+| `evaluate_script` | Run JS in the page context and return the value. |
+| `console_capture` | Capture console logs. |
+| `network_log` | Capture network requests. |
+| `dom_snapshot` | Simplified DOM tree. |
+| `accessibility_snapshot` | Accessibility tree + optional WCAG-like rule checks. |
+| `computed_styles` | Effective CSS for an element; optional CSS source tracing. |
+| `performance_metrics` | Core Web Vitals + load timing. |
+| `visual_diff` | Pixel-diff two PNGs. |
+| `compare_screenshot` | Screenshot + diff against a reference. |
+| `compare_element` | Screenshot → crop element → diff against a reference. |
+| `schema_extract` | Parse JSON-LD structured data blocks; flag common issues. |
+| `page_metadata` | Title, OG tags, meta tags, favicon, lang. |
+| `trace_start` / `trace_stop` | Playwright tracing bound to a session. |
 
-```json
-{
-  "mcpServers": {
-    "screenshot": {
-      "command": "node",
-      "args": ["path/to/screenshot-mcp/dist/index.js"],
-      "env": {
-        "SCREENSHOT_MCP_PLUGINS": "gutenberg",
-        "WP_URL": "https://mysite.com",
-        "WP_USERNAME": "admin",
-        "WP_PASSWORD": "your-password"
-      }
-    }
-  }
-}
-```
+Dev tools are registered without the `dev_` prefix so agents still call
+them by their short, well-known names.
 
-#### Configuration
+### `wp` — WordPress authenticated session
 
-| Environment Variable | Required | Default | Description |
-|---|---|---|---|
-| `WP_URL` | Yes | — | WordPress site URL |
-| `WP_USERNAME` | Yes | — | WordPress username |
-| `WP_PASSWORD` | Yes | — | WordPress password |
-| `WP_LOGIN_URL` | No | `{WP_URL}/wp-login.php` | Custom login URL (for sites with non-standard login pages) |
-| `WP_SESSION_TTL` | No | `3600` | Max seconds to cache the login session before re-authenticating |
-
-Authentication is handled automatically: the plugin logs in via `wp-login.php` on the first tool call and caches the session cookies for subsequent calls.
-
-#### Per-block anchors on multi-block test pages
-
-When a test page contains multiple blocks of the same type (e.g. four `wp-block-takt-text` sections in a single demo container), Playwright's strict-mode selector matching will complain that a descendant combinator matches more than one element. The fix is to give each block a unique `anchor` attribute in the editor — this writes a stable `id="..."` on the rendered element that works as a selector without descendant ambiguity:
-
-```json
-{ "action": "gutenberg_set_attribute", "block_index": 0, "attributes": { "anchor": "cta-primary" } }
-```
-
-You can then pass `block_anchor: "cta-primary"` to `gutenberg_compare_block`, or use `#cta-primary` as a direct CSS selector in core tools like `compare_element`.
-
-#### Tools
-
-##### `gutenberg_insert_block`
-
-Insert a block into the WordPress editor and optionally screenshot the result.
-
-```json
-{
-  "post_id": 42,
-  "block_name": "my-plugin/my-block",
-  "attributes": { "text": "Hello", "color": "red" },
-  "screenshot": true
-}
-```
-
-Returns: block registration status, clientId, validity, attributes, and an editor screenshot.
-
-##### `gutenberg_get_blocks`
-
-Get the list of all blocks in a post's editor.
-
-```json
-{
-  "post_id": 42
-}
-```
-
-Returns: array of blocks with clientId, name, attributes, isValid, and inner block count.
-
-##### `gutenberg_screenshot_block`
-
-Screenshot a specific block in the editor and/or its frontend rendering.
-
-```json
-{
-  "post_id": 42,
-  "block_index": 0,
-  "context": "both"
-}
-```
-
-Target by `block_index` (0-based) or `client_id`. Context: `"editor"`, `"frontend"`, or `"both"`.
-
-Frontend context options (new):
-
-- **`frontend_crop: true`** (default) — locate the block on the frontend and clip the screenshot to its bounding box. Set to `false` for a full-page capture.
-- **`frontend_padding: <px>`** — extra padding around the block bbox (default: 0).
-- **`frontend_selector: "..."`** — custom CSS selector to locate the block on the frontend. Overrides the automatic `wp-block-*` detection when the block uses custom classes or is tricky to locate.
-
-##### `gutenberg_check_block`
-
-Comprehensive block validation in one call. Inserts a block, checks registration, validity, console errors, takes editor + frontend screenshots, extracts the frontend HTML, and runs an accessibility check.
-
-```json
-{
-  "post_id": 42,
-  "block_name": "my-plugin/my-block",
-  "attributes": { "heading": "Test" }
-}
-```
-
-Returns a JSON report with: `is_registered`, `is_valid`, `console_errors`, `editor_screenshot`, `frontend_screenshot`, `frontend_html` (array of all matches), `frontend_matched_by` (the selector that matched), and `accessibility_snapshot`.
-
-**Frontend block detection:** Uses `wp.blocks.getBlockDefaultClassName`, the block's custom className attribute, and the actual editor DOM classes (filtered to `wp-block-*`) to locate the rendered block. If auto-detection fails, pass `frontend_selector` to override:
-
-```json
-{
-  "post_id": 42,
-  "block_name": "my-plugin/my-block",
-  "frontend_selector": "[data-my-block]"
-}
-```
-
-When detection fails, the response includes `frontend_lookup_failed: true`, `frontend_tried_selectors` (what was attempted), and `frontend_hints` (what wp.blocks knows about the block) for diagnostics.
-
-##### `gutenberg_inspect_toolbar`
-
-Select a block in the editor and return its block toolbar as a structured list — label, aria-label, pressed/expanded state, disabled state, and whether each button has an icon. Use this instead of a pixel screenshot for "did I register N toolbar buttons" assertions.
-
-```json
-{
-  "post_id": 42,
-  "block_index": 0
-}
-```
-
-Returns `{ client_id, toolbar_found, group_count, groups, button_count, buttons: [...] }`.
-
-##### `gutenberg_compare_block`
-
-Composite: resolves a block on the frontend, scrolls it into view, clips to its bounding box, and pixel-compares against a reference image. Accepts the same block identifiers as other Gutenberg tools, plus `block_anchor` for stable identification on multi-block test pages.
-
-```json
-{
-  "post_id": 42,
-  "referenceImage": "./figma/cta-desktop.png",
-  "block_anchor": "cta-primary",
-  "frontend_padding": 0,
-  "maxDiffPercent": 2
-}
-```
-
-Returns `{ match, score, diff_percentage, diff_clusters, frontend_png, diff_png, ... }`. Collapses what was previously a `gutenberg_screenshot_block` + `visual_diff` (+ manual scroll/clip) sequence into one call.
-
-##### `gutenberg_publish`
-
-Save or publish a post via the Gutenberg editor.
-
-```json
-{
-  "post_id": 42,
-  "status": "publish"
-}
-```
-
-#### Custom Actions
-
-The Gutenberg plugin registers custom action types that can be used in any screenshot-mcp tool's `actions` array (e.g. inside a regular `screenshot` call):
-
-| Action | Params | Description |
-|---|---|---|
-| `gutenberg_insert` | `block_name`, `attributes?` | Insert a block via `wp.data` |
-| `gutenberg_set_attribute` | `client_id` or `block_index`, `attributes` | Update block attributes |
-| `gutenberg_select_block` | `client_id` or `block_index` | Select a block (opens toolbar/inspector) |
-
-These actions require the page to already be on the Gutenberg editor with `wp.data` available. They will wait up to 10 seconds for `wp.data` to load.
-
-```json
-{
-  "url": "https://mysite.com/wp-admin/post.php?post=42&action=edit",
-  "actions": [
-    { "action": "type", "selector": "#user_login", "text": "admin" },
-    { "action": "type", "selector": "#user_pass", "text": "password" },
-    { "action": "click", "selector": "#wp-submit" },
-    { "action": "wait", "ms": 3000 },
-    { "action": "gutenberg_insert", "block_name": "core/paragraph", "attributes": { "content": "Hello" } },
-    { "action": "wait", "ms": 500 }
-  ]
-}
-```
-
-### Writing a Plugin
-
-Plugins implement the `ScreenshotPlugin` interface and are registered in `src/plugins/loader.ts`. A plugin can:
-
-- **Register tools** — new MCP tools prefixed with the plugin name
-- **Register custom actions** — new action types usable in any tool's `actions` array
-- **Register session hooks** — run code after browser context creation (e.g. authentication)
-
-See `src/plugins/gutenberg/index.ts` for a complete example.
-
-### Running Plugin Tools via CLI
-
-Plugin tools are accessible via the same CLI as core tools. Set the plugin env vars and run:
+No tools. Registers the `wordpress` mode — any tool can opt in with
+`use: "wordpress"` to attach the cached wp-login.php cookie to the browser
+context. Required env vars: `WP_URL`, `WP_USERNAME`, `WP_PASSWORD`.
+Optional: `WP_LOGIN_URL`, `WP_SESSION_TTL`.
 
 ```bash
-SCREENSHOT_MCP_PLUGINS=gutenberg \
-WP_URL=https://mysite.com \
-WP_USERNAME=admin \
-WP_PASSWORD=your-password \
-node dist/index.js gutenberg_insert_block --post_id=42 --block_name=core/paragraph
+BROWSER_MCP_PLUGINS=wp WP_URL=https://mysite.com WP_USERNAME=admin \
+  WP_PASSWORD=... node dist/index.js navigate \
+  --url=https://mysite.com/wp-admin/users.php --use=wordpress
 ```
 
-`node dist/index.js --help` lists all available tools including loaded plugin tools.
+### `wp-gutenberg` — Gutenberg editor workflows
+
+Depends on `wp`. Enable with `BROWSER_MCP_PLUGINS=wp,wp-gutenberg`.
+Provides block-level tools for WordPress block editor workflows:
+
+- `wp-gutenberg_insert_block` — insert a block via `wp.data`
+- `wp-gutenberg_get_blocks` — list blocks in a post
+- `wp-gutenberg_screenshot_block` — editor / frontend screenshots
+- `wp-gutenberg_inspect_toolbar` — structured block toolbar listing
+- `wp-gutenberg_compare_block` — resolve + screenshot + diff in one call
+- `wp-gutenberg_evaluate` — run JS in an authenticated editor page
+- `wp-gutenberg_check_block` — insert + validate + a11y + screenshots
+- `wp-gutenberg_publish` — save / publish a post
+- `wp-gutenberg_block_html` — normalized editor + frontend HTML
+- `wp-gutenberg_clear_blocks` — wipe all blocks in a post
+
+Plus custom actions usable in any tool's `actions[]`: `gutenberg_insert`,
+`gutenberg_set_attribute`, `gutenberg_select_block`, `gutenberg_remove`,
+`gutenberg_clear`.
+
+## Actions
+
+Every ephemeral tool accepts an `actions` array of pre-run steps:
+
+| Action | Params |
+|---|---|
+| `click` | `selector`, `optional?`, `timeout?`, `force?` |
+| `type` | `selector`, `text`, `optional?`, `timeout?` |
+| `wait_for_selector` | `selector`, `optional?`, `timeout?` |
+| `wait` | `ms` |
+| `scroll_to` | `selector`, `optional?`, `timeout?` |
+| `evaluate` | `script` (fire-and-forget; use `evaluate_script` to get a value) |
+| `hover` | `selector`, `optional?`, `timeout?`, `force?` |
+| `select` | `selector`, `value`, `optional?`, `timeout?` |
+| `assert_visible` / `assert_hidden` | `selector`, `timeout?` |
+| `assert_attribute` | `selector`, `attribute`, `equals?` or `absent?` |
+| `assert_text` | `selector`, `contains?` or `equals?` |
+| `assert_count` | `selector`, `equals` |
+
+Assertion actions never abort the sequence — they collect pass/fail and
+return a summary alongside the tool's main result.
+
+Plugins can register custom action types (e.g. `gutenberg_insert`,
+`gutenberg_set_attribute`).
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_MCP_BASE_URL` | — | Prefix for relative URLs in tool params. |
+| `BROWSER_MCP_OUTPUT_DIR` | `.browser` | Artifacts directory (screenshots, videos, traces). |
+| `BROWSER_MCP_PLUGINS` | — | Comma-separated plugin names to load (e.g. `dev,wp,wp-gutenberg`). |
+| `BROWSER_MCP_MAX_BROWSERS` | `3` | Max concurrent ephemeral browser launches. `0` = unlimited. |
+| `BROWSER_MCP_MAX_SESSIONS` | `5` | Max persistent sessions open at once. |
+| `BROWSER_MCP_LAUNCH_TIMEOUT` | `30000` | Per-launch timeout in ms. |
+| `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
+| `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |
+| `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
+| `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
+| `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
+| `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. |
+| `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. |
+
+## Writing a plugin
+
+A plugin implements `ScreenshotPlugin`:
+
+```ts
+import type { ScreenshotPlugin, PluginContext, PluginConfigSchema } from "../types.js";
+
+const myPlugin: ScreenshotPlugin = {
+  name: "my-plugin",
+  version: "0.1.0",
+
+  // Optional — enforce declared prereqs.
+  dependencies: ["wp"],
+
+  // Optional — when false, registered tool names are NOT prefixed with
+  // the plugin name. Default: true.
+  prefixTools: true,
+
+  getConfigSchema(): PluginConfigSchema {
+    return {
+      myApiKey: { envVar: "MY_API_KEY", required: true, description: "API token" },
+    };
+  },
+
+  async register(ctx: PluginContext, resolvedConfig) {
+    ctx.registerTool({
+      name: "do_thing",
+      description: "Do a domain-specific thing.",
+      schema: { target: z.string() },
+      handler: async (params) => ({ content: [{ type: "text", text: "done" }] }),
+    });
+
+    ctx.registerMode("my-mode", [async (context, page) => { /* hook */ }],
+      "Short description of what this mode attaches to a context.");
+
+    ctx.registerAction("my_plugin_do", async (page, params) => { /* ... */ });
+  },
+};
+```
+
+Register the plugin in `src/plugins/loader.ts` as a lazy import.
+
+Core principles for plugins:
+
+1. **Plugins consume core, never bypass it.** No plugin opens its own
+   browser or ships its own screenshot path. If you need something core
+   doesn't provide, add it to core.
+2. **Name plugins by domain, not site.** `wordpress`, `shopify-admin`;
+   never `acme-store`.
 
 ## License
 
