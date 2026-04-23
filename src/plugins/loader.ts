@@ -5,8 +5,16 @@ import { PluginRegistry } from "./registry.js";
 
 /** Built-in plugin map: name → lazy import function. */
 const BUILTIN_PLUGINS: Record<string, () => Promise<ScreenshotPlugin>> = {
-  gutenberg: async () => {
-    const mod = await import("./gutenberg/index.js");
+  dev: async () => {
+    const mod = await import("./dev/index.js");
+    return mod.default;
+  },
+  wp: async () => {
+    const mod = await import("./wp/index.js");
+    return mod.default;
+  },
+  "wp-gutenberg": async () => {
+    const mod = await import("./wp-gutenberg/index.js");
     return mod.default;
   },
 };

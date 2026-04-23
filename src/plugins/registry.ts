@@ -52,6 +52,20 @@ export class PluginRegistry {
       throw new Error(`Plugin name collision: "${name}" is already registered.`);
     }
 
+    // Enforce declared dependencies — the user must have listed them earlier
+    // in BROWSER_MCP_PLUGINS so their config/hooks/modes are live.
+    if (plugin.dependencies && plugin.dependencies.length > 0) {
+      const missing = plugin.dependencies.filter((dep) => !this.plugins.has(dep));
+      if (missing.length > 0) {
+        throw new Error(
+          `Plugin "${name}" depends on plugin(s) that haven't been loaded: ` +
+          missing.map((m) => `"${m}"`).join(", ") +
+          `. Add them to BROWSER_MCP_PLUGINS before "${name}" ` +
+          `(e.g. BROWSER_MCP_PLUGINS=${[...missing, name].join(",")}).`
+        );
+      }
+    }
+
     // Resolve and validate config from env vars
     const schema = plugin.getConfigSchema();
     const resolved: ResolvedPluginConfig = {};
@@ -74,9 +88,11 @@ export class PluginRegistry {
       );
     }
 
+    const prefixTools = plugin.prefixTools !== false;
+
     // Build the plugin context with scoped registration methods
     const ctx: PluginContext = {
-      registerTool: (def) => this.addTool(name, def),
+      registerTool: (def) => this.addTool(name, def, prefixTools),
       registerAction: (type, handler) => this.addAction(name, type, handler),
       registerSessionHook: (hook) => this.addSessionHook(hook),
       registerMode: (modeName, hooks, description) => this.addMode(name, modeName, hooks, description),
@@ -144,17 +160,17 @@ export class PluginRegistry {
 
   // ----- private registration helpers -----
 
-  private addTool(pluginName: string, def: PluginToolDefinition): void {
-    const namespacedName = `${pluginName}_${def.name}`;
-    if (this.tools.has(namespacedName)) {
+  private addTool(pluginName: string, def: PluginToolDefinition, prefix: boolean): void {
+    const finalName = prefix ? `${pluginName}_${def.name}` : def.name;
+    if (this.tools.has(finalName)) {
       throw new Error(
         `Plugin "${pluginName}" tried to register tool "${def.name}" ` +
-        `but "${namespacedName}" is already registered.`
+        `but "${finalName}" is already registered.`
       );
     }
-    this.tools.set(namespacedName, {
+    this.tools.set(finalName, {
       ...def,
-      name: namespacedName,
+      name: finalName,
     });
   }
 

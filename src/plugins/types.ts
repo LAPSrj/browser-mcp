@@ -22,7 +22,13 @@ export interface ToolResponse {
 // ---------------------------------------------------------------------------
 
 export interface PluginToolDefinition {
-  /** Tool name without plugin prefix (prefix is added automatically). */
+  /**
+   * Tool name. By default the plugin name is prepended automatically
+   * (e.g. plugin "wp-gutenberg" + name "insert_block" → "wp-gutenberg_insert_block").
+   * A plugin can set ScreenshotPlugin.prefixTools = false to register
+   * unprefixed tool names (used by the built-in `dev` plugin so agents
+   * call e.g. `evaluate_script` rather than `dev_evaluate_script`).
+   */
   name: string;
   description: string;
   /** Zod shape object: Record<string, ZodType> — same format as core tool schemas. */
@@ -113,9 +119,24 @@ export interface PluginContext {
 // ---------------------------------------------------------------------------
 
 export interface ScreenshotPlugin {
-  /** Unique plugin name, used as the tool prefix (e.g. "gutenberg"). */
+  /** Unique plugin name, used as the tool prefix (e.g. "wp-gutenberg"). */
   name: string;
   version: string;
+
+  /**
+   * Other plugins that must be loaded first. Loader enforces this — if a
+   * user enables wp-gutenberg without wp, load fails with a clear error.
+   */
+  dependencies?: string[];
+
+  /**
+   * When false, tools registered through ctx.registerTool() keep their
+   * declared names instead of being namespaced by plugin name. Used by
+   * the built-in `dev` plugin to preserve short, well-known tool names
+   * (evaluate_script, console_capture, …) without the `dev_` prefix.
+   * Default: true.
+   */
+  prefixTools?: boolean;
 
   /**
    * Return the env var requirements for this plugin.
