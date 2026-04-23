@@ -56,6 +56,11 @@ export class WpAuth {
     }
   }
 
+  /** Whether WP_USERNAME and WP_PASSWORD are configured (auto-login is possible). */
+  canAutoLogin(): boolean {
+    return Boolean(this.config.wpUsername && this.config.wpPassword);
+  }
+
   /** Inject cached auth into a browser context (add cookies). */
   async injectAuth(context: BrowserContext): Promise<boolean> {
     if (!this.cachedState) return false;
@@ -92,6 +97,13 @@ export class WpAuth {
   }
 
   private async performLogin(page: Page): Promise<StorageStateData> {
+    if (!this.canAutoLogin()) {
+      throw new Error(
+        "WordPress auto-login is not configured (WP_USERNAME and WP_PASSWORD not set). " +
+        "Either set those env vars, or authenticate manually in a persistent browser session " +
+        "before calling tools that need an authenticated WP context."
+      );
+    }
     const loginUrl = this.getLoginUrl();
 
     try {

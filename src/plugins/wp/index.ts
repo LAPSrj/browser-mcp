@@ -25,10 +25,12 @@ const wpPlugin: ScreenshotPlugin = {
     setSharedWpAuth(auth);
 
     // Session hook: inject cached auth cookies into the new browser context.
-    // If no cache exists (first use), perform a fresh login first.
+    // If no cache exists (first use), perform a fresh login — but only when
+    // credentials are configured. Otherwise we trust whatever cookies the
+    // context already carries (e.g. a manually-authenticated persistent session).
     const authHook = async (context: BrowserContext, page: Page, _toolName: string) => {
       const injected = await auth.injectAuth(context);
-      if (!injected) {
+      if (!injected && auth.canAutoLogin()) {
         await auth.getStorageState(page);
         await auth.injectAuth(context);
       }

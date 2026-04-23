@@ -32,10 +32,13 @@ export class PluginRegistry {
   private actions = new Map<string, CustomActionHandler>();
   private sessionHooks: SessionHook[] = [];
   private modes = new Map<string, ModeInfo>();
+  private skipped = new Map<string, string>();
   private sealed = false;
 
   /**
-   * Load, validate, and register a single plugin.
+   * Load, validate, and register a single plugin. Plugins missing required
+   * env vars are skipped (warning to stderr) instead of throwing — one
+   * mis-configured optional plugin shouldn't take down the whole server.
    */
   async load(
     plugin: ScreenshotPlugin,
@@ -52,16 +55,24 @@ export class PluginRegistry {
       throw new Error(`Plugin name collision: "${name}" is already registered.`);
     }
 
-    // Enforce declared dependencies — the user must have listed them earlier
-    // in BROWSER_MCP_PLUGINS so their config/hooks/modes are live.
     if (plugin.dependencies && plugin.dependencies.length > 0) {
-      const missing = plugin.dependencies.filter((dep) => !this.plugins.has(dep));
-      if (missing.length > 0) {
+      // Cascade skip: a dependency that was skipped (e.g. missing env vars)
+      // should propagate, not error out.
+      const skippedDeps = plugin.dependencies.filter((dep) => this.skipped.has(dep));
+      if (skippedDeps.length > 0) {
+        const reason = `dependency skipped: ${skippedDeps.map((d) => `"${d}"`).join(", ")}`;
+        this.skipped.set(name, reason);
+        console.error(`[browser-mcp] Skipping plugin "${name}" — ${reason}`);
+        return;
+      }
+      // Hard error: dependency was never declared in BROWSER_MCP_PLUGINS.
+      const missingDeps = plugin.dependencies.filter((dep) => !this.plugins.has(dep));
+      if (missingDeps.length > 0) {
         throw new Error(
           `Plugin "${name}" depends on plugin(s) that haven't been loaded: ` +
-          missing.map((m) => `"${m}"`).join(", ") +
+          missingDeps.map((m) => `"${m}"`).join(", ") +
           `. Add them to BROWSER_MCP_PLUGINS before "${name}" ` +
-          `(e.g. BROWSER_MCP_PLUGINS=${[...missing, name].join(",")}).`
+          `(e.g. BROWSER_MCP_PLUGINS=${[...missingDeps, name].join(",")}).`
         );
       }
     }
@@ -69,23 +80,26 @@ export class PluginRegistry {
     // Resolve and validate config from env vars
     const schema = plugin.getConfigSchema();
     const resolved: ResolvedPluginConfig = {};
-    const missing: string[] = [];
+    const missingEnv: string[] = [];
 
     for (const [key, entry] of Object.entries(schema)) {
       const value = process.env[entry.envVar] ?? entry.default;
       if (value !== undefined) {
         resolved[key] = value;
       } else if (entry.required) {
-        missing.push(`${entry.envVar} (${entry.description})`);
+        missingEnv.push(`${entry.envVar} (${entry.description})`);
       }
     }
 
-    if (missing.length > 0) {
-      throw new Error(
-        `Plugin "${name}" requires missing environment variables:\n` +
-        missing.map((m) => `  - ${m}`).join("\n") +
-        `\nSet them or remove "${name}" from BROWSER_MCP_PLUGINS.`
+    if (missingEnv.length > 0) {
+      const varList = missingEnv.map((m) => m.split(" ")[0]).join(", ");
+      this.skipped.set(name, `missing env: ${varList}`);
+      console.error(
+        `[browser-mcp] Skipping plugin "${name}" — missing required environment variables:\n` +
+        missingEnv.map((m) => `  - ${m}`).join("\n") +
+        `\nSet them or remove "${name}" from BROWSER_MCP_PLUGINS to silence this warning.`
       );
+      return;
     }
 
     const prefixTools = plugin.prefixTools !== false;
@@ -155,6 +169,7 @@ export class PluginRegistry {
     this.actions.clear();
     this.sessionHooks = [];
     this.modes.clear();
+    this.skipped.clear();
     this.sealed = false;
   }
 

@@ -8,13 +8,13 @@ export const WP_CONFIG_SCHEMA: PluginConfigSchema = {
   },
   wpUsername: {
     envVar: "WP_USERNAME",
-    required: true,
-    description: "WordPress username for login",
+    required: false,
+    description: "WordPress username for auto-login (omit if relying on a manually-authenticated persistent session)",
   },
   wpPassword: {
     envVar: "WP_PASSWORD",
-    required: true,
-    description: "WordPress password for login",
+    required: false,
+    description: "WordPress password for auto-login (omit if relying on a manually-authenticated persistent session)",
   },
   wpLoginUrl: {
     envVar: "WP_LOGIN_URL",

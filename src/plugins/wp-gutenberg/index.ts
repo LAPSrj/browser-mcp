@@ -56,10 +56,11 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     const defaultOutputDir = ctx.config.outputDir ?? ".browser";
 
     // Reuse wp's authHook locally for launchSession. Stays in sync with the
-    // "wordpress" mode hook wp registers — both do auth-inject with lazy login.
+    // "wordpress" mode hook wp registers — both do auth-inject with lazy
+    // login, but only attempt auto-login when credentials are configured.
     const authHook = async (context: any, page: Page, _toolName: string) => {
       const injected = await auth.injectAuth(context);
-      if (!injected) {
+      if (!injected && auth.canAutoLogin()) {
         await auth.getStorageState(page);
         await auth.injectAuth(context);
       }
