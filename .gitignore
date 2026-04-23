@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.browser/
+*.tgz
+.env
+.claude/
+
+.agent-out/
