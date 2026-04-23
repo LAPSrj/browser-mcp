@@ -10,6 +10,7 @@ import { runActions, setCustomActionHandlers } from "./utils/actions.js";
 import { saveFile, generateFilename } from "./utils/file.js";
 import { resolveUrl } from "./utils/url.js";
 import { createPreviewBuffer } from "./utils/resize.js";
+import { sessionManager } from "./core/sessions.js";
 import type { CoreUtils } from "./plugins/types.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 
@@ -56,13 +57,16 @@ async function main() {
     const { config, registry } = await bootstrap();
     const server = createServer(config, registry);
 
-    // Clean up plugins on shutdown
-    const cleanup = async () => {
-      await registry.destroyAll();
+    // Clean up persistent sessions + plugins on shutdown, in that order —
+    // sessions hold live BrowserServers that need to die before the process
+    // exits, otherwise they leak as orphaned headless Chromium processes.
+    const cleanup = async (reason: string) => {
+      try { await sessionManager.closeAll(reason); } catch { /* ignore */ }
+      try { await registry.destroyAll(); } catch { /* ignore */ }
       process.exit(0);
     };
-    process.on("SIGINT", cleanup);
-    process.on("SIGTERM", cleanup);
+    process.on("SIGINT", () => { void cleanup("sigint"); });
+    process.on("SIGTERM", () => { void cleanup("sigterm"); });
 
     const transport = new StdioServerTransport();
     await server.connect(transport);

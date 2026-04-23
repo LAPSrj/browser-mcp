@@ -1,10 +1,14 @@
 import { screenshotTool } from "./core/screenshot.js";
 import { elementScreenshotTool } from "./core/element-screenshot.js";
+import { allPrimitives } from "./core/primitives.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
 import { toolContextStorage, createToolContext } from "./utils/browser.js";
 
-const CORE_TOOLS = ["screenshot", "element_screenshot", "list_modes"] as const;
+const primitiveDefs = allPrimitives();
+const PRIMITIVE_NAMES = Object.keys(primitiveDefs);
+const STATIC_CORE = ["screenshot", "element_screenshot", "list_modes"] as const;
+const CORE_TOOLS = [...STATIC_CORE, ...PRIMITIVE_NAMES];
 
 function printUsage(pluginTools: string[] = []): void {
   const pluginSection =
@@ -19,9 +23,35 @@ Usage:
   browser-mcp                      Start as MCP server (stdio)
 
 Core tools:
-  screenshot              Take screenshots of a URL
+  screenshot              Take screenshots of a URL (one-shot, multi-browser/viewport)
   element_screenshot      Screenshot a specific element
   list_modes              List plugin-provided modes available via --use
+
+Session lifecycle:
+  open_session            Open a persistent session (reusable across calls). Returns session_id.
+  close_session           Close a persistent session. Returns video paths if recorded.
+  list_sessions           List open sessions with TTLs and tabs.
+
+Interactive primitives (session_id optional; ephemeral when omitted):
+  navigate                Go to a URL
+  click, type_text, press_key, hover, scroll, drag
+  select_option, check, uncheck, upload_file
+  wait_for_selector, wait_for_url, wait_for_load_state, wait
+
+Reads:  get_text, get_attribute, get_html, get_url
+
+Tabs (session-only):
+  open_tab, switch_tab, list_tabs, close_tab
+
+Cookies + storage (session-only):
+  get_cookies, set_cookies, clear_cookies
+  get_storage, set_storage, clear_storage
+
+Capture + save:
+  capture, save_pdf, save_html
+
+Dialogs:
+  handle_next_dialog
 ${pluginSection}
 Options are passed as --key=value or --key value. JSON values are supported.
 
@@ -98,7 +128,7 @@ export async function runCli(args: string[], registry?: PluginRegistry): Promise
     return;
   }
 
-  const isCore = CORE_TOOLS.includes(toolName as (typeof CORE_TOOLS)[number]);
+  const isCore = CORE_TOOLS.includes(toolName);
   const isPlugin = pluginToolNames.includes(toolName);
 
   if (!isCore && !isPlugin) {
@@ -144,6 +174,9 @@ async function runCoreTool(
   name: string,
   params: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: string; [key: string]: unknown }> }> {
+  if (PRIMITIVE_NAMES.includes(name)) {
+    return await primitiveDefs[name].handler(params);
+  }
   switch (name) {
     case "screenshot":
       return await screenshotTool(params as any);

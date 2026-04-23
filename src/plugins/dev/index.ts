@@ -1,10 +1,13 @@
 import { z } from "zod";
+import path from "node:path";
+import fs from "node:fs/promises";
 import type {
   ScreenshotPlugin,
   PluginContext,
   PluginConfigSchema,
 } from "../types.js";
 import { actionSchema, useSchemaField } from "../../utils/schemas.js";
+import { sessionManager } from "../../core/sessions.js";
 import { consoleCaptureTool } from "./tools/console-capture.js";
 import { domSnapshotTool } from "./tools/dom-snapshot.js";
 import { accessibilitySnapshotTool } from "./tools/accessibility.js";
@@ -315,6 +318,63 @@ const devPlugin: ScreenshotPlugin = {
         ...useSchemaField,
       },
       handler: async (params) => (await evaluateScriptTool(withUrl(params))) as any,
+    });
+
+    // ---------- trace_start / trace_stop (session-scoped) ----------
+    // Playwright tracing records actions + DOM snapshots + network + console
+    // as a trace.zip openable with `npx playwright show-trace <file>`.
+    // Start before the behavior you want to capture; stop to save the zip.
+    ctx.registerTool({
+      name: "trace_start",
+      description:
+        "Start Playwright tracing on a session's browser context. Records actions, DOM snapshots, network, and console output. " +
+        "Stop with trace_stop to get a trace.zip you can inspect with `npx playwright show-trace`. Per-session, one trace at a time.",
+      schema: {
+        session_id: z.string().describe("Session id (from open_session) to trace"),
+        screenshots: z.boolean().optional().describe("Capture screenshots at each action (default: true)"),
+        snapshots: z.boolean().optional().describe("Capture DOM snapshots at each action (default: true)"),
+        sources: z.boolean().optional().describe("Include source JS in the trace (default: false)"),
+      },
+      handler: async (p) => {
+        sessionManager.touch(p.session_id);
+        if (sessionManager.isTracing(p.session_id)) {
+          return { content: [{ type: "text" as const, text: "Tracing is already active on this session. Call trace_stop first." }], isError: true };
+        }
+        const context = sessionManager.getContext(p.session_id);
+        await context.tracing.start({
+          screenshots: p.screenshots !== false,
+          snapshots: p.snapshots !== false,
+          sources: p.sources === true,
+        });
+        sessionManager.setTracing(p.session_id, true);
+        return { content: [{ type: "text" as const, text: `Tracing started on session ${p.session_id}` }] };
+      },
+    });
+
+    ctx.registerTool({
+      name: "trace_stop",
+      description:
+        "Stop Playwright tracing on a session and save the trace.zip. Returns the file path. Open with `npx playwright show-trace <file>`.",
+      schema: {
+        session_id: z.string().describe("Session id"),
+        output_path: z.string().optional().describe("Relative or absolute path. Defaults to <output_dir>/trace-<timestamp>.zip"),
+        output_dir: z.string().optional().describe(`Base directory when output_path is relative (default: "${defaultOutputDir}")`),
+      },
+      handler: async (p) => {
+        sessionManager.touch(p.session_id);
+        if (!sessionManager.isTracing(p.session_id)) {
+          return { content: [{ type: "text" as const, text: "No trace is active on this session. Call trace_start first." }], isError: true };
+        }
+        const dir = p.output_dir ?? defaultOutputDir;
+        const filePath = p.output_path
+          ? (path.isAbsolute(p.output_path) ? p.output_path : path.join(dir, p.output_path))
+          : path.join(dir, `trace-${Date.now()}.zip`);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        const context = sessionManager.getContext(p.session_id);
+        await context.tracing.stop({ path: filePath });
+        sessionManager.setTracing(p.session_id, false);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ path: filePath }, null, 2) }] };
+      },
     });
 
     // ---------- schema_extract ----------

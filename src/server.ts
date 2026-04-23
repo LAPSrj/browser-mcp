@@ -13,6 +13,8 @@ import {
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
 import { actionSchema, useSchemaField } from "./utils/schemas.js";
+import { allPrimitives } from "./core/primitives.js";
+import { sessionManager } from "./core/sessions.js";
 
 function withTimeout<T extends { use?: UseParam }>(
   timeoutMs: number,
@@ -177,6 +179,15 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       };
     },
   );
+
+  // ---------- Core primitives (sessions, navigation, interaction, waits, reads, tabs, cookies/storage, capture, save, dialogs) ----------
+  const primitives = allPrimitives();
+  for (const [name, def] of Object.entries(primitives)) {
+    server.tool(name, def.description, def.schema, wrap(def.handler));
+  }
+
+  // Sessions outlive a single tool call; make sure process exit closes them.
+  sessionManager.bindShutdownSignals();
 
   // ---------- Plugin-registered tools ----------
   if (registry) {
