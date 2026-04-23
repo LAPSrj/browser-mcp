@@ -17,6 +17,10 @@ const BUILTIN_PLUGINS: Record<string, () => Promise<ScreenshotPlugin>> = {
     const mod = await import("./wp-gutenberg/index.js");
     return mod.default;
   },
+  "design-compare": async () => {
+    const mod = await import("./design-compare/index.js");
+    return mod.default;
+  },
 };
 
 /**
