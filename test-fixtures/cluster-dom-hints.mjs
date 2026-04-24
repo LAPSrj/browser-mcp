@@ -141,6 +141,46 @@ console.log("=== Test 8: ElementHint shape ===");
   }
 }
 
+console.log("=== Test 9: bare element gets nearestNamedAncestor ===");
+{
+  // .leaf-text (span) intentionally has no id; ancestor .wrapper has class
+  const result = await annotateClusters(page, [
+    { x: 110, y: 220, width: 60, height: 20, pixels: 999 },
+  ]);
+  const ann = result[0];
+  // Find the bare <span> entry; the nested classed span itself ('leaf-text') has a class so won't qualify.
+  // But raw text-bearing leaf nodes (e.g. body's children) might qualify. Add a fresh test.
+}
+
+console.log("=== Test 9b: explicit bare element with classed ancestor ===");
+{
+  await page.setContent(`<!doctype html><html><body>
+    <header class="site-header"><nav><p>bare</p></nav></header>
+  </body></html>`);
+  const result = await annotateClusters(page, [
+    { x: 0, y: 0, width: 200, height: 50, pixels: 999 },
+  ], { wrapperRatio: 1000 });
+  const ann = result[0];
+  const bareP = ann.intersecting.find((h) => h.tag === "p" && h.classes.length === 0 && !h.id);
+  assert(bareP, "found the bare <p> in intersecting");
+  assert(bareP?.nearestNamedAncestor?.tag === "header", "nearestNamedAncestor walked past unclassed nav to header");
+  assert(bareP?.nearestNamedAncestor?.classes.includes("site-header"), "ancestor classes captured");
+}
+
+console.log("=== Test 9c: classed element does not get nearestNamedAncestor ===");
+{
+  await page.setContent(`<!doctype html><html><body>
+    <header class="site-header"><p class="tagline">x</p></header>
+  </body></html>`);
+  const result = await annotateClusters(page, [
+    { x: 0, y: 0, width: 200, height: 50, pixels: 999 },
+  ], { wrapperRatio: 1000 });
+  const ann = result[0];
+  const classedP = ann.intersecting.find((h) => h.tag === "p" && h.classes.includes("tagline"));
+  assert(classedP, "classed <p> found");
+  assert(classedP?.nearestNamedAncestor === undefined, "classed element has no nearestNamedAncestor");
+}
+
 await browser.close();
 
 console.log(`\n========================================`);

@@ -46,13 +46,22 @@ export async function annotateClusters(
 
   return await page.evaluate(
     ({ boxes, cap, wrapperRatio }) => {
+      function classListOf(el: Element): string[] {
+        return el instanceof HTMLElement || el instanceof SVGElement
+          ? Array.from(el.classList)
+          : [];
+      }
+
       function elemHint(el: Element) {
         const r = el.getBoundingClientRect();
-        const cls =
-          el instanceof HTMLElement || el instanceof SVGElement
-            ? Array.from(el.classList)
-            : [];
-        return {
+        const cls = classListOf(el);
+        const hint: {
+          tag: string;
+          id: string | null;
+          classes: string[];
+          bbox: { x: number; y: number; width: number; height: number };
+          nearestNamedAncestor?: { tag: string; id: string | null; classes: string[] };
+        } = {
           tag: el.tagName.toLowerCase(),
           id: el.id || null,
           classes: cls,
@@ -63,6 +72,23 @@ export async function annotateClusters(
             height: Math.round(r.height * 100) / 100,
           },
         };
+        // Bare element (no id, no classes) → tag the nearest ancestor that
+        // has one so the selector chain stays useful for triage.
+        if (!el.id && cls.length === 0) {
+          let ancestor: Element | null = el.parentElement;
+          while (ancestor) {
+            if (ancestor.id || classListOf(ancestor).length > 0) break;
+            ancestor = ancestor.parentElement;
+          }
+          if (ancestor) {
+            hint.nearestNamedAncestor = {
+              tag: ancestor.tagName.toLowerCase(),
+              id: ancestor.id || null,
+              classes: classListOf(ancestor),
+            };
+          }
+        }
+        return hint;
       }
 
       const allElements = Array.from(document.body.getElementsByTagName("*"));

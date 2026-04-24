@@ -17,6 +17,16 @@ export interface ElementHint {
   intersectionArea?: number;
   /** intersectionArea / elementArea, in [0, 1]. */
   intersectionRatio?: number;
+  /**
+   * For bare elements (no id, no classes), the nearest ancestor that does
+   * have one. Lets formatters render `header.site-header > p` instead of
+   * just `p`. Omitted when the element itself carries an id or class.
+   */
+  nearestNamedAncestor?: {
+    tag: string;
+    id: string | null;
+    classes: string[];
+  };
 }
 
 export interface ClusterAnnotation {
@@ -146,7 +156,11 @@ export function formatClusters(
 }
 
 function formatElementSelector(h: ElementHint): string {
-  const id = h.id ? `#${h.id}` : "";
-  const cls = h.classes.length > 0 ? "." + h.classes.slice(0, 3).join(".") : "";
-  return `${h.tag}${id}${cls}`;
+  const self = `${h.tag}${h.id ? `#${h.id}` : ""}${h.classes.length > 0 ? "." + h.classes.slice(0, 3).join(".") : ""}`;
+  if (!h.id && h.classes.length === 0 && h.nearestNamedAncestor) {
+    const a = h.nearestNamedAncestor;
+    const aSel = `${a.tag}${a.id ? `#${a.id}` : ""}${a.classes.length > 0 ? "." + a.classes.slice(0, 3).join(".") : ""}`;
+    return `${aSel} > ${h.tag}`;
+  }
+  return self;
 }
