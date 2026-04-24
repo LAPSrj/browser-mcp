@@ -10,6 +10,7 @@ import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
 import { collectMaskRegions, applyMask, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
+import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
 
 export interface CompareElementParams {
@@ -307,6 +308,10 @@ export async function compareElementTool(params: CompareElementParams) {
     const isMatch = diffPercentage <= maxDiffPercent;
 
     const clusters = findDiffClusters(diff, { topN: 5 });
+    const clusterAnnotations = await annotateClusters(session.page, clusters, {
+      offsetX: cropX,
+      offsetY: cropY,
+    });
 
     const pageCropBuffer = PNG.sync.write(pageCrop);
     const refCropBuffer = PNG.sync.write(refCrop);
@@ -359,7 +364,7 @@ export async function compareElementTool(params: CompareElementParams) {
         `  Element box: x=${Math.floor(box.x)} y=${Math.floor(box.y)} w=${Math.ceil(box.width)} h=${Math.ceil(box.height)}`,
         `  Crop region (with ${padding}px padding): x=${cropX} y=${cropY} w=${cropW} h=${cropH}`,
         ...(aligned ? [`  Reference crop origin (aligned): x=${refCropX} y=${refCropY}`] : []),
-        ...formatClusters(clusters, cropX, cropY),
+        ...formatClusters(clusters, cropX, cropY, clusterAnnotations),
         `  Reference: ${referenceImage}`,
         `  Cropped reference saved: ${refCropPath}`,
         `  Cropped screenshot saved: ${actualPath}`,
@@ -370,6 +375,12 @@ export async function compareElementTool(params: CompareElementParams) {
     });
     if (alignInfo) {
       content.push({ type: "text", text: alignInfo });
+    }
+    if (clusterAnnotations.length > 0) {
+      content.push({
+        type: "text",
+        text: `clusterAnnotations:\n${JSON.stringify(clusterAnnotations, null, 2)}`,
+      });
     }
 
     return { content };

@@ -10,6 +10,7 @@ import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
 import { collectMaskRegions, applyMask, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
+import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
 
 export interface CompareScreenshotParams {
@@ -150,6 +151,9 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     const isMatch = diffPercentage <= maxDiffPercent;
 
     const clusters = findDiffClusters(diff, { topN: 5 });
+    const clusterAnnotations = await annotateClusters(session.page, clusters, {
+      offsetY: clipY,
+    });
 
     const diffBuffer = PNG.sync.write(diff);
     const diffFilename = generateFilename({ prefix: "compare-diff", browser, extension: "png" });
@@ -182,7 +186,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
         ...maskRegions
           .filter((r) => r.reason)
           .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`),
-        ...formatClusters(clusters),
+        ...formatClusters(clusters, 0, clipY, clusterAnnotations),
         `  Reference: ${referenceImage}`,
         `  Screenshot saved: ${screenshotPath}`,
         `  Screenshot preview (small): ${screenshotPreviewPath}`,
@@ -190,6 +194,12 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
         `  Diff preview (small): ${diffPreviewPath}`,
       ].join("\n"),
     });
+    if (clusterAnnotations.length > 0) {
+      content.push({
+        type: "text",
+        text: `clusterAnnotations:\n${JSON.stringify(clusterAnnotations, null, 2)}`,
+      });
+    }
 
     return { content };
   } finally {

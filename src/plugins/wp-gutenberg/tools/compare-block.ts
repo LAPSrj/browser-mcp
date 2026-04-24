@@ -15,6 +15,7 @@ import {
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
+import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 
 /**
  * Composite: (post_id, block identifier, referenceImage) → (score, diff PNG,
@@ -212,6 +213,10 @@ export function createCompareBlockHandler(
       const diffPercentage = (mismatchedPixels / totalPixels) * 100;
       const isMatch = diffPercentage <= maxDiffPercent;
       const clusters = findDiffClusters(diff, { topN: 5 });
+      const clusterAnnotations = await annotateClusters(session.page, clusters, {
+        offsetX: clipX,
+        offsetY: clipY,
+      });
 
       const frontendFilename = core.generateFilename({ prefix: "gutenberg-compare-frontend", browser: "chromium", extension: "png" });
       const frontendPath = await core.saveFile(path.join(outputDir, frontendFilename), frontendBuffer);
@@ -239,6 +244,7 @@ export function createCompareBlockHandler(
         client_id: targetClientId,
         block_anchor: block_anchor ?? null,
         diff_clusters: clusters,
+        cluster_annotations: clusterAnnotations,
         frontend_png: frontendPath,
         diff_png: diffPath,
         diff_preview: diffPreviewPath,
@@ -247,7 +253,7 @@ export function createCompareBlockHandler(
       return {
         content: [
           { type: "text", text: JSON.stringify(payload, null, 2) },
-          { type: "text", text: formatClusters(clusters).join("\n") || "(no significant diff clusters)" },
+          { type: "text", text: formatClusters(clusters, clipX, clipY, clusterAnnotations).join("\n") || "(no significant diff clusters)" },
         ],
       };
     } finally {

@@ -8,7 +8,8 @@ import { launchSession, closeSession, type BrowserName } from "../../../utils/br
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
-import { findDiffClusters, type DiffCluster } from "../../../utils/diff-clusters.js";
+import { findDiffClusters, type DiffCluster, type ElementHint } from "../../../utils/diff-clusters.js";
+import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type {
   DesignCompareElement,
   LayoutChecks,
@@ -108,19 +109,16 @@ interface ContainmentResult {
   overflow?: { top?: number; right?: number; bottom?: number; left?: number };
 }
 
-interface DomHint {
-  tag: string;
-  classes: string[];
-  id?: string;
-}
-
 interface CrossCheckCluster {
   cluster: BoundingBox;
   pixels: number;
   overlapsElements: string[];
   mismatches: string[];
   status: "explained" | "excluded" | "unexplained";
-  domHints?: DomHint[];
+  /** elementsFromPoint at cluster center, top 5 stacked. Populated for unexplained clusters. */
+  domHints?: ElementHint[];
+  /** Bbox-intersection candidates ranked by impact. Populated for unexplained clusters. */
+  intersecting?: ElementHint[];
   note?: string;
 }
 
@@ -744,7 +742,7 @@ export async function designAuditTool(params: DesignAuditParams) {
       }
     }
 
-    // Re-query root bbox for domHints (screenshot may have scrolled the page)
+    // Re-query root bbox for cluster annotation (screenshot may have scrolled the page)
     const postScrollRootBbox: BoundingBox | null = await session.page.evaluate((sel) => {
       let el: Element | null;
       try { el = document.querySelector(sel); } catch { return null; }
@@ -757,31 +755,12 @@ export async function designAuditTool(params: DesignAuditParams) {
         height: Math.round(rect.height * 100) / 100,
       };
     }, rootSelector);
-    const domHintsRoot = postScrollRootBbox ?? rootBbox;
+    const annotationRoot = postScrollRootBbox ?? rootBbox;
 
-    const clusterCenters = clusters.map((c) => ({
-      x: domHintsRoot.x + c.x + c.width / 2,
-      y: domHintsRoot.y + c.y + c.height / 2,
-    }));
-    const domHintsRaw: Array<DomHint[]> = await session.page.evaluate(
-      (centers) => centers.map((pt) => {
-        const els = document.elementsFromPoint(pt.x, pt.y);
-        const hints: Array<{ tag: string; classes: string[]; id?: string }> = [];
-        const seen = new Set<Element>();
-        for (const el of els.slice(0, 5)) {
-          if (seen.has(el)) continue;
-          seen.add(el);
-          const hint: { tag: string; classes: string[]; id?: string } = {
-            tag: el.tagName.toLowerCase(),
-            classes: [...el.classList],
-          };
-          if (el.id) hint.id = el.id;
-          hints.push(hint);
-        }
-        return hints;
-      }),
-      clusterCenters,
-    );
+    const annotations = await annotateClusters(session.page, clusters, {
+      offsetX: annotationRoot.x,
+      offsetY: annotationRoot.y,
+    });
 
     const crossCheck: CrossCheckCluster[] = clusters.map((cluster, ci) => {
       const clusterBox: BoundingBox = { x: cluster.x, y: cluster.y, width: cluster.width, height: cluster.height };
@@ -814,7 +793,11 @@ export async function designAuditTool(params: DesignAuditParams) {
       };
 
       if (status === "unexplained") {
-        result.domHints = domHintsRaw[ci] ?? [];
+        const ann = annotations[ci];
+        if (ann) {
+          result.domHints = ann.centerStack;
+          result.intersecting = ann.intersecting;
+        }
         result.note = overlapping.length > 0
           ? "Visual mismatch not explained by property comparison — investigate pseudo-element, cascade, or compositional issue"
           : "Visual mismatch in area with no compared elements — check for missing element in elements[] array";

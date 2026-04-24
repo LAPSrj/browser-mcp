@@ -8,6 +8,26 @@ export interface DiffCluster {
   pixels: number;
 }
 
+export interface ElementHint {
+  tag: string;
+  id: string | null;
+  classes: string[];
+  bbox: { x: number; y: number; width: number; height: number };
+  /** Present in `intersecting` lists; absent in `centerStack`. */
+  intersectionArea?: number;
+  /** intersectionArea / elementArea, in [0, 1]. */
+  intersectionRatio?: number;
+}
+
+export interface ClusterAnnotation {
+  /** Cluster bbox in page coords (post-offset). */
+  cluster: { x: number; y: number; width: number; height: number };
+  /** elementsFromPoint at cluster center, top 5 stacked. */
+  centerStack: ElementHint[];
+  /** Elements whose bbox intersects the cluster, filtered + ranked by intersectionRatio. */
+  intersecting: ElementHint[];
+}
+
 /**
  * Identify contiguous diff regions in a pixelmatch diff image.
  *
@@ -98,7 +118,12 @@ export function findDiffClusters(
   return clusters.slice(0, topN);
 }
 
-export function formatClusters(clusters: DiffCluster[], offsetX = 0, offsetY = 0): string[] {
+export function formatClusters(
+  clusters: DiffCluster[],
+  offsetX = 0,
+  offsetY = 0,
+  annotations?: ClusterAnnotation[],
+): string[] {
   if (clusters.length === 0) return [];
   const lines = [`  Top ${clusters.length} diff cluster${clusters.length === 1 ? "" : "s"}:`];
   for (let i = 0; i < clusters.length; i++) {
@@ -106,6 +131,22 @@ export function formatClusters(clusters: DiffCluster[], offsetX = 0, offsetY = 0
     lines.push(
       `    [${i + 1}] ${c.pixels}px at x=${c.x + offsetX} y=${c.y + offsetY} w=${c.width} h=${c.height}`,
     );
+    const ann = annotations?.[i];
+    if (ann && ann.intersecting.length > 0) {
+      const top = ann.intersecting.slice(0, 4);
+      lines.push(
+        `        intersecting (${ann.intersecting.length} total, top ${top.length}):`,
+      );
+      for (const h of top) {
+        lines.push(`          ${formatElementSelector(h)}`);
+      }
+    }
   }
   return lines;
+}
+
+function formatElementSelector(h: ElementHint): string {
+  const id = h.id ? `#${h.id}` : "";
+  const cls = h.classes.length > 0 ? "." + h.classes.slice(0, 3).join(".") : "";
+  return `${h.tag}${id}${cls}`;
 }
