@@ -30,12 +30,26 @@ export interface ElementHint {
 }
 
 export interface ClusterAnnotation {
-  /** Cluster bbox in page coords (post-offset). */
+  /**
+   * Cluster bbox in the SAME coordinate space as the input cluster
+   * (diff-image / element-relative). All bboxes on centerStack, intersecting,
+   * and containerHint live in this frame too.
+   */
   cluster: { x: number; y: number; width: number; height: number };
   /** elementsFromPoint at cluster center, top 5 stacked. */
   centerStack: ElementHint[];
   /** Elements whose bbox intersects the cluster, filtered + ranked by intersectionRatio. */
   intersecting: ElementHint[];
+  /**
+   * Fallback when both centerStack and intersecting are empty — the smallest
+   * element that fully contains the cluster (no wrapper-ratio filter), plus
+   * the cluster's offset inside it. Lets triage land somewhere concrete
+   * when the diff is in a pseudo-element / background-only region that has
+   * no finer-grained DOM node intersecting it.
+   */
+  containerHint?: ElementHint & {
+    offsetWithin: { x: number; y: number };
+  };
 }
 
 /**

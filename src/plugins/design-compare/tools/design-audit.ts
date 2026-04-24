@@ -119,6 +119,12 @@ interface CrossCheckCluster {
   domHints?: ElementHint[];
   /** Bbox-intersection candidates ranked by impact. Populated for unexplained clusters. */
   intersecting?: ElementHint[];
+  /**
+   * Fallback element when domHints and intersecting are both empty — the
+   * smallest fully-containing element plus the cluster's offset inside it.
+   * Populated only when the primary hints come up empty.
+   */
+  containerHint?: ElementHint & { offsetWithin: { x: number; y: number } };
   note?: string;
 }
 
@@ -142,6 +148,20 @@ interface AuditResult {
     explainedClusters: number;
     excludedClusters: number;
     unexplainedClusters: number;
+    /**
+     * Populated when the captured element screenshot and the reference image
+     * have different dimensions. The pixelmatch step auto-crops to the min
+     * dimensions, so clusters may fall outside the comparable region; a
+     * deltaPct over ~5 usually means the reference isn't comparable as-is.
+     */
+    dimensionMismatch?: {
+      live: { width: number; height: number };
+      ref: { width: number; height: number };
+      deltaW: number;
+      deltaH: number;
+      deltaPctW: number;
+      deltaPctH: number;
+    };
   };
   designCompare: {
     elements: ElementStyleResult[];
@@ -694,6 +714,22 @@ export async function designAuditTool(params: DesignAuditParams) {
     const liveImg = PNG.sync.read(screenshotBuffer);
     const refImg = PNG.sync.read(refBuffer);
 
+    let dimensionMismatch: AuditResult["summary"]["dimensionMismatch"];
+    if (liveImg.width !== refImg.width || liveImg.height !== refImg.height) {
+      const deltaW = liveImg.width - refImg.width;
+      const deltaH = liveImg.height - refImg.height;
+      const baseW = Math.max(liveImg.width, refImg.width);
+      const baseH = Math.max(liveImg.height, refImg.height);
+      dimensionMismatch = {
+        live: { width: liveImg.width, height: liveImg.height },
+        ref: { width: refImg.width, height: refImg.height },
+        deltaW,
+        deltaH,
+        deltaPctW: baseW > 0 ? Math.round((Math.abs(deltaW) / baseW) * 1000) / 10 : 0,
+        deltaPctH: baseH > 0 ? Math.round((Math.abs(deltaH) / baseH) * 1000) / 10 : 0,
+      };
+    }
+
     // Auto-crop to smaller dimensions
     let imgA: PNG = liveImg;
     let imgB: PNG = refImg;
@@ -797,6 +833,7 @@ export async function designAuditTool(params: DesignAuditParams) {
         if (ann) {
           result.domHints = ann.centerStack;
           result.intersecting = ann.intersecting;
+          if (ann.containerHint) result.containerHint = ann.containerHint;
         }
         result.note = overlapping.length > 0
           ? "Visual mismatch not explained by property comparison — investigate pseudo-element, cascade, or compositional issue"
@@ -885,6 +922,7 @@ export async function designAuditTool(params: DesignAuditParams) {
         explainedClusters,
         excludedClusters,
         unexplainedClusters,
+        ...(dimensionMismatch ? { dimensionMismatch } : {}),
       },
       designCompare: {
         elements: elementResults,

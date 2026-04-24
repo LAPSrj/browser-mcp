@@ -99,17 +99,22 @@ console.log("=== Test 5: wrapperRatio relaxed lets wrapper in ===");
   assert(hasWrapper, "wrapper-class div now appears with relaxed ratio");
 }
 
-console.log("=== Test 6: offset translates cluster coords ===");
+console.log("=== Test 6: offset resolves hits; output coords stay in cluster frame ===");
 {
   // Pretend caller passes diff-image-space cluster; offset shifts to page
+  // for hit-testing but returned bboxes normalize BACK to cluster frame.
   const result = await annotateClusters(
     page,
     [{ x: 0, y: 0, width: 200, height: 50, pixels: 9999 }],
     { offsetX: 100, offsetY: 100 },
   );
   const ann = result[0];
-  assert(ann.cluster.x === 100 && ann.cluster.y === 100, "offset applied to cluster bbox");
+  assert(ann.cluster.x === 0 && ann.cluster.y === 0, "cluster bbox stays in input (diff-image) frame");
   assert(ann.intersecting[0]?.id === "row-a", "offset annotation hits row-a");
+  // row-a page coords: left=100, top=100. With offset 100,100 it should render as 0,0 in cluster frame.
+  const hitBbox = ann.intersecting[0].bbox;
+  assert(hitBbox.x === 0 && hitBbox.y === 0,
+    `intersecting bbox normalized to cluster frame (got x=${hitBbox.x}, y=${hitBbox.y})`);
 }
 
 console.log("=== Test 7: cluster outside DOM returns empty intersecting ===");
@@ -179,6 +184,36 @@ console.log("=== Test 9c: classed element does not get nearestNamedAncestor ==="
   const classedP = ann.intersecting.find((h) => h.tag === "p" && h.classes.includes("tagline"));
   assert(classedP, "classed <p> found");
   assert(classedP?.nearestNamedAncestor === undefined, "classed element has no nearestNamedAncestor");
+}
+
+console.log("=== Test 10: containerHint fallback when all hints are filtered out ===");
+{
+  // Cluster small enough that only the big .wrapper contains it, and
+  // wrapperRatio default (2) filters .wrapper out. Place cluster in an
+  // empty corner of .wrapper so no .row / #tiny / .leaf-text intersects.
+  await page.setContent(html);
+  const result = await annotateClusters(page, [
+    { x: 800, y: 800, width: 20, height: 10, pixels: 200 },
+  ]);
+  const ann = result[0];
+  assert(ann.intersecting.length === 0, "no intersecting hits after wrapper filter");
+  assert(ann.containerHint, "containerHint populated as fallback");
+  assert(ann.containerHint?.classes?.includes("wrapper"), ".wrapper selected as smallest container");
+  assert(ann.containerHint?.offsetWithin &&
+    ann.containerHint.offsetWithin.x === 800 &&
+    ann.containerHint.offsetWithin.y === 800,
+    `offsetWithin relative to container origin (got ${JSON.stringify(ann.containerHint?.offsetWithin)})`);
+}
+
+console.log("=== Test 11: containerHint absent when intersecting has hits ===");
+{
+  await page.setContent(html);
+  const result = await annotateClusters(page, [
+    { x: 100, y: 100, width: 200, height: 50, pixels: 9999 },
+  ]);
+  const ann = result[0];
+  assert(ann.intersecting.length > 0, "intersecting populated");
+  assert(ann.containerHint === undefined, "containerHint not set when primary hints exist");
 }
 
 await browser.close();

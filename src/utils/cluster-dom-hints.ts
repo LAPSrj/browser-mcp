@@ -23,7 +23,10 @@ export interface AnnotateClustersOptions {
  * preview as ground truth.
  *
  * Cluster coords are passed in diff-image space; `offsetX`/`offsetY`
- * translate to page space for `getBoundingClientRect` comparisons.
+ * translate to page space for `getBoundingClientRect` comparisons. All
+ * returned bboxes are translated BACK to diff-image space so they share
+ * a coordinate system with the input cluster — callers can overlay them
+ * directly without offset arithmetic.
  */
 export async function annotateClusters(
   page: Page,
@@ -45,7 +48,7 @@ export async function annotateClusters(
   }));
 
   return await page.evaluate(
-    ({ boxes, cap, wrapperRatio }) => {
+    ({ boxes, cap, wrapperRatio, offsetX, offsetY }) => {
       function classListOf(el: Element): string[] {
         return el instanceof HTMLElement || el instanceof SVGElement
           ? Array.from(el.classList)
@@ -66,14 +69,12 @@ export async function annotateClusters(
           id: el.id || null,
           classes: cls,
           bbox: {
-            x: Math.round(r.left * 100) / 100,
-            y: Math.round(r.top * 100) / 100,
+            x: Math.round((r.left - offsetX) * 100) / 100,
+            y: Math.round((r.top - offsetY) * 100) / 100,
             width: Math.round(r.width * 100) / 100,
             height: Math.round(r.height * 100) / 100,
           },
         };
-        // Bare element (no id, no classes) → tag the nearest ancestor that
-        // has one so the selector chain stays useful for triage.
         if (!el.id && cls.length === 0) {
           let ancestor: Element | null = el.parentElement;
           while (ancestor) {
@@ -113,6 +114,7 @@ export async function annotateClusters(
           intersectionArea: number;
           intersectionRatio: number;
         }> = [];
+        const containingCandidates: Array<{ el: Element; elementArea: number }> = [];
 
         for (const el of allElements) {
           const r = el.getBoundingClientRect();
@@ -128,6 +130,17 @@ export async function annotateClusters(
           if (intersectionArea < 1) continue;
 
           const elementArea = r.width * r.height;
+
+          // Track every fully-containing element for the fallback hint.
+          if (
+            r.left <= cb.x &&
+            r.top <= cb.y &&
+            r.left + r.width >= cb.x + cb.width &&
+            r.top + r.height >= cb.y + cb.height
+          ) {
+            containingCandidates.push({ el, elementArea });
+          }
+
           if (elementArea > wrapperRatio * clusterArea) continue;
 
           candidates.push({
@@ -147,9 +160,36 @@ export async function annotateClusters(
             intersectionRatio: Math.round(intersectionRatio * 1000) / 1000,
           }));
 
-        return { cluster: cb, centerStack, intersecting };
+        const annotation: ClusterAnnotation = {
+          cluster: {
+            x: Math.round((cb.x - offsetX) * 100) / 100,
+            y: Math.round((cb.y - offsetY) * 100) / 100,
+            width: cb.width,
+            height: cb.height,
+          },
+          centerStack,
+          intersecting,
+        };
+
+        // Fallback: both advisory lists empty → pick the smallest fully-
+        // containing element so triage has somewhere to land.
+        if (centerStack.length === 0 && intersecting.length === 0 && containingCandidates.length > 0) {
+          containingCandidates.sort((a, b) => a.elementArea - b.elementArea);
+          const chosen = containingCandidates[0];
+          const chosenRect = chosen.el.getBoundingClientRect();
+          const hint = elemHint(chosen.el);
+          annotation.containerHint = {
+            ...hint,
+            offsetWithin: {
+              x: Math.round((cb.x - chosenRect.left) * 100) / 100,
+              y: Math.round((cb.y - chosenRect.top) * 100) / 100,
+            },
+          };
+        }
+
+        return annotation;
       });
     },
-    { boxes: pageBoxes, cap, wrapperRatio },
+    { boxes: pageBoxes, cap, wrapperRatio, offsetX, offsetY },
   );
 }
