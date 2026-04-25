@@ -8,7 +8,7 @@ import { launchSession, closeSession, type BrowserName } from "../../../utils/br
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
-import { collectMaskRegions, applyMask, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
+import { collectMaskRegions, applyMask, computeMaskCoverage, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
@@ -129,6 +129,9 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     }
 
     const clipY = startY ?? 0;
+    const maskCoverage = maskRegions.length > 0
+      ? computeMaskCoverage(maskRegions, { x: 0, y: clipY, width: pageImg.width, height: pageImg.height })
+      : 0;
     if (maskRegions.length > 0) {
       applyMask(pageImg, maskRegions, 0, clipY);
       applyMask(refImg, maskRegions, 0, clipY);
@@ -182,7 +185,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
         `  Mode: ${mode}`,
         `  Threshold: ${threshold}`,
         `  Max diff: ${maxDiffPercent}%`,
-        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`] : []),
+        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
         ...maskRegions
           .filter((r) => r.reason)
           .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`),
@@ -194,6 +197,17 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
         `  Diff preview (small): ${diffPreviewPath}`,
       ].join("\n"),
     });
+    if (maskCoverage > 60 && ignoreAllImages && ignoreText) {
+      content.push({
+        type: "text",
+        text: `⚠ mask coverage ${maskCoverage.toFixed(1)}% with ignoreAllImages + ignoreText — this is the mask-pair-fabrication fingerprint. Re-run unmasked and report both scores.`,
+      });
+    } else if (maskCoverage > 50) {
+      content.push({
+        type: "text",
+        text: `⚠ mask coverage ${maskCoverage.toFixed(1)}% exceeds 50% — verify the diff is measuring meaningful surface area before trusting the score.`,
+      });
+    }
     if (clusterAnnotations.length > 0) {
       content.push({
         type: "text",

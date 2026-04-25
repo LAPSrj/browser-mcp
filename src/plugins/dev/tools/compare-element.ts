@@ -8,7 +8,7 @@ import { launchSession, closeSession, type BrowserName } from "../../../utils/br
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
-import { collectMaskRegions, applyMask, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
+import { collectMaskRegions, applyMask, computeMaskCoverage, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
@@ -288,6 +288,10 @@ export async function compareElementTool(params: CompareElementParams) {
 
     const refCrop = cropPng(refImg, refCropX, refCropY, cropW, cropH);
 
+    const maskCoverage = maskRegions.length > 0
+      ? computeMaskCoverage(maskRegions, { x: cropX, y: cropY, width: cropW, height: cropH })
+      : 0;
+
     if (maskRegions.length > 0) {
       applyMask(pageCrop, maskRegions, refCropX, refCropY);
       applyMask(refCrop, maskRegions, refCropX, refCropY);
@@ -338,6 +342,18 @@ export async function compareElementTool(params: CompareElementParams) {
       .filter((r) => r.reason)
       .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`);
 
+    const broadMaskFlagsActive = !!(ignoreAllImages && ignoreText);
+    const maskCoverageWarnings: string[] = [];
+    if (maskCoverage > 60 && broadMaskFlagsActive) {
+      maskCoverageWarnings.push(
+        `⚠ mask coverage ${maskCoverage.toFixed(1)}% with ignoreAllImages + ignoreText — this is the mask-pair-fabrication fingerprint. Re-run unmasked and report both scores.`,
+      );
+    } else if (maskCoverage > 50) {
+      maskCoverageWarnings.push(
+        `⚠ mask coverage ${maskCoverage.toFixed(1)}% exceeds 50% — verify the diff is measuring meaningful surface area before trusting the score.`,
+      );
+    }
+
     const content: Array<{ type: string; text: string }> = [];
     if (actionStopMsg) {
       content.push({ type: "text", text: actionStopMsg });
@@ -359,7 +375,7 @@ export async function compareElementTool(params: CompareElementParams) {
         `  Bounds handling: ${boundsHandling}`,
         `  Threshold: ${threshold}`,
         `  Max diff: ${maxDiffPercent}%`,
-        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`] : []),
+        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
         ...(maskSummary.length > 0 ? [`  Masked region reasons:`, ...maskSummary] : []),
         `  Element box: x=${Math.floor(box.x)} y=${Math.floor(box.y)} w=${Math.ceil(box.width)} h=${Math.ceil(box.height)}`,
         `  Crop region (with ${padding}px padding): x=${cropX} y=${cropY} w=${cropW} h=${cropH}`,
@@ -375,6 +391,9 @@ export async function compareElementTool(params: CompareElementParams) {
     });
     if (alignInfo) {
       content.push({ type: "text", text: alignInfo });
+    }
+    for (const w of maskCoverageWarnings) {
+      content.push({ type: "text", text: w });
     }
     if (clusterAnnotations.length > 0) {
       content.push({

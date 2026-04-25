@@ -124,6 +124,59 @@ export async function collectMaskRegions(
   return regions;
 }
 
+export interface CoverageBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+// Returns percentage (0-100, 1 decimal) of `bounds` covered by the union of
+// `regions`. Overlapping regions are deduplicated via a coverage bitmap, so a
+// child mask + parent mask of the same area do not double-count. Regions are
+// intersected with `bounds` before being counted — masks that extend outside
+// the comparison area only contribute their inside-bounds portion.
+export function computeMaskCoverage(
+  regions: MaskRegion[],
+  bounds: CoverageBounds,
+): number {
+  const w = Math.max(0, Math.floor(bounds.width));
+  const h = Math.max(0, Math.floor(bounds.height));
+  if (w === 0 || h === 0 || regions.length === 0) return 0;
+
+  const bitmap = new Uint8Array(w * h);
+  const bx0 = bounds.x;
+  const by0 = bounds.y;
+  const bx1 = bounds.x + bounds.width;
+  const by1 = bounds.y + bounds.height;
+
+  for (const region of regions) {
+    const rx0 = Math.max(bx0, region.x);
+    const ry0 = Math.max(by0, region.y);
+    const rx1 = Math.min(bx1, region.x + region.width);
+    const ry1 = Math.min(by1, region.y + region.height);
+    if (rx1 <= rx0 || ry1 <= ry0) continue;
+
+    const x0 = Math.floor(rx0 - bx0);
+    const y0 = Math.floor(ry0 - by0);
+    const x1 = Math.min(w, Math.ceil(rx1 - bx0));
+    const y1 = Math.min(h, Math.ceil(ry1 - by0));
+
+    for (let y = y0; y < y1; y++) {
+      const rowOff = y * w;
+      for (let x = x0; x < x1; x++) {
+        bitmap[rowOff + x] = 1;
+      }
+    }
+  }
+
+  let covered = 0;
+  for (let i = 0; i < bitmap.length; i++) {
+    if (bitmap[i]) covered++;
+  }
+  return Math.round((covered / (w * h)) * 1000) / 10;
+}
+
 export function applyMask(
   png: PNG,
   regions: MaskRegion[],
