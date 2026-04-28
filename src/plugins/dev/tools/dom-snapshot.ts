@@ -9,6 +9,7 @@ export interface DomSnapshotParams {
   maxDepth?: number;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
+  summaryOnly?: boolean;
 }
 
 interface DomNode {
@@ -26,6 +27,7 @@ export async function domSnapshotTool(params: DomSnapshotParams) {
     maxDepth = 5,
     actions = [],
     useBrowserStack = false,
+    summaryOnly = false,
   } = params;
 
   const session = await launchSession({
@@ -104,9 +106,54 @@ export async function domSnapshotTool(params: DomSnapshotParams) {
       return { content };
     }
 
-    content.push({ type: "text", text: JSON.stringify(tree, null, 2) });
+    if (summaryOnly) {
+      const stats = summarizeTree(tree as Record<string, unknown>);
+      content.push({
+        type: "text",
+        text: JSON.stringify({
+          rootTag: (tree as { tag?: string }).tag ?? null,
+          totalNodes: stats.totalNodes,
+          maxDepthReached: stats.maxDepth,
+          truncatedBranches: stats.truncatedBranches,
+          byTag: stats.byTag,
+        }, null, 2),
+      });
+    } else {
+      content.push({ type: "text", text: JSON.stringify(tree, null, 2) });
+    }
     return { content };
   } finally {
     await closeSession(session);
   }
+}
+
+function summarizeTree(node: Record<string, unknown>): {
+  totalNodes: number;
+  maxDepth: number;
+  truncatedBranches: number;
+  byTag: Record<string, number>;
+} {
+  const byTag: Record<string, number> = {};
+  let totalNodes = 0;
+  let maxDepth = 0;
+  let truncatedBranches = 0;
+
+  function walk(n: Record<string, unknown>, depth: number) {
+    totalNodes++;
+    if (depth > maxDepth) maxDepth = depth;
+    const tag = typeof n.tag === "string" ? n.tag : "?";
+    byTag[tag] = (byTag[tag] ?? 0) + 1;
+    const children = n.children;
+    if (Array.isArray(children)) {
+      for (const c of children) {
+        if (c && typeof c === "object") walk(c as Record<string, unknown>, depth + 1);
+      }
+    } else if (typeof children === "string") {
+      // "[N children truncated]" sentinel from the in-page walker.
+      truncatedBranches++;
+    }
+  }
+
+  walk(node, 0);
+  return { totalNodes, maxDepth, truncatedBranches, byTag };
 }

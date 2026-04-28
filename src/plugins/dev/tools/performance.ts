@@ -8,6 +8,7 @@ export interface PerformanceMetricsParams {
   browser?: string;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
+  summaryOnly?: boolean;
 }
 
 export async function performanceMetricsTool(params: PerformanceMetricsParams) {
@@ -16,6 +17,7 @@ export async function performanceMetricsTool(params: PerformanceMetricsParams) {
     browser = "chromium",
     actions = [],
     useBrowserStack = false,
+    summaryOnly = false,
   } = params;
 
   const session = await launchSession({
@@ -102,7 +104,24 @@ export async function performanceMetricsTool(params: PerformanceMetricsParams) {
     if (assertionsMsg) {
       content.push({ type: "text", text: assertionsMsg });
     }
-    content.push({ type: "text", text: JSON.stringify(metrics, null, 2) });
+    if (summaryOnly) {
+      const fmt = (v: number | null) => v === null ? "?" : `${Math.round(v)}ms`;
+      content.push({
+        type: "text",
+        text: [
+          `LCP=${fmt(metrics.largestContentfulPaint)}`,
+          `FCP=${fmt(metrics.firstContentfulPaint)}`,
+          `TTFB=${fmt(metrics.timeToFirstByte)}`,
+          `DCL=${fmt(metrics.domContentLoaded)}`,
+          `Load=${fmt(metrics.loadTime)}`,
+          `CLS=${metrics.cumulativeLayoutShift === null ? "?" : metrics.cumulativeLayoutShift.toFixed(3)}`,
+          `TBT=${fmt(metrics.totalBlockingTime)}`,
+          `transfer=${metrics.transferSize === null ? "?" : `${metrics.transferSize}B`}`,
+        ].join(" | "),
+      });
+    } else {
+      content.push({ type: "text", text: JSON.stringify(metrics, null, 2) });
+    }
 
     return { content };
   } finally {

@@ -31,6 +31,8 @@ export interface AccessibilitySnapshotParams {
   assertRules?: A11yRuleName[];
   /** If true, omit the full tree output (useful when you only want assert results). */
   skipTree?: boolean;
+  /** Replace the full tree with a role/depth aggregate. Findings still surface in full. */
+  summaryOnly?: boolean;
 }
 
 interface A11yRuleFinding {
@@ -47,6 +49,7 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
     scope,
     assertRules,
     skipTree = false,
+    summaryOnly = false,
   } = params;
 
   const session = await launchSession({
@@ -79,6 +82,20 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
       const snapshot = await walkAccessibilityTree(session.page, scope);
       if (!snapshot) {
         content.push({ type: "text", text: "No accessibility tree available for this page." });
+      } else if (summaryOnly) {
+        const stats = summarizeA11yTree(snapshot as Record<string, unknown>);
+        content.push({
+          type: "text",
+          text: JSON.stringify({
+            rootRole: (snapshot as { role?: string }).role ?? null,
+            totalNodes: stats.totalNodes,
+            maxDepth: stats.maxDepth,
+            byRole: stats.byRole,
+            headingCount: stats.headingCount,
+            landmarkCount: stats.landmarkCount,
+            namedNodeCount: stats.namedNodeCount,
+          }, null, 2),
+        });
       } else {
         content.push({ type: "text", text: JSON.stringify(snapshot, null, 2) });
       }
@@ -210,3 +227,43 @@ function formatFindings(findings: A11yRuleFinding[]): string {
 }
 
 export const A11Y_RULE_NAMES = ALL_RULES;
+
+const LANDMARK_ROLES = new Set([
+  "banner", "complementary", "contentinfo", "form",
+  "main", "navigation", "region", "search",
+]);
+
+function summarizeA11yTree(node: Record<string, unknown>): {
+  totalNodes: number;
+  maxDepth: number;
+  byRole: Record<string, number>;
+  headingCount: number;
+  landmarkCount: number;
+  namedNodeCount: number;
+} {
+  const byRole: Record<string, number> = {};
+  let totalNodes = 0;
+  let maxDepth = 0;
+  let headingCount = 0;
+  let landmarkCount = 0;
+  let namedNodeCount = 0;
+
+  function walk(n: Record<string, unknown>, depth: number) {
+    totalNodes++;
+    if (depth > maxDepth) maxDepth = depth;
+    const role = typeof n.role === "string" ? n.role : "?";
+    byRole[role] = (byRole[role] ?? 0) + 1;
+    if (role === "heading") headingCount++;
+    if (LANDMARK_ROLES.has(role)) landmarkCount++;
+    if (typeof n.name === "string" && n.name.length > 0) namedNodeCount++;
+    const children = n.children;
+    if (Array.isArray(children)) {
+      for (const c of children) {
+        if (c && typeof c === "object") walk(c as Record<string, unknown>, depth + 1);
+      }
+    }
+  }
+
+  walk(node, 0);
+  return { totalNodes, maxDepth, byRole, headingCount, landmarkCount, namedNodeCount };
+}

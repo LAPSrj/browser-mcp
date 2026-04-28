@@ -7,6 +7,7 @@ export interface SchemaExtractParams {
   url: string;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
+  summaryOnly?: boolean;
 }
 
 interface SchemaBlock {
@@ -33,7 +34,7 @@ interface SchemaBlock {
  * repeated inside answer-text, empty values).
  */
 export async function schemaExtractTool(params: SchemaExtractParams) {
-  const { url, actions = [], useBrowserStack = false } = params;
+  const { url, actions = [], useBrowserStack = false, summaryOnly = false } = params;
 
   const session = await launchSession({
     browser: "chromium" as BrowserName,
@@ -132,7 +133,20 @@ export async function schemaExtractTool(params: SchemaExtractParams) {
       return { content };
     }
 
-    content.push({ type: "text", text: JSON.stringify({ summary, blocks }, null, 2) });
+    if (summaryOnly) {
+      // Drop `parsed` (the full JSON-LD body) and `rawPreview`; keep diagnostics.
+      const compactBlocks = blocks.map((b) => ({
+        index: b.index,
+        parseOk: b.parseOk,
+        ...(b.parseError ? { parseError: b.parseError } : {}),
+        rawLength: b.rawLength,
+        ...(b.types ? { types: b.types } : {}),
+        issues: b.issues,
+      }));
+      content.push({ type: "text", text: JSON.stringify({ summary, blocks: compactBlocks }, null, 2) });
+    } else {
+      content.push({ type: "text", text: JSON.stringify({ summary, blocks }, null, 2) });
+    }
     return { content };
   } finally {
     await closeSession(session);

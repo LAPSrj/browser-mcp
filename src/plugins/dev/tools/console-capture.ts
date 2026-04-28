@@ -12,6 +12,7 @@ export interface ConsoleCaptureParams {
   outputDir?: string;
   toFile?: boolean;
   useBrowserStack?: boolean;
+  summaryOnly?: boolean;
 }
 
 interface ConsoleEntry {
@@ -28,6 +29,7 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
     outputDir = ".browser",
     toFile = false,
     useBrowserStack = false,
+    summaryOnly = false,
   } = params;
 
   const session = await launchSession({
@@ -79,10 +81,27 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
     }
 
     if (consoleLogs.length > 0) {
-      content.push({
-        type: "text",
-        text: `Console logs (${consoleLogs.length} entries):\n${logText}`,
-      });
+      if (summaryOnly) {
+        const byType: Record<string, number> = {};
+        for (const l of consoleLogs) byType[l.type] = (byType[l.type] ?? 0) + 1;
+        const errorPreviews = consoleLogs
+          .filter((l) => l.type === "error" || l.type === "warning")
+          .slice(0, 5)
+          .map((l) => ({ type: l.type, text: l.text.slice(0, 200) }));
+        content.push({
+          type: "text",
+          text: JSON.stringify({
+            totalLogs: consoleLogs.length,
+            byType,
+            errorPreviews,
+          }, null, 2),
+        });
+      } else {
+        content.push({
+          type: "text",
+          text: `Console logs (${consoleLogs.length} entries):\n${logText}`,
+        });
+      }
     } else {
       content.push({
         type: "text",
@@ -91,10 +110,20 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
     }
 
     if (pageErrors.length > 0) {
-      content.push({
-        type: "text",
-        text: `Page errors (${pageErrors.length}):\n${pageErrors.join("\n")}`,
-      });
+      if (summaryOnly) {
+        content.push({
+          type: "text",
+          text: JSON.stringify({
+            pageErrors: pageErrors.length,
+            previews: pageErrors.slice(0, 5).map((e) => e.slice(0, 200)),
+          }, null, 2),
+        });
+      } else {
+        content.push({
+          type: "text",
+          text: `Page errors (${pageErrors.length}):\n${pageErrors.join("\n")}`,
+        });
+      }
     }
 
     if (toFile && consoleLogs.length > 0) {
