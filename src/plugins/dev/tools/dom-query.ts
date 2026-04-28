@@ -47,7 +47,10 @@ export interface DomQueryParams {
   waitForNetworkIdle?: boolean;
   delay?: number;
   queries: DomQuery[];
+  profile?: "walker";
 }
+
+const WALKER_PROFILE_DOM_QUERY_FIELDS: DomField[] = ["rect", "tag", "id", "classes", "text"];
 
 interface ElementData {
   rect?: { x: number; y: number; width: number; height: number; top: number; right: number; bottom: number; left: number };
@@ -337,13 +340,19 @@ export async function domQueryTool(params: DomQueryParams) {
     };
   }
 
+  // Profile-derived default for fields when caller doesn't set them per-query.
+  // Caller's per-query fields always wins.
+  const defaultFields: DomField[] = params.profile === "walker"
+    ? WALKER_PROFILE_DOM_QUERY_FIELDS
+    : ["rect", "tag"];
+
   // Pre-expand computed presets host-side; the page-side runner stays simple.
   const expanded = queries.map((q, i) => ({
     id: q.id ?? String(i),
     selector: q.selector,
     pseudoElement: q.pseudoElement,
     match: q.match ?? "first" as const,
-    fields: (q.fields ?? ["rect", "tag"]),
+    fields: (q.fields ?? defaultFields),
     computed: expandComputedSpec(q.computed),
     attributes: q.attributes ?? [],
     requireVisible: q.requireVisible ?? true,

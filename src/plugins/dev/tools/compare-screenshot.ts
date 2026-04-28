@@ -34,9 +34,19 @@ export interface CompareScreenshotParams {
   ignoreElements?: IgnoreElement[];
   ignoreRegions?: Array<{ x: number; y: number; width: number; height: number; mode?: "invisible" | "position-only"; reason?: string }>;
   summaryOnly?: boolean;
+  clustersTopN?: number;
+  profile?: "walker";
 }
 
-export async function compareScreenshotTool(params: CompareScreenshotParams) {
+const WALKER_PROFILE_COMPARE_SCREENSHOT: Partial<CompareScreenshotParams> = {
+  summaryOnly: true,
+  clustersTopN: 3,
+};
+
+export async function compareScreenshotTool(rawParams: CompareScreenshotParams) {
+  const params = rawParams.profile === "walker"
+    ? { ...WALKER_PROFILE_COMPARE_SCREENSHOT, ...rawParams }
+    : rawParams;
   const {
     url,
     referenceImage,
@@ -57,6 +67,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     ignoreElements,
     ignoreRegions,
     summaryOnly = false,
+    clustersTopN = 5,
   } = params;
 
   const threshold = params.threshold ?? (mode === "design" ? 0.3 : 0.1);
@@ -155,7 +166,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     const diffPercentage = (mismatchedPixels / totalPixels) * 100;
     const isMatch = diffPercentage <= maxDiffPercent;
 
-    const clusters = findDiffClusters(diff, { topN: 5 });
+    const clusters = findDiffClusters(diff, { topN: clustersTopN });
     const clusterAnnotations = await annotateClusters(session.page, clusters, {
       offsetY: clipY,
     });

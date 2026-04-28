@@ -42,7 +42,14 @@ export interface CompareElementParams {
     mode?: "top-left" | "center";
   };
   summaryOnly?: boolean;
+  clustersTopN?: number;
+  profile?: "walker";
 }
+
+const WALKER_PROFILE_COMPARE_ELEMENT: Partial<CompareElementParams> = {
+  summaryOnly: true,
+  clustersTopN: 3,
+};
 
 const ALIGN_WARNING_THRESHOLD = 100;
 const ERROR_HINTS = [
@@ -70,7 +77,11 @@ function cropPng(src: PNG, x: number, y: number, w: number, h: number): PNG {
   return dst;
 }
 
-export async function compareElementTool(params: CompareElementParams) {
+export async function compareElementTool(rawParams: CompareElementParams) {
+  // Profile defaults are applied first; caller-supplied params win on every key.
+  const params = rawParams.profile === "walker"
+    ? { ...WALKER_PROFILE_COMPARE_ELEMENT, ...rawParams }
+    : rawParams;
   const {
     url,
     referenceImage,
@@ -94,6 +105,7 @@ export async function compareElementTool(params: CompareElementParams) {
     alignTo,
     alignOn,
     summaryOnly = false,
+    clustersTopN = 5,
   } = params;
 
   const threshold = params.threshold ?? (mode === "design" ? 0.3 : 0.1);
@@ -313,7 +325,7 @@ export async function compareElementTool(params: CompareElementParams) {
     const diffPercentage = (mismatchedPixels / totalPixels) * 100;
     const isMatch = diffPercentage <= maxDiffPercent;
 
-    const clusters = findDiffClusters(diff, { topN: 5 });
+    const clusters = findDiffClusters(diff, { topN: clustersTopN });
     const clusterAnnotations = await annotateClusters(session.page, clusters, {
       offsetX: cropX,
       offsetY: cropY,

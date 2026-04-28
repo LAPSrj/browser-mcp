@@ -10,7 +10,12 @@ export interface DomSnapshotParams {
   actions?: AnyAction[];
   useBrowserStack?: boolean;
   summaryOnly?: boolean;
+  profile?: "walker";
 }
+
+const WALKER_PROFILE_DOM_SNAPSHOT: Partial<DomSnapshotParams> = {
+  summaryOnly: true,
+};
 
 interface DomNode {
   tag: string;
@@ -20,7 +25,10 @@ interface DomNode {
   children?: DomNode[];
 }
 
-export async function domSnapshotTool(params: DomSnapshotParams) {
+export async function domSnapshotTool(rawParams: DomSnapshotParams) {
+  const params = rawParams.profile === "walker"
+    ? { ...WALKER_PROFILE_DOM_SNAPSHOT, ...rawParams }
+    : rawParams;
   const {
     url,
     selector = "body",

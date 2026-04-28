@@ -89,6 +89,7 @@ const devPlugin: ScreenshotPlugin = {
         actions: z.array(actionSchema).optional().describe("Actions to run before snapshot. Selector-based actions support optional and timeout params"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         summaryOnly: z.boolean().optional().describe("Compact response: { rootTag, totalNodes, maxDepthReached, truncatedBranches, byTag } instead of the full tree. Re-run without to walk the tree itself (default: false)"),
+        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true. Caller-supplied flags always win over profile defaults'),
         ...useSchemaField,
       },
       handler: async (params) => (await domSnapshotTool(withUrl(params))) as any,
@@ -186,6 +187,8 @@ const devPlugin: ScreenshotPlugin = {
         ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before comparison. Masks are applied to both the live screenshot and reference image at the same coordinates"),
         ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask on both the live screenshot and reference image"),
         summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
+        clustersTopN: z.number().optional().describe("How many top diff clusters to surface in the response (default: 5)"),
+        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true and clustersTopN:3. Caller-supplied flags always win over profile defaults'),
         ...useSchemaField,
       },
       handler: async (params) => (await compareScreenshotTool(withUrlAndOut(params))) as any,
@@ -234,6 +237,8 @@ const devPlugin: ScreenshotPlugin = {
           .optional()
           .describe("Opt-in: shift the reference crop so the named anchor pairs in live + reference overlap before diffing"),
         summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
+        clustersTopN: z.number().optional().describe("How many top diff clusters to surface in the response (default: 5)"),
+        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true and clustersTopN:3. Caller-supplied flags always win over profile defaults'),
         ...useSchemaField,
       },
       handler: async (params) => (await compareElementTool(withUrlAndOut(params))) as any,
@@ -360,6 +365,7 @@ const devPlugin: ScreenshotPlugin = {
         waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle when navigating (default: true)"),
         delay: z.number().optional().describe("Extra delay in ms before querying (default: 0)"),
         queries: z.array(domQuerySchema).describe("Array of per-element queries. Empty array errors out"),
+        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets per-query fields to ["rect","tag","id","classes","text"] when the caller does not supply fields explicitly. Per-query `fields` always wins over profile defaults'),
         ...useSchemaField,
       },
       handler: async (params) => (await domQueryTool({
