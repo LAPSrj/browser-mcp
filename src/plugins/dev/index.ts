@@ -20,6 +20,7 @@ import { performanceMetricsTool } from "./tools/performance.js";
 import { computedStylesTool } from "./tools/computed-styles.js";
 import { evaluateScriptTool } from "./tools/evaluate-script.js";
 import { schemaExtractTool } from "./tools/schema-extract.js";
+import { domQueryTool } from "./tools/dom-query.js";
 
 // Dev plugin: developer-inspection tools that a regular user can't perform
 // in a browser without DevTools. Enable via BROWSER_MCP_PLUGINS=dev.
@@ -320,6 +321,46 @@ const devPlugin: ScreenshotPlugin = {
         ...useSchemaField,
       },
       handler: async (params) => (await evaluateScriptTool(withUrl(params))) as any,
+    });
+
+    // ---------- dom_query ----------
+    const domFieldEnum = z.enum([
+      "rect", "tag", "id", "classes", "text", "html", "role", "visible", "attributes", "computed",
+    ]);
+    const domQuerySchema = z.object({
+      id: z.string().optional().describe("Caller-defined correlation id. Defaults to the array index. Echoed back in the matching result"),
+      selector: z.string().describe("CSS selector for the element(s) to read"),
+      pseudoElement: z.enum(["before", "after"]).optional().describe(
+        "Read styles from the ::before or ::after pseudo-element. When set, `rect`/`html`/`visible`/`attributes` fields are skipped (pseudo-elements have no DOMRect or attributes); `text` reads the computed `content` property",
+      ),
+      match: z.enum(["first", "all"]).optional().describe('"first" returns the first match in `element` (default); "all" returns every match in `elements` (capped at 50, sets `truncated:true` on overflow)'),
+      fields: z.array(domFieldEnum).optional().describe('Which fields to populate per matched element. Default ["rect","tag"]. Available: rect, tag, id, classes, text (innerText, trimmed, capped 2 KB), html (outerHTML, capped 4 KB), role (computed ARIA role), visible (CSS-visibility boolean), attributes, computed'),
+      computed: z.array(z.string()).optional().describe('CSS property names to read into `computed`. Mixes literal property names with preset bucket names: "box" (width/height/padding-*/margin-*/border-*-width/box-sizing), "text" (font-*/line-height/letter-spacing/text-transform/color/text-align), "flex" (display/flex-*/justify-content/align-items/gap/row-gap/column-gap)'),
+      attributes: z.array(z.string()).optional().describe("Attribute names to read into `attributes`. Missing attributes report `null` (distinct from empty string)"),
+      requireVisible: z.boolean().optional().describe('When true (default), hidden elements (display:none, visibility:hidden, opacity:0) report `found:false`. Set false to also surface hidden elements (e.g. for a11y walks)'),
+    });
+    ctx.registerTool({
+      name: "dom_query",
+      description:
+        "Batched DOM read: collapse N selector reads into one round-trip + one page.evaluate. Per-query try/catch so a bad selector reports `error` without sinking siblings; selector-syntax errors are distinct from no-match (no-match: `found:false`; bad selector: `found:false, error:\"SyntaxError…\"`). Reuses an open session via `session_id` (eliminates per-query browser launch); falls back to ephemeral when omitted." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().optional().describe("URL to navigate to before querying. Optional when session_id is provided (use the session's current page); required when ephemeral"),
+        session_id: z.string().optional().describe("Reuse an open_session. Avoids the per-call browser launch — one launch + one navigate, then many dom_query calls"),
+        tab_id: z.string().optional().describe("Which tab in the session to query. Defaults to the session's active tab"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        actions: z.array(actionSchema).optional().describe("Actions to run before querying. Selector-based actions support optional and timeout params"),
+        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle when navigating (default: true)"),
+        delay: z.number().optional().describe("Extra delay in ms before querying (default: 0)"),
+        queries: z.array(domQuerySchema).describe("Array of per-element queries. Empty array errors out"),
+        ...useSchemaField,
+      },
+      handler: async (params) => (await domQueryTool({
+        ...params,
+        url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
+      })) as any,
     });
 
     // ---------- trace_start / trace_stop (session-scoped) ----------
