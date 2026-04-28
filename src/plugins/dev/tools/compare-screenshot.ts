@@ -9,7 +9,7 @@ import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
 import { collectMaskRegions, applyMask, computeMaskCoverage, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
-import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
+import { findDiffClusters, formatClusters, formatClustersCompact } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
 
@@ -33,6 +33,7 @@ export interface CompareScreenshotParams {
   ignoreText?: boolean;
   ignoreElements?: IgnoreElement[];
   ignoreRegions?: Array<{ x: number; y: number; width: number; height: number; mode?: "invisible" | "position-only"; reason?: string }>;
+  summaryOnly?: boolean;
 }
 
 export async function compareScreenshotTool(params: CompareScreenshotParams) {
@@ -55,6 +56,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     ignoreText,
     ignoreElements,
     ignoreRegions,
+    summaryOnly = false,
   } = params;
 
   const threshold = params.threshold ?? (mode === "design" ? 0.3 : 0.1);
@@ -161,13 +163,21 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     const diffBuffer = PNG.sync.write(diff);
     const diffFilename = generateFilename({ prefix: "compare-diff", browser, extension: "png" });
     const diffPath = await saveFile(path.join(outputDir, diffFilename), diffBuffer);
-    const diffPreviewFilename = generateFilename({ prefix: "compare-diff-preview", browser, extension: "png" });
-    const diffPreviewPath = await saveFile(path.join(outputDir, diffPreviewFilename), createPreviewBuffer(diffBuffer));
+    const diffPreviewPath = summaryOnly
+      ? undefined
+      : await saveFile(
+          path.join(outputDir, generateFilename({ prefix: "compare-diff-preview", browser, extension: "png" })),
+          createPreviewBuffer(diffBuffer),
+        );
 
     const screenshotFilename = generateFilename({ prefix: "compare-actual", browser, extension: "png" });
     const screenshotPath = await saveFile(path.join(outputDir, screenshotFilename), screenshotBuffer);
-    const screenshotPreviewFilename = generateFilename({ prefix: "compare-actual-preview", browser, extension: "png" });
-    const screenshotPreviewPath = await saveFile(path.join(outputDir, screenshotPreviewFilename), createPreviewBuffer(screenshotBuffer));
+    const screenshotPreviewPath = summaryOnly
+      ? undefined
+      : await saveFile(
+          path.join(outputDir, generateFilename({ prefix: "compare-actual-preview", browser, extension: "png" })),
+          createPreviewBuffer(screenshotBuffer),
+        );
 
     const content: Array<{ type: string; text: string }> = [];
     if (actionStopMsg) {
@@ -176,27 +186,46 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
     if (assertionsMsg) {
       content.push({ type: "text", text: assertionsMsg });
     }
-    content.push({
-      type: "text",
-      text: [
-        `Compare result:`,
-        `  Match: ${isMatch ? "YES" : "NO"}`,
-        `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
-        `  Mode: ${mode}`,
-        `  Threshold: ${threshold}`,
-        `  Max diff: ${maxDiffPercent}%`,
-        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
-        ...maskRegions
-          .filter((r) => r.reason)
-          .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`),
-        ...formatClusters(clusters, 0, clipY, clusterAnnotations),
-        `  Reference: ${referenceImage}`,
-        `  Screenshot saved: ${screenshotPath}`,
-        `  Screenshot preview (small): ${screenshotPreviewPath}`,
-        `  Diff image saved: ${diffPath}`,
-        `  Diff preview (small): ${diffPreviewPath}`,
-      ].join("\n"),
-    });
+    if (summaryOnly) {
+      content.push({
+        type: "text",
+        text: [
+          `Compare result:`,
+          `  Match: ${isMatch ? "YES" : "NO"}`,
+          `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
+          `  Mode: ${mode} | Threshold: ${threshold} | Max diff: ${maxDiffPercent}%`,
+          ...(maskRegions.length > 0
+            ? [`  Mask: ${maskRegions.length} region${maskRegions.length === 1 ? "" : "s"}, ${maskCoverage.toFixed(1)}% coverage`]
+            : []),
+          ...formatClustersCompact(clusters, 0, clipY),
+          `  Diff: ${diffPath}`,
+          `  Actual: ${screenshotPath}`,
+          `  Reference: ${referenceImage}`,
+        ].join("\n"),
+      });
+    } else {
+      content.push({
+        type: "text",
+        text: [
+          `Compare result:`,
+          `  Match: ${isMatch ? "YES" : "NO"}`,
+          `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
+          `  Mode: ${mode}`,
+          `  Threshold: ${threshold}`,
+          `  Max diff: ${maxDiffPercent}%`,
+          ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
+          ...maskRegions
+            .filter((r) => r.reason)
+            .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`),
+          ...formatClusters(clusters, 0, clipY, clusterAnnotations),
+          `  Reference: ${referenceImage}`,
+          `  Screenshot saved: ${screenshotPath}`,
+          `  Screenshot preview (small): ${screenshotPreviewPath}`,
+          `  Diff image saved: ${diffPath}`,
+          `  Diff preview (small): ${diffPreviewPath}`,
+        ].join("\n"),
+      });
+    }
     if (maskCoverage > 60 && ignoreAllImages && ignoreText) {
       content.push({
         type: "text",
@@ -208,7 +237,7 @@ export async function compareScreenshotTool(params: CompareScreenshotParams) {
         text: `⚠ mask coverage ${maskCoverage.toFixed(1)}% exceeds 50% — verify the diff is measuring meaningful surface area before trusting the score.`,
       });
     }
-    if (clusterAnnotations.length > 0) {
+    if (clusterAnnotations.length > 0 && !summaryOnly) {
       content.push({
         type: "text",
         text: `clusterAnnotations:\n${JSON.stringify(clusterAnnotations, null, 2)}`,

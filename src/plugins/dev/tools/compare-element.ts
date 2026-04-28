@@ -9,7 +9,7 @@ import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
 import { collectMaskRegions, applyMask, computeMaskCoverage, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
-import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
+import { findDiffClusters, formatClusters, formatClustersCompact } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
 
@@ -41,6 +41,7 @@ export interface CompareElementParams {
     frontendSelector: string;
     mode?: "top-left" | "center";
   };
+  summaryOnly?: boolean;
 }
 
 const ALIGN_WARNING_THRESHOLD = 100;
@@ -92,6 +93,7 @@ export async function compareElementTool(params: CompareElementParams) {
     ignoreRegions,
     alignTo,
     alignOn,
+    summaryOnly = false,
   } = params;
 
   const threshold = params.threshold ?? (mode === "design" ? 0.3 : 0.1);
@@ -323,20 +325,28 @@ export async function compareElementTool(params: CompareElementParams) {
 
     const actualFilename = generateFilename({ prefix: "compare-element-actual", browser, extension: "png" });
     const actualPath = await saveFile(path.join(outputDir, actualFilename), pageCropBuffer);
-    const actualPreviewPath = await saveFile(
-      path.join(outputDir, generateFilename({ prefix: "compare-element-actual-preview", browser, extension: "png" })),
-      createPreviewBuffer(pageCropBuffer),
-    );
+    const actualPreviewPath = summaryOnly
+      ? undefined
+      : await saveFile(
+          path.join(outputDir, generateFilename({ prefix: "compare-element-actual-preview", browser, extension: "png" })),
+          createPreviewBuffer(pageCropBuffer),
+        );
 
-    const refCropFilename = generateFilename({ prefix: "compare-element-ref", browser, extension: "png" });
-    const refCropPath = await saveFile(path.join(outputDir, refCropFilename), refCropBuffer);
+    const refCropPath = summaryOnly
+      ? undefined
+      : await saveFile(
+          path.join(outputDir, generateFilename({ prefix: "compare-element-ref", browser, extension: "png" })),
+          refCropBuffer,
+        );
 
     const diffFilename = generateFilename({ prefix: "compare-element-diff", browser, extension: "png" });
     const diffPath = await saveFile(path.join(outputDir, diffFilename), diffBuffer);
-    const diffPreviewPath = await saveFile(
-      path.join(outputDir, generateFilename({ prefix: "compare-element-diff-preview", browser, extension: "png" })),
-      createPreviewBuffer(diffBuffer),
-    );
+    const diffPreviewPath = summaryOnly
+      ? undefined
+      : await saveFile(
+          path.join(outputDir, generateFilename({ prefix: "compare-element-diff-preview", browser, extension: "png" })),
+          createPreviewBuffer(diffBuffer),
+        );
 
     const maskSummary = maskRegions
       .filter((r) => r.reason)
@@ -361,41 +371,67 @@ export async function compareElementTool(params: CompareElementParams) {
     if (assertionsMsg) {
       content.push({ type: "text", text: assertionsMsg });
     }
-    if (intersectApplied) {
+    if (intersectApplied && !summaryOnly) {
       content.push({ type: "text", text: intersectApplied });
     }
-    content.push({
-      type: "text",
-      text: [
-        `Element compare result:`,
-        `  Selector: ${selector}`,
-        `  Match: ${isMatch ? "YES" : "NO"}`,
-        `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
-        `  Mode: ${mode}`,
-        `  Bounds handling: ${boundsHandling}`,
-        `  Threshold: ${threshold}`,
-        `  Max diff: ${maxDiffPercent}%`,
-        ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
-        ...(maskSummary.length > 0 ? [`  Masked region reasons:`, ...maskSummary] : []),
-        `  Element box: x=${Math.floor(box.x)} y=${Math.floor(box.y)} w=${Math.ceil(box.width)} h=${Math.ceil(box.height)}`,
-        `  Crop region (with ${padding}px padding): x=${cropX} y=${cropY} w=${cropW} h=${cropH}`,
-        ...(aligned ? [`  Reference crop origin (aligned): x=${refCropX} y=${refCropY}`] : []),
-        ...formatClusters(clusters, cropX, cropY, clusterAnnotations),
-        `  Reference: ${referenceImage}`,
-        `  Cropped reference saved: ${refCropPath}`,
-        `  Cropped screenshot saved: ${actualPath}`,
-        `  Cropped screenshot preview: ${actualPreviewPath}`,
-        `  Diff image saved: ${diffPath}`,
-        `  Diff preview: ${diffPreviewPath}`,
-      ].join("\n"),
-    });
+
+    if (summaryOnly) {
+      content.push({
+        type: "text",
+        text: [
+          `Element compare result:`,
+          `  Selector: ${selector}`,
+          `  Match: ${isMatch ? "YES" : "NO"}`,
+          `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
+          `  Mode: ${mode} | Threshold: ${threshold} | Max diff: ${maxDiffPercent}%`,
+          ...(maskRegions.length > 0
+            ? [`  Mask: ${maskRegions.length} region${maskRegions.length === 1 ? "" : "s"}, ${maskCoverage.toFixed(1)}% coverage`]
+            : []),
+          ...formatClustersCompact(clusters, cropX, cropY),
+          `  Diff: ${diffPath}`,
+          `  Actual: ${actualPath}`,
+          `  Reference: ${referenceImage}`,
+        ].join("\n"),
+      });
+    } else {
+      content.push({
+        type: "text",
+        text: [
+          `Element compare result:`,
+          `  Selector: ${selector}`,
+          `  Match: ${isMatch ? "YES" : "NO"}`,
+          `  Diff: ${diffPercentage.toFixed(2)}% (${mismatchedPixels} of ${totalPixels} pixels)`,
+          `  Mode: ${mode}`,
+          `  Bounds handling: ${boundsHandling}`,
+          `  Threshold: ${threshold}`,
+          `  Max diff: ${maxDiffPercent}%`,
+          ...(maskRegions.length > 0 ? [`  Masked regions: ${maskRegions.length}`, `  Mask coverage: ${maskCoverage.toFixed(1)}%`] : []),
+          ...(maskSummary.length > 0 ? [`  Masked region reasons:`, ...maskSummary] : []),
+          `  Element box: x=${Math.floor(box.x)} y=${Math.floor(box.y)} w=${Math.ceil(box.width)} h=${Math.ceil(box.height)}`,
+          `  Crop region (with ${padding}px padding): x=${cropX} y=${cropY} w=${cropW} h=${cropH}`,
+          ...(aligned ? [`  Reference crop origin (aligned): x=${refCropX} y=${refCropY}`] : []),
+          ...formatClusters(clusters, cropX, cropY, clusterAnnotations),
+          `  Reference: ${referenceImage}`,
+          `  Cropped reference saved: ${refCropPath}`,
+          `  Cropped screenshot saved: ${actualPath}`,
+          `  Cropped screenshot preview: ${actualPreviewPath}`,
+          `  Diff image saved: ${diffPath}`,
+          `  Diff preview: ${diffPreviewPath}`,
+        ].join("\n"),
+      });
+    }
+
     if (alignInfo) {
-      content.push({ type: "text", text: alignInfo });
+      // Suppress the verbose multi-line block in summary mode unless the
+      // delta crossed the warning threshold — that line starts with "⚠".
+      if (!summaryOnly || alignInfo.startsWith("⚠")) {
+        content.push({ type: "text", text: summaryOnly ? alignInfo.split("\n")[0] : alignInfo });
+      }
     }
     for (const w of maskCoverageWarnings) {
       content.push({ type: "text", text: w });
     }
-    if (clusterAnnotations.length > 0) {
+    if (clusterAnnotations.length > 0 && !summaryOnly) {
       content.push({
         type: "text",
         text: `clusterAnnotations:\n${JSON.stringify(clusterAnnotations, null, 2)}`,

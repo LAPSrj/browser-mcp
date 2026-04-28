@@ -169,6 +169,24 @@ export function formatClusters(
   return lines;
 }
 
+/**
+ * One-line summary per cluster — bbox + pixel count, no DOM annotations.
+ * Used by `summaryOnly` mode where the caller wants triage data without
+ * paying for the full annotation blob; a follow-up call without the flag
+ * yields the intersecting/centerStack details.
+ */
+export function formatClustersCompact(
+  clusters: DiffCluster[],
+  offsetX = 0,
+  offsetY = 0,
+): string[] {
+  if (clusters.length === 0) return [];
+  const parts = clusters.map(
+    (c, i) => `[${i + 1}] ${c.pixels}px at x=${c.x + offsetX} y=${c.y + offsetY} ${c.width}x${c.height}`,
+  );
+  return [`  Top ${clusters.length} cluster${clusters.length === 1 ? "" : "s"}: ${parts.join("; ")}`];
+}
+
 function formatElementSelector(h: ElementHint): string {
   const self = `${h.tag}${h.id ? `#${h.id}` : ""}${h.classes.length > 0 ? "." + h.classes.slice(0, 3).join(".") : ""}`;
   if (!h.id && h.classes.length === 0 && h.nearestNamedAncestor) {

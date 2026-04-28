@@ -181,6 +181,7 @@ const devPlugin: ScreenshotPlugin = {
         ignoreText: z.boolean().optional().describe("Mask every rendered text line (per-line client-rect) in position-only mode"),
         ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before comparison. Masks are applied to both the live screenshot and reference image at the same coordinates"),
         ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask on both the live screenshot and reference image"),
+        summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await compareScreenshotTool(withUrlAndOut(params))) as any,
@@ -228,6 +229,7 @@ const devPlugin: ScreenshotPlugin = {
           })
           .optional()
           .describe("Opt-in: shift the reference crop so the named anchor pairs in live + reference overlap before diffing"),
+        summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await compareElementTool(withUrlAndOut(params))) as any,
