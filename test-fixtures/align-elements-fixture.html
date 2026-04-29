@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Align Elements Fixture</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #f5f5f5; font-family: Arial, sans-serif; }
+  body { width: 800px; height: 600px; }
+  .card {
+    position: absolute;
+    background: #2563eb;
+    color: white;
+    padding: 16px 24px;
+    border-radius: 8px;
+    font-size: 18px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+  #card-a { left: 50px;  top: 80px;  background: #2563eb; }
+  #card-b { left: 320px; top: 80px;  background: #16a34a; }
+  #card-c { left: 50px;  top: 260px; background: #dc2626; }
+  #card-d { left: 320px; top: 260px; background: #f59e0b; }
+  #card-e { left: 50px;  top: 440px; background: #7c3aed; width: 540px; }
+</style>
+</head>
+<body>
+  <main id="grid">
+    <div id="card-a" class="card">Card A — top-left</div>
+    <div id="card-b" class="card">Card B — top-right</div>
+    <div id="card-c" class="card">Card C — middle-left</div>
+    <div id="card-d" class="card">Card D — middle-right</div>
+    <div id="card-e" class="card">Card E — bottom row spanning width</div>
+  </main>
+  <script>
+    // Apply pixel-precise shifts via ?shift=name:dx,dy[;name:dx,dy]
+    // Example: ?shift=card-b:12,-7;card-d:-5,3
+    const params = new URLSearchParams(location.search);
+    const shifts = (params.get("shift") || "").split(";").filter(Boolean);
+    for (const spec of shifts) {
+      const [id, vec] = spec.split(":");
+      const [dx, dy] = (vec || "0,0").split(",").map(Number);
+      const el = document.getElementById(id);
+      if (el && (dx || dy)) {
+        const r = el.getBoundingClientRect();
+        // Shift via top/left so the live screenshot has truly different
+        // pixel positions — translate would still register but top/left
+        // moves layout. We want pixel motion, not transform composition.
+        const cs = getComputedStyle(el);
+        el.style.left = (parseFloat(cs.left) + dx) + "px";
+        el.style.top  = (parseFloat(cs.top)  + dy) + "px";
+      }
+    }
+  </script>
+</body>
+</html>

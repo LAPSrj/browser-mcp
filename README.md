@@ -194,6 +194,7 @@ Tools that only DevTools can deliver — stuff a real user can't see.
 | `visual_diff` | Pixel-diff two PNGs. |
 | `compare_screenshot` | Screenshot + diff against a reference. |
 | `compare_element` | Screenshot → crop element → diff against a reference. |
+| `align_elements` | Find the (dx, dy) translation that aligns each element to a reference image. Pixel-grounded — bypasses DOM-coordinate trust. |
 | `schema_extract` | Parse JSON-LD structured data blocks; flag common issues. |
 | `page_metadata` | Title, OG tags, meta tags, favicon, lang. |
 | `trace_start` / `trace_stop` | Playwright tracing bound to a session. |

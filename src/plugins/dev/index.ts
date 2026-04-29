@@ -14,6 +14,7 @@ import { accessibilitySnapshotTool } from "./tools/accessibility.js";
 import { visualDiffTool } from "./tools/visual-diff.js";
 import { compareScreenshotTool } from "./tools/compare-screenshot.js";
 import { compareElementTool } from "./tools/compare-element.js";
+import { alignElementsTool } from "./tools/align-elements.js";
 import { networkLogTool } from "./tools/network-log.js";
 import { pageMetadataTool } from "./tools/page-metadata.js";
 import { performanceMetricsTool } from "./tools/performance.js";
@@ -242,6 +243,45 @@ const devPlugin: ScreenshotPlugin = {
         ...useSchemaField,
       },
       handler: async (params) => (await compareElementTool(withUrlAndOut(params))) as any,
+    });
+
+    // ---------- align_elements ----------
+    ctx.registerTool({
+      name: "align_elements",
+      description:
+        "Visual alignment probe. For each candidate element, finds the integer (dx, dy) that, applied as `transform: translate(dx, dy)`, makes the element's pixels best match the reference image. Search is grounded in pixel SAD over the live screenshot vs the reference — DOM-reported coordinates only seed the search center, not the answer. By default discovers candidates from diff clusters inside `scope`; pass explicit `selectors` to override. Groups elements with similar deltas and commits the rigid shift at their lowest common ancestor (`rigid-with-parent` classification). Returns per-element delta, baseline-vs-aligned diff scores, and a classification (translation / rigid-with-parent / content-change / size-mismatch / ambiguous / no-clusters)." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().describe(urlCaptureDesc),
+        referenceImage: z.string().describe("Path to the reference PNG image"),
+        scope: z.string().optional().describe('Root selector to search within when discovering candidates from diff clusters (default: "body"). Ignored when `selectors` is provided'),
+        selectors: z.array(z.string()).optional().describe("Explicit list of element selectors to align. When omitted, candidates are discovered automatically from the diff clusters inside `scope`"),
+        refineRadius: z.number().optional().describe("Floor for the per-element search radius in pixels. Cluster geometry can raise this; this is the minimum (default: 3)"),
+        maxRadius: z.number().optional().describe("Ceiling for the per-element search radius in pixels (default: 60). The tool auto-grows once if the first pass hits the radius edge"),
+        uniformityTolerance: z.number().optional().describe("Manhattan-distance threshold (px) at which two element deltas are considered the same shift, triggering a parent commit (default: 2)"),
+        minImprovement: z.number().optional().describe("Minimum SAD improvement (0..1) required to classify an element as 'translation'. Below this it's labelled 'content-change' (default: 0.005)"),
+        applyTransform: z.boolean().optional().describe("After finding deltas, apply CSS transforms on the live page and capture an aligned screenshot for visual confirmation (default: true)"),
+        topClusters: z.number().optional().describe("How many top diff clusters to consider when discovering candidates (default: 12)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: matched to reference image dimensions)"),
+        actions: z.array(actionSchema).optional().describe("Actions to run before aligning. Selector-based actions support optional and timeout params"),
+        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode: "precise" or "design" (default: "design"). Sets the pixelmatch threshold used for the baseline/aligned diffs only — template matching is metric-fixed (SAD)'),
+        threshold: z.number().optional().describe("Pixel diff threshold 0-1. Overrides the mode default if provided"),
+        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
+        ignoreImages: z.boolean().optional().describe("Replace <img> elements with solid blocks (default: false)"),
+        ignoreBackgrounds: z.boolean().optional().describe("Replace bg-image elements with solid blocks (default: false)"),
+        ignoreAllImages: z.boolean().optional().describe("Shorthand for ignoreImages + ignoreBackgrounds"),
+        ignoreText: z.boolean().optional().describe("Mask every rendered text line in position-only mode"),
+        ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before scoring"),
+        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask"),
+        summaryOnly: z.boolean().optional().describe("Compact response: drops the full per-element table; surfaces the summary block plus the most significant rows. Re-run without to see every candidate (default: false)"),
+        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true. Caller-supplied flags always win over profile defaults'),
+        ...useSchemaField,
+      },
+      handler: async (params) => (await alignElementsTool(withUrlAndOut(params))) as any,
     });
 
     // ---------- network_log ----------

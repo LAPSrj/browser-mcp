@@ -11,6 +11,7 @@ import { createPreviewBuffer } from "../../../utils/resize.js";
 import { collectMaskRegions, applyMask, computeMaskCoverage, type IgnoreElement, type MaskRegion } from "../../../utils/mask.js";
 import { findDiffClusters, formatClusters, formatClustersCompact } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
+import { cropPng } from "../../../utils/png-crop.js";
 import type { CompareMode } from "./visual-diff.js";
 
 export interface CompareElementParams {
@@ -58,24 +59,6 @@ const ERROR_HINTS = [
   `  - fall back to visual_diff({ imageA, imageB, crop: true }) on separately-captured images`,
   `  - use alignTo: "top"|"center" (or alignOn) to shift the reference crop to match the live element`,
 ];
-
-function cropPng(src: PNG, x: number, y: number, w: number, h: number): PNG {
-  const dst = new PNG({ width: w, height: h });
-  for (let row = 0; row < h; row++) {
-    const srcY = y + row;
-    if (srcY < 0) continue;
-    if (srcY >= src.height) break;
-    const srcX = Math.max(0, x);
-    const dstXOffset = srcX - x;
-    if (dstXOffset >= w) continue;
-    const copyWidth = Math.min(w - dstXOffset, src.width - srcX);
-    if (copyWidth <= 0) continue;
-    const srcOff = (srcY * src.width + srcX) << 2;
-    const dstOff = (row * w + dstXOffset) << 2;
-    src.data.copy(dst.data, dstOff, srcOff, srcOff + (copyWidth << 2));
-  }
-  return dst;
-}
 
 export async function compareElementTool(rawParams: CompareElementParams) {
   // Profile defaults are applied first; caller-supplied params win on every key.

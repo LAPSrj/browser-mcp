@@ -1,0 +1,456 @@
+# browser-mcp
+
+A Playwright-backed Model Context Protocol server providing browser primitives plus domain plugins for design audits, WordPress block development, and Gutenberg authoring.
+
+This file is the consumer-facing manual for agents that *invoke* browser-mcp tools. If you're building or extending the server itself, read the source — this file omits per-line code detail and stays at the contract surface, with source-tree pointers (§ Plugins and modes) for finding the implementation behind a behavior.
+
+## TL;DR {#tldr}
+
+- Browser primitives (navigate, click, screenshot, evaluate, ...) plus four pluggable domains: `dev`, `design-compare`, `wp`, `wp-gutenberg`. Each plugin registers tools.
+- A **mode** is a session-level auth/setup bundle that a plugin can also register (e.g. `wp` registers the `wordpress` mode that injects WordPress admin auth into the BrowserContext). Modes are NOT a gate on which tools are available — they layer hooks onto sessions. `mcp__browser__list_modes` enumerates registered modes.
+- Tools accept an optional `session_id` to attach to a persistent context (from `open_session`); without it each call spins an ephemeral session and discards it on return.
+- Comparison tools (`compare_element`, `compare_screenshot`, `visual_diff`, `design_audit`) report different score conventions and accept different mask APIs — see § Cross-cutting concepts before mixing them.
+- `align_elements` is a measurement tool, not a comparison tool: it returns the per-element (dx, dy) translation that best matches the reference, grounded in pixel SAD over the live screenshot. Use it when DOM-reported coordinates are suspect — see § Surfaces › `align_elements`.
+- All coordinates the tool produces or consumes are **HTML viewport pixels**. Values from non-viewport sources (Figma canvas, Figma node-relative) carry their own coordinate frame and must be converted before they cross the API boundary — see § Coordinate spaces.
+
+## Plugins and modes {#modes-and-plugins}
+
+The server boots with a plugin set defined by the `BROWSER_MCP_PLUGINS` env var (comma-separated, e.g. `dev,wp,wp-gutenberg,design-compare`). Each plugin can:
+
+- **Register tools** (the `mcp__browser__*` surface). A tool is available whenever its registering plugin is loaded — there's no per-tool mode gate.
+- **Register modes** as session-level auth/setup bundles. A mode is a set of hooks (e.g. inject auth cookies before any tool runs in this session) that consumers opt into per session. Currently the `wp` plugin registers the `wordpress` mode (WordPress admin auth injection); no other plugin registers a mode.
+- **Declare required env vars and dependencies** on other plugins.
+
+**Tolerant loader.** A plugin with a missing required env var is silently skipped, and its dependents cascade-skip (e.g. `wp-gutenberg` skips when `wp` skips for a missing `WP_URL`). Stderr carries the warning; the server still boots and unaffected plugins still work. Hard errors only fire on real config bugs (sealed registry, name collision, undeclared dependency, tool/action/mode collision).
+
+> **Hazard:** if `mcp__browser__list_modes` returns "No modes registered" or an expected mode is missing, the cause is almost always a silently-skipped plugin from missing env. See § Diagnosis › Mode not registered for the fix recipe.
+
+**MCP scopes replace, do not merge.** When the same server name (`browser`) appears in both `~/.claude.json` (user scope) and a project-local `.mcp.json`, the project entry **fully replaces** the user entry. There is no env-block merge. If a project needs a different `WP_URL`, the project entry must duplicate the full env block, not just the override.
+
+**Where plugins live in source.** `src/plugins/dev`, `src/plugins/design-compare`, `src/plugins/wp`, `src/plugins/wp-gutenberg`. Plugin manifests at `src/plugins/<name>/index.ts`. Tool implementations under `src/plugins/<name>/tools/` (or `src/core/` for primitives). The plugin registry (`src/plugins/registry.ts`) enforces the dependency graph and the cascade-skip behavior.
+
+## Command index {#command-index}
+
+Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)** have a deep treatment in § Surfaces; the rest are routine and have a one-line entry only. Use this table to pick the right tool, then dive to the contract section if the tool is non-trivial.
+
+### dev plugin
+
+| Tool | Purpose | Notes |
+|---|---|---|
+| `screenshot` | Full-page or clipped PNG screenshot | core primitive |
+| `element_screenshot` | Element-bbox-cropped screenshot | core primitive |
+| `visual_diff` | Pixelmatch two PNGs, optional crop | (contract) compare-tool selection |
+| `compare_screenshot` | Live URL ↔ reference PNG, full-page | (contract) compare-tool selection, mask, coverage |
+| `compare_element` | Live URL ↔ reference PNG, element-cropped | (contract) compare-tool selection, mask, alignment, coverage |
+| `align_elements` | Per-element pixel-shift measurement vs reference PNG; applies CSS transforms to confirm | (contract) align-vs-compare selection |
+| `console_capture` | Capture console messages over a script run | |
+| `dom_snapshot` | Full DOM tree as JSON | |
+| `accessibility_snapshot` | a11y tree | |
+| `network_log` | HAR-style network requests over a script run | |
+| `page_metadata` | Title, URL, meta tags | |
+| `performance_metrics` | LCP, FCP, TTFB | |
+| `computed_styles` | `getComputedStyle()` for selector | |
+| `evaluate_script` | Run JS in page context, return result | |
+| `trace_start` / `trace_stop` | Playwright trace zip | |
+| `schema_extract` | JSON-LD / microdata / OG tags | |
+
+### design-compare plugin
+
+| Tool | Purpose | Notes |
+|---|---|---|
+| `design_compare` | CSS-property comparison live ↔ design spec | (contract) compare-tool selection |
+| `design_audit` | `design_compare` + visual diff + cross-reference | (contract) compare-tool selection, hide, coverage |
+
+### wp plugin
+
+| Tool | Purpose | Notes |
+|---|---|---|
+| `wp` | WordPress admin login + REST helpers | requires `WP_URL`; optional `WP_USERNAME` / `WP_PASSWORD` |
+
+### wp-gutenberg plugin
+
+| Tool | Purpose | Notes |
+|---|---|---|
+| `insert_block` | Add a block to current post | depends on `wp` |
+| `get_blocks` | Read current post's block tree | |
+| `screenshot_block` | Crop screenshot to block bbox | |
+| `inspect_toolbar` | Block toolbar state | |
+| `compare_block` | `compare_element` scoped to a block | (contract) compare-tool selection |
+| `evaluate` | JS in editor iframe context | |
+| `check_block` | Validity / breakage check | |
+| `publish` | Save + publish current post | |
+| `block_html` | Block's serialized HTML | |
+| `clear_blocks` | Empty the post | |
+
+### Session / navigation primitives (every plugin)
+
+| Tool | Purpose |
+|---|---|
+| `open_session`, `close_session`, `list_sessions` | persistent context lifecycle |
+| `open_tab`, `switch_tab`, `list_tabs`, `close_tab` | tab control inside a session |
+| `navigate`, `go_back`, `go_forward`, `reload` | URL navigation |
+| `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input |
+| `select_option`, `check`, `uncheck`, `upload_file` | form control |
+| `wait`, `wait_for_selector`, `wait_for_url`, `wait_for_load_state` | sync |
+| `get_text`, `get_attribute`, `get_html`, `get_url` | read |
+| `get_cookies`, `set_cookies`, `clear_cookies` | cookies |
+| `get_storage`, `set_storage`, `clear_storage` | localStorage / sessionStorage |
+| `capture`, `save_pdf`, `save_html` | output capture |
+| `handle_next_dialog` | pre-arm a confirm/alert handler |
+| `list_modes` | enumerate registered modes |
+
+## Cross-cutting concepts {#cross-cutting}
+
+### Coordinate spaces {#coordinate-spaces}
+
+browser-mcp deals exclusively in **HTML viewport pixels** at every API boundary:
+
+- `getBoundingClientRect()` — what the tool internally calls — returns viewport-relative coordinates, post-transform.
+- The reference PNG passed to `compare_element` / `compare_screenshot` is treated as image-pixel space, which is 1:1 with HTML viewport when the screenshot was captured at the same dimensions (the tool defaults `viewport` to the reference image's dimensions to enforce this).
+- `ignoreRegions[].x/y/width/height` — image-pixel coords.
+- `alignOn.referenceRect` — image-pixel coords.
+- `coverageManifest` — names and counts only; no coordinates.
+
+> **Conversion rule** (mirrors `../figexport/llms-full.txt#coordinate-spaces`): values from non-viewport sources carry their own coordinate frame; conversion to HTML viewport is the consumer's responsibility, not auto-resolved by browser-mcp.
+
+Non-viewport frames (canvas-relative, node-relative, layout-tree exports) come from upstream design tooling and live in distinct coordinate spaces. browser-mcp **never** auto-resolves between frames. Values supplied to a viewport-pixel field (`ignoreRegions`, `alignOn.referenceRect`, anything constructed from a `getBoundingClientRect`-equivalent on the live page) must already be in HTML viewport / image-pixel coords. Values pasted from a non-viewport frame will silently absorb the conversion offset into computed deltas and downstream comparisons drift — see § Diagnosis › Coordinate frame mismatch for the consumer-side fix recipe.
+
+The full multi-frame treatment (canvas, node-relative, viewport, and conversion math between them) lives at `../figexport/llms-full.txt#coordinate-spaces` — figexport is the authoritative source on the upstream side, since that's where non-viewport frames originate.
+
+### Compare-tool selection {#compare-tool-selection}
+
+When sources of truth disagree about which compare tool to use, the precedence is:
+
+| Goal | Primary | Secondary | Tertiary | Notes |
+|---|---|---|---|---|
+| Live block ↔ design reference, with property checks | `design_audit` | `design_compare` + `compare_element` separately | `compare_screenshot` | `design_audit` runs both phases and cross-references clusters to elements |
+| Live element ↔ static reference image | `compare_element` | `compare_screenshot` with `ignoreRegions` | `visual_diff` after manual capture | `compare_element` anchors on selector bbox; full-page only when bbox routing fails |
+| Two static PNGs, no live page | `visual_diff` | — | — | no browser launched |
+| Single CSS-property check, no visual diff needed | `design_compare` | `computed_styles` + manual assert | — | `design_compare` evaluates a whole element list; `computed_styles` is one-shot |
+| "How far off is this element from the reference, in pixels?" | `align_elements` | `compare_element` clusters + manual measurement | — | `align_elements` answers with a (dx, dy); `compare_element` answers with a percent + cluster bboxes |
+| DOM-reported geometry is suspect (transforms, sub-pixel layout, dynamic positioning) | `align_elements` | — | — | `align_elements` only uses bbox to seed a search; the answer is grounded in pixels |
+
+**Score conventions differ.** This is the most common cross-tool misread:
+
+- `compare_element`, `compare_screenshot`, `visual_diff` report **`Diff: N.NN%`** (lower = better) plus `Match: YES/NO` against `maxDiffPercent` (default 5%).
+- `design_audit` reports **`visualScore`** computed as `1 - diffPercentage/100`, range `[0, 1]`, 4 decimals (higher = better).
+- `pixelmatch` threshold knob: `precise` (0.1, default for `compare_*`) or `design` (0.3, default for `design_audit`). The threshold is per-pixel sensitivity, not the score.
+
+### Mask contract {#mask-contract}
+
+`compare_element` and `compare_screenshot` accept pixelmatch-time mask flags:
+
+- `ignoreImages` / `ignoreBackgrounds` — by element kind. img tags / `background-image` rules.
+- `ignoreAllImages` — `ignoreImages + ignoreBackgrounds`.
+- `ignoreText` — every text-line bbox via TreeWalker + Range.getClientRects.
+- `ignoreElements: [{selector, mode}]` — by selector; `mode` is `"invisible"` (alpha 0) or `"position-only"` (gray fill, position still verified).
+- `ignoreRegions: [{x, y, width, height, mode?, reason?}]` — manual rects.
+
+Mask bboxes from selectors are **re-collected on every call** at the moment between screenshot capture and the post-screenshot evaluate. They follow the live element's current position. Manual `ignoreRegions` rects are static and do not.
+
+> **Hazard (race on animation):** the screenshot via Playwright's `page.screenshot()` and the bbox query via a subsequent `page.evaluate()` are two sequential awaits with no synchronization barrier. An element animating between them desyncs the mask from the screenshot. Mitigation: inject a freeze stylesheet via `actions: [{type: "evaluate", expression: "document.head.appendChild(...)"}]` (browser-mcp has no `freezeAnimations` flag on `compare_element`/`compare_screenshot`; `design_audit` does), or use `delay` past the longest in-flight transition, or double-capture and verify ≥ 0.99 inter-screenshot diff.
+
+> **Hazard (mask coverage trap):** masks that obscure most of the comparison region produce trivially-high match scores — when both crops have matching gray fills, pixelmatch reports near-zero diff regardless of underlying layout. The combination `ignoreAllImages: true` + `ignoreText: true` on a content-heavy block is the canonical case (most visible content masked, only wrapper background remains). The tool reports `Mask coverage: N.N%` and emits a warning when coverage > 60% with both flags active. Full symptom-and-fix at § Diagnosis › Mask coverage trap.
+
+### Hide contract (design_audit only) {#hide-contract}
+
+`design_audit` accepts:
+
+- `hideSelectors: [selector]` — applies `visibility: hidden` BEFORE screenshot. Pixels are absent from the PNG entirely. `hiddenArea` reported as % of root area.
+- `knownExclusions: [selector]` — post-hoc cluster classification, not masking. Diff clusters overlapping these elements get `status: "excluded"` instead of `"unexplained"`. No effect on the screenshot itself.
+
+**`design_audit` does NOT support the `compare_element` mask API.** No `ignoreElements`, `ignoreAllImages`, `ignoreText`, or `ignoreRegions`. The analogue is `hideSelectors`, with a different mechanism (pre-screenshot suppression) and a different gate (`hiddenArea > 25%` hard-fail).
+
+### Alignment contract {#alignment-contract}
+
+`compare_element` accepts two mutually-exclusive alignment modes for shifting the reference crop to match the live element:
+
+- `alignTo: "top" | "center"` — element-relative. Shifts the reference so the element's bbox lands at top-left or center.
+- `alignOn: {referenceRect, frontendSelector, mode?}` — anchor-pair. Shifts the reference so a named anchor in both sides aligns.
+
+Both compute `deltaX` / `deltaY` and apply that to the reference crop origin. `alignOn` warns when the delta exceeds 100px.
+
+> **Hazard (coordinate frame mismatch):** `alignOn.referenceRect` is consumed as image-pixel coords (HTML viewport, 1:1 with the reference PNG). Values supplied from a different frame (e.g. canvas-relative bboxes from a Figma file) absorb their conversion offset into `deltaX`/`deltaY`, and the comparison silently drifts. The 100px warning catches gross cases but not subtle ones. Full symptom-and-fix at § Diagnosis › Coordinate frame mismatch.
+
+### Align-vs-compare selection {#align-vs-compare-selection}
+
+`compare_element` (and friends) and `align_elements` look superficially related but answer different questions. Pick by the question shape, not by the artifact you have in hand:
+
+| Question | Tool | Output shape |
+|---|---|---|
+| "Does the live page match the reference, and where doesn't it?" | `compare_element` / `compare_screenshot` / `design_audit` | `Diff: N.NN%` + `Match: YES/NO` + cluster bboxes |
+| "By how many pixels is each element shifted from the reference?" | `align_elements` | per-element `delta: {x, y}` + `improvement` + classification |
+| "Is the misalignment a global shift, or per-element drift?" | `align_elements` | groups elements with similar deltas; commits at LCA as `rigid-with-parent` |
+| "Two static PNGs, no live page" | `visual_diff` | `Diff: N.NN%` |
+
+**Mechanism difference.** `compare_element`'s `alignTo`/`alignOn` shifts the *reference crop* before scoring (a one-shot offset to the comparison frame). `align_elements` finds a per-element shift via SAD template-matching of the *live* element's pixels against a search window in the reference, then applies CSS `transform: translate(dx, dy)` on the live page so the recovered alignment is visually confirmable. The `compare_element` deltas are inputs you provide; the `align_elements` deltas are outputs the tool computes.
+
+**Trust boundary.** `align_elements` deliberately downplays DOM-reported coordinates. `getBoundingClientRect()` only seeds the search center — the chosen delta is grounded in pixel SAD. Use this when computed-style or `getBoundingClientRect()` numbers are suspect (CSS transforms in the ancestry chain, sub-pixel layout, dynamic positioning libraries, content-visibility quirks). When DOM coordinates are trustworthy, `compare_element` with `alignTo` is faster.
+
+### Coverage contract {#coverage-contract}
+
+Both `compare_element`/`compare_screenshot` and `design_audit` surface coverage metrics, but with different semantics:
+
+- `compare_element` / `compare_screenshot`: **`Mask coverage: N.N%`** — % of the comparison region (cropW × cropH for `compare_element`, full pageImg for `compare_screenshot`) covered by the union of mask regions, dedup-merged via bitmap. 1 decimal precision.
+- `design_audit`: **`hiddenArea`** — % of `rootSelector`'s area covered by `hideSelectors` matches, naive sum (no dedup; overlapping selectors over-count). 1 decimal precision.
+- `design_audit.coverageManifest`: takes `nodeNames: string[]` and `propertyCounts: {[name]: number}` (typically from figexport's `resolve_styles _meta`); reports per-element coverage stats and unmapped node count. Additional fields produced by upstream tooling (e.g. figexport's `propertyHashes`) are accepted and ignored — browser-mcp does not currently consume them. If a future enforcement check is added, it will be a non-breaking schema extension; producers can pass extras safely today.
+
+Both metrics are percentages, both 1 decimal. Tool-emitted warnings: `maskCoverage > 50%` (generic), `maskCoverage > 60%` with both broad flags (mask-coverage trap fingerprint). `hiddenArea` has no per-call warning; consumers gate it externally.
+
+### Action contract {#action-contract}
+
+`compare_element`, `compare_screenshot`, `design_audit`, and `screenshot` accept `actions: [...]` arrays that run before the capture. Action types:
+
+- `click`, `type`, `hover`, `scroll`, `wait`, `wait_for_selector`, `assert_text`, `assert_count`, `evaluate`, `set_storage`, `set_cookies`, `select_option`, etc.
+
+Assertions inside `actions` produce `assertions` output messages but don't fail the call by themselves. The `evaluate` action is the workaround route for animation-freezing on tools that lack `freezeAnimations` — pass a `<style>` injection that pauses animations and disables transitions.
+
+### Session contract {#session-contract}
+
+- `open_session({ browser, viewport })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls.
+- All primitives accept optional `session_id` + `tab_id`. Without `session_id`, the tool spins an ephemeral context per call.
+- `close_session({ session_id })` releases the context; `list_sessions()` enumerates active ones.
+
+> **Hazard:** ephemeral sessions cannot accept cookies, storage, or auth state from prior calls — every ephemeral call is a fresh anonymous browser. For multi-step flows that need persistence (login → action → capture), open a session and pass `session_id` to every call.
+
+## Surfaces {#surfaces}
+
+Surface granularity is **per contract**, not per tool. Tools that share a contract (e.g. all four compare tools share the mask contract) point to one section. Tools without a contract entry are routine — see § Command index.
+
+### compare_element {#surface-compare-element}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** live ↔ reference PNG comparison anchored on a CSS selector. Crop window auto-derived from `getBoundingClientRect() + padding` (default 50px). Masking, alignment, coverage reporting all flow through this tool.
+
+**Not authoritative for:** full-page comparisons (use `compare_screenshot`); CSS-property comparisons (use `design_compare`); element-level cross-reference of clusters (use `design_audit`).
+
+**Coordinate frame:** HTML viewport / image-pixel (1:1). All inputs (`ignoreRegions`, `alignOn.referenceRect`) and outputs (cluster bboxes, mask region rects) live here.
+
+**Common misreads:**
+- *Score reads `Diff: 5%` but `design_audit` reports 0.95* — those are inverse conventions on the same underlying number. `compare_element` reports diff-percent (lower better); `design_audit` reports `visualScore` (higher better). Both are correct.
+- *Mask covers most of the crop; score is 99%* — see § Mask contract › mask coverage trap. Re-run unmasked to get the honest score.
+- *`alignOn.referenceRect` taken from a non-viewport coordinate frame* — see § Alignment contract › coordinate frame mismatch. Convert first or use `alignTo` for the element-relative shortcut.
+- *Crop region exceeds reference image bounds* — pass `boundsHandling: "intersect"` to clamp, or use `alignTo`/`alignOn` to shift the reference origin.
+
+### align_elements {#surface-align-elements}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** per-element pixel-shift measurement against a reference PNG. For each candidate element, finds the integer (dx, dy) such that `transform: translate(dx, dy)` makes the live element's pixels best match the reference, then optionally applies the transforms and captures an aligned screenshot for visual confirmation. Discovers candidates from baseline diff clusters when `selectors` is omitted; tags candidates with a transient `data-align-id` attribute that's stripped before the tool returns.
+
+**Not authoritative for:** percentage-style match scoring (use `compare_element` / `compare_screenshot` / `design_audit` — `align_elements` reports per-pixel SAD, not pixelmatch percent over the whole crop); CSS-property comparisons (use `design_compare`); shifts that aren't pure 2D translations (`scale`, `rotate`, content swaps — see `classification` below).
+
+**Coordinate frame:** HTML viewport / image-pixel (1:1). Live screenshot and reference must have matching dimensions; tool errors out otherwise. Returned `delta.x` / `delta.y` are integer pixel offsets in this frame.
+
+**Search strategy:** the per-element search radius is derived from baseline diff cluster geometry (a 12px-tall red strip can't imply more than ~12px of vertical shift). Default floor 3px, ceiling 60px, auto-grows once if the first pass hits the radius edge. Override with `refineRadius` (floor) and `maxRadius` (ceiling). Score metric is RGB-channel SAD; alpha is ignored.
+
+**Classification.** Each candidate is classified into exactly one of:
+
+- `translation` — clear unique minimum, improvement ≥ `minImprovement` (default 0.005). Transform applied per-element.
+- `rigid-with-parent` — this element's delta matches a sibling group's delta within `uniformityTolerance`. The tool finds the lowest common ancestor inside `scope`, applies the shift there, and zeroes the per-element transform. The per-element delta is preserved in the report for diagnostic clarity. LCA is never `body` or `documentElement` — those are skipped to avoid moving content outside the candidate set.
+- `content-change` — element diffs but no translation reduces the diff. The element's pixels differ in kind (text content, color, image swap), not position. `align_elements` cannot fix this — switch to `compare_element` or `computed_styles`.
+- `size-mismatch` — template / reference crop has zero area or shape mismatch beyond what `translate` can correct. Translation alone cannot align; investigate via `computed_styles`.
+- `ambiguous` — a competing minimum within 1.1× of the best score sits ≥ 4px away. Typical of repetitive UI (grid items, lists). The tool reports the best of the tied set; the agent should disambiguate by sibling index or by passing an explicit `selectors` list.
+- `no-clusters` — no diff in this element's region; already aligned.
+
+**Common misreads:**
+- *Recovered delta is sign-flipped from "what I shifted in the live page"* — by design. The reported delta is the *correction* needed to align live → reference. If a build bug shifts the live element +12px right vs the reference, `align_elements` reports `dx: -12` (the transform needed to undo it).
+- *`scope` includes elements outside the page region of interest* — candidates that intersect any baseline cluster anywhere inside `scope` get tagged. Narrow `scope` to a meaningful container (`<main>`, a section selector) when whole-`body` discovery surfaces noise.
+- *`applyTransform: true` left visible CSS on the page after the call* — the tool strips `data-align-id` attributes at the end, but transforms persist on the live DOM (intentionally — that's the visual-confirmation channel). If you re-use the same session for further tools, navigate away or hard-reload to clear the inline styles.
+- *Image dimensions don't match (hard error)* — same as `compare_screenshot`: viewport must equal reference dimensions. The tool defaults `viewport` to the reference's WxH so this only trips when the agent overrode `viewport` explicitly.
+- *Mask flags moved the score but not the deltas* — masks are applied to the SCORING images only, never to the live page or the saved "before" PNG. The masks influence which pixels SAD considers, not where the search happens.
+
+**Mask contract:** identical to `compare_element` — `ignoreImages`, `ignoreBackgrounds`, `ignoreAllImages`, `ignoreText`, `ignoreElements`, `ignoreRegions`. The mask-coverage trap (§ Mask contract) applies: heavily-masked candidates may report spuriously high `improvement`. The tool does not currently emit a coverage warning specific to `align_elements`; check the saved diff PNGs.
+
+**Output artefacts:** `align-before-*.png` (initial screenshot, no transforms), `align-diff-before-*.png` (baseline diff), `align-after-*.png` (post-transform screenshot, present only when `applyTransform: true` and at least one delta was non-zero), `align-diff-after-*.png` (final diff against reference).
+
+### compare_screenshot {#surface-compare-screenshot}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** full-viewport (or `startY`/`endY`-clipped) live ↔ reference PNG comparison, no selector. Mask contract identical to `compare_element`.
+
+**Not authoritative for:** element-anchored crops (use `compare_element`); CSS-property comparisons (use `design_compare`).
+
+**Coordinate frame:** HTML viewport / image-pixel.
+
+**Common misreads:**
+- *"Image dimensions don't match" hard error* — viewport doesn't match the reference image's WxH. The tool requires equal dims; resize the reference, or use `compare_element` if you only care about a region.
+- Same score-convention and mask-coverage-trap misreads as `compare_element`.
+
+### visual_diff {#surface-visual-diff}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** pixelmatch between two static PNGs, no browser launched. Optional `crop: true` auto-crops to the smaller of the two when dimensions differ. Useful as the final step in a manual capture-then-compare flow.
+
+**Not authoritative for:** anything requiring live page state. No mask flags — preprocess the PNGs externally if you need masking.
+
+**Coordinate frame:** image-pixel only.
+
+**Common misreads:**
+- *Used to verify a live page change* — `visual_diff` doesn't navigate. Use `compare_screenshot` or `compare_element` for live URL → reference flows.
+
+### design_audit {#surface-design-audit}
+
+**Produced by:** `design-compare` plugin.
+
+**Mode:** none required. `design_audit` does **not** gate on a mode — it runs against any URL the live browser context can reach. It's commonly used inside a session that opted into `wordpress` mode (so authenticated WP admin pages render), but that's a session-context choice, not a tool gate. There is no `design` mode; the design-compare plugin registers tools, not modes.
+
+**Authoritative for:** end-to-end design compliance check. Runs `design_compare` (CSS property comparison) + visual diff + cross-references diff clusters back to named elements. Output groups clusters as `explained` (overlap an element with property mismatches), `excluded` (overlap a `knownExclusions` selector), or `unexplained`. `coverageManifest` enables element/property coverage stats.
+
+**Not authoritative for:** raw pixelmatch (use `compare_screenshot`); element-cropped comparison (use `compare_element`); arbitrary CSS-property check without a design spec (use `computed_styles`).
+
+**Coordinate frame:** HTML viewport. Element bboxes are reported relative to `rootSelector.boundingBox()` (subtracted) for cluster-cross-reference.
+
+**Common misreads:**
+- *Looking for `ignoreElements` / `ignoreText` / `ignoreRegions`* — `design_audit` doesn't have them. The analogue is `hideSelectors` (pre-screenshot suppression) and `knownExclusions` (post-hoc cluster classification, no visual effect).
+- *`hiddenArea` value used as a fraction* — it's a percentage (1 decimal). Comparing against `0.25` reads it as a quarter of a percent; consumers gating on it should compare against `25`.
+- *Cluster cross-reference shows `unexplained` after a fix* — `design_compare` ran before the fix; re-run `design_audit` after the fix and the cluster classification will update.
+- *Animation race not caught despite `freezeAnimations: true`* — this flag is `design_audit`-only. If both sides are loaded (e.g. `referenceUrl` for the reference), the flag injects on both. For `compare_*` tools, see § Mask contract › race on animation for the manual workaround.
+
+### design_compare {#surface-design-compare}
+
+**Produced by:** `design-compare` plugin.
+
+**Authoritative for:** CSS-property comparison live ↔ design spec. Tolerant numeric comparison (px tolerance, max 2px cap), color normalization, font-family primary comparison (parses fallback stack), pseudo-element support. No screenshots taken.
+
+**Not authoritative for:** visual / pixel comparison (`design_audit` runs `design_compare` + visual; or use `compare_*` tools); coordinate-based checks beyond `bbox.width` / `bbox.height` (use `evaluate_script` for `getBoundingClientRect()`).
+
+**Coordinate frame:** none — compares CSS values, not coordinates.
+
+**Common misreads:**
+- *Tolerance "2px" was passed but a 4px delta is reported as match* — tolerance silently caps at 2px (anti-gaming). The capped value is echoed in the output.
+- *Font-family test fails despite the same font* — the comparison parses primary font from fallback stacks via `parseFontStack`. If both sides use the same primary, it matches. For exact-string match, pre-normalize.
+- *Position / displacement changes don't move the result* — `design_compare` checks the property list you supplied; if `transform` isn't in the list, displacement is invisible. Use `design_audit`'s visual phase for positional verification.
+
+### list_modes {#surface-list-modes}
+
+**Produced by:** core (always registered, regardless of plugin set).
+
+**Authoritative for:** enumeration of currently registered modes in this server process. Output reflects the env-var-loaded plugin set.
+
+**Not authoritative for:** anything about plugins that aren't loaded. A skipped plugin produces no entry; the tool can't tell you "this would be present if you set `WP_URL`."
+
+**Coordinate frame:** none.
+
+**Common misreads:**
+- *"No modes registered"* — see § Diagnosis › Mode not registered. Plugin loader silently skipped one or more plugins for missing env. Stderr has the full list of skips.
+
+## When sources disagree {#when-sources-disagree}
+
+When two sources of truth (live page state, reference image, design spec, prior comparison output) point at different answers, the precedence rule for picking the right tool lives at § Cross-cutting concepts › [Compare-tool selection](#compare-tool-selection). Score-convention reconciliation (diff-percent vs `visualScore`) is in the same subsection. Phenomenon-level disagreements (mask trap, coordinate-frame drift, animation race) are catalogued under § Diagnosis.
+
+## Common workflows {#workflows}
+
+### Compare a built block to a design reference
+
+1. Source the design's expected properties (typically from a figexport-style `resolve_styles` output that produces `nodeNames`, `propertyCounts`, and per-element expected values).
+2. Build `elements: [{name, selector, expected}]` from those expected values.
+3. Invoke `design_audit({rootSelector, elements, referenceImage, hideSelectors?, knownExclusions?, coverageManifest?})`.
+4. Read `visualScore`, per-element results, and cluster cross-reference. Property mismatches surface in `elements[].results`; visual-only misses surface as `unexplained` clusters with `domHints`.
+
+### Investigate a low score
+
+1. Inspect `Mask coverage: N.N%` on `compare_element`/`compare_screenshot` output. If high (and especially if both `ignoreAllImages` and `ignoreText` are active), the score may be a mask-coverage-trap artifact — re-run unmasked.
+2. Inspect `clusterAnnotations` — these tell you which DOM elements overlap each diff cluster.
+3. For positional claims, use `computed_styles` and `evaluate_script` to read `getBoundingClientRect()` directly on the live element. Reconcile against the design source value, accounting for coordinate-frame conversion (see § Coordinate spaces).
+4. If the live and reference agree on element position but the diff persists, look for sibling drivers (an element near the cited one that's actually causing the diff) — `clusterAnnotations` will name them.
+
+### Measure how far off elements are from a reference
+
+1. Capture the reference PNG (or use one supplied by upstream tooling). Reference + viewport must agree on WxH.
+2. Invoke `align_elements({url, referenceImage, scope?})`. Default `scope` is `body`; narrow it to the relevant container to suppress noise from unrelated regions.
+3. Read the per-element table. `translation` rows give you the (dx, dy) correction. `rigid-with-parent` rows tell you the misalignment is a single-shift error at an ancestor; the report names the ancestor. `content-change` rows tell you the element's *content* differs (text, color, image swap) — `align_elements` can't help, switch tools.
+4. If `applyTransform: true` (the default), `align-after-*.png` shows the live page with the recovered transforms applied. Diff this against the reference to confirm; the tool's reported aligned-diff number is the same measurement.
+5. To investigate without disturbing the live DOM, pass `applyTransform: false`. The tool still computes deltas and saves the baseline diff; no transforms are applied to the page.
+
+### Open a persistent session for a multi-step flow
+
+1. `open_session({browser: "chromium", viewport: {...}})` → returns `session_id`.
+2. Pass `session_id` to every subsequent tool call.
+3. `close_session({session_id})` when done. Sessions auto-touch on every call to keep them alive against the idle timeout.
+
+## Diagnosis {#diagnosis}
+
+Generic phenomena that consumers run into. Each entry is named for cross-doc grep — the name describes the phenomenon, not a specific historical case.
+
+Quick symptom lookup:
+
+| Symptom | Phenomenon |
+|---|---|
+| `list_modes` returns "No modes registered" or an expected mode is absent | [Mode not registered](#mode-not-registered) |
+| `Match: YES` / high `visualScore` with visible mismatch on the live page; `Mask coverage: N.N%` is high | [Mask coverage trap](#mask-coverage-trap) |
+| `alignOn` warns "delta exceeds 100px," or delta is small but the comparison drifts in a consistent direction across runs | [Coordinate frame mismatch](#coordinate-frame-mismatch) |
+| Mask in the diff PNG doesn't line up with the masked element's actual rendered position | [Animation race](#animation-race) |
+| `align_elements` reports `ambiguous-minimum` warning, or two distant deltas with similar scores | [Repetitive-UI ambiguity](#repetitive-ui-ambiguity) |
+| `align_elements` reports `hit-search-edge` and a delta equal to `maxRadius` | [Search radius too small](#search-radius-too-small) |
+| `align_elements` reports `content-change` for elements that visibly look misaligned | [Content vs translation misclassification](#content-vs-translation) |
+
+### Mode not registered {#mode-not-registered}
+
+**Symptom:** `mcp__browser__list_modes` returns "No modes registered" or an expected mode (e.g. `wordpress`) is missing; tools that mode would have provided come back as deferred-but-unresolvable. Or, more subtly: plugin A loaded fine but plugin B (which depends on A) is silently absent.
+
+**Cause:** silent plugin skip from missing env. A plugin with a missing required env var is skipped at load time. Plugins depending on the skipped plugin cascade-skip. The server boots cleanly; affected modes are never registered.
+
+**Fix:** check stderr from server boot for the skip reasons — the cascade is deterministic, so fixing the root cause unblocks all dependents. Add the missing env var to the project's `.mcp.json` (or to `~/.claude.json` for user scope). Remember that MCP scopes replace, not merge — the project entry must duplicate the full env block. Restart Claude Code (a full restart, not `/mcp` reconnect) to pick up env changes.
+
+### Mask coverage trap {#mask-coverage-trap}
+
+**Symptom:** `compare_element` or `compare_screenshot` reports `Match: YES` with low diff percent (or `design_audit` reports a high `visualScore`), but the live page visibly does not match the reference. `Mask coverage: N.N%` is high.
+
+**Cause:** masks obscure most of the comparison region. The remaining unmasked area is uniform across both sides (typically wrapper background) and trivially matches. The combination `ignoreAllImages: true` + `ignoreText: true` on content-heavy regions is the canonical fingerprint, but any mask configuration that exceeds ~60% coverage warrants verification.
+
+**Fix:** re-run with masks removed (or with a narrower set) and read the unmasked score. Treat the unmasked score as the honest measurement; masked-flag invocations are diagnostic isolations, not headline numbers. The tool emits a warning when coverage > 60% with both broad flags; consumers can gate on `Mask coverage: N.N%` directly.
+
+When the consumer's mask configuration is built from upstream design-tooling outputs (e.g. figexport's `masked.json` regions), see `../figexport/llms-full.txt#masked-region-semantics` for what those regions are intended to express — that's the source-side rule that this phenomenon is the consumer-side violation of.
+
+### Coordinate frame mismatch {#coordinate-frame-mismatch}
+
+**Symptom:** `compare_element` `alignOn` reports a delta that exceeds the 100px warning threshold, OR delta is small but the comparison drifts in a consistent direction across runs.
+
+**Cause:** values from a non-viewport coordinate frame (e.g. canvas-relative bboxes from a design source file) were supplied to a viewport-pixel field. The conversion offset between frames absorbs into `deltaX` / `deltaY` and shifts the reference crop. The phenomenon is generic — it applies any time non-viewport coords cross the API boundary, not just on `alignOn.referenceRect`.
+
+**Fix:** convert source coords to HTML viewport pixels before passing them to the tool. The conversion rule for crossing frames lives at § Cross-cutting concepts › Coordinate spaces (and at `../figexport/llms-full.txt#coordinate-spaces` for the upstream-side full treatment). If you only need element-relative alignment, use `alignTo: "top"|"center"` instead of `alignOn` — `alignTo` doesn't take user-supplied coordinates, so it's immune to this class of misread.
+
+### Animation race {#animation-race}
+
+**Symptom:** mask in the diff PNG doesn't line up with the masked element's actual rendered position; pixels that should be masked aren't, or vice versa.
+
+**Cause:** between `compare_element`/`compare_screenshot`'s screenshot capture and its post-screenshot mask-bbox query, an animation or transition fired that moved or resized the masked element. The mask rect describes a position the element no longer occupies in the captured pixels.
+
+**Fix:** stabilize before the capture. Either inject a freeze stylesheet via the `actions` array (`{type: "evaluate", expression: "..."}` adding `*, *::before, *::after { animation-play-state: paused !important; transition: none !important; }`), or pass `delay` greater than the longest transition duration in the block, or use `design_audit`'s `freezeAnimations: true` flag if applicable. Verify by double-capturing — two screenshots taken 1 s apart should diff at ≥ 0.99.
+
+### Repetitive-UI ambiguity {#repetitive-ui-ambiguity}
+
+**Symptom:** `align_elements` reports `[ambiguous]` classification or `ambiguous-minimum` warning on an element. Multiple deltas tied within 1.1× of the best score sit ≥ 4px apart.
+
+**Cause:** the candidate element's pixels appear at multiple plausible positions in the reference window — typical of grid items, repeated icons, list rows. SAD can't tell them apart by pixels alone.
+
+**Fix:** disambiguate structurally rather than visually. Pass an explicit `selectors` list with a more specific selector (e.g. `:nth-of-type(3)` or an `id`-anchored path) so the tool only considers one candidate per visual instance. If the repetition is itself the misalignment (e.g. one card moved into another's slot), `align_elements` is the wrong tool — use `compare_element` per-card with `alignTo` to verify each instance independently.
+
+### Search radius too small {#search-radius-too-small}
+
+**Symptom:** `align_elements` reports `hit-search-edge` warning with a delta equal to `maxRadius` (default 60). The aligned-diff is reduced but not minimized.
+
+**Cause:** the real shift exceeds the search radius. Cluster geometry is supposed to set the radius automatically (a 12px-tall red strip implies ≤ 12px of vertical shift), but baseline diff clustering caps at `topClusters` and a small element near a much larger cluster can hit the ceiling.
+
+**Fix:** raise `maxRadius` (e.g. 120) and re-run. If the shift is genuinely large (> ~100px), DOM-reported coordinates may be the better starting point — use `compare_element` with `alignOn` and a known anchor pair instead. The element being far off-position from where its DOM position implies is itself a finding worth surfacing.
+
+### Content vs translation misclassification {#content-vs-translation}
+
+**Symptom:** `align_elements` classifies an element as `content-change` even though it visually looks misaligned, OR classifies it as `translation` with a small delta when the real bug is a content swap (different text, different image, color shift).
+
+**Cause:** the classifier compares baseline-diff to aligned-diff at the chosen delta. If translation reduces the diff by less than `minImprovement` (default 0.005), the element is labelled `content-change`. If translation reduces the diff a lot but the residual is still high, the label is `translation` even though more is wrong.
+
+**Fix:** read both `improvement` and `alignedDiff` together, not just the classification.
+- High `improvement` + low `alignedDiff` → real translation, fix is the reported delta.
+- High `improvement` + high `alignedDiff` → translation helps but doesn't finish; there's a content delta layered on top. Run `compare_element` with the recovered delta as `alignTo`-equivalent input to inspect the residual.
+- Low `improvement` + high `alignedDiff` → genuine content change. Switch to `compare_element` (for visual diff) or `design_compare` (for property-level checks).
+
+If `minImprovement` looks too aggressive for a particular case (small elements where a 0.005 SAD shift represents meaningful realignment), lower it via the parameter.
+
+## Versioning {#versioning}
+
+This document tracks `browser-mcp` main; for behavior at a specific commit see `git log src/`. Material contract changes (new fields, threshold tweaks, contract additions) update this file in the same PR.
