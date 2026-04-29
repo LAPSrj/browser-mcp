@@ -165,7 +165,7 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "compare_screenshot",
       description:
-        "Take a screenshot of a URL and compare it pixel-by-pixel against a reference image. The page viewport width is automatically matched to the reference image width. Supports clipping the screenshot to a vertical range with startY/endY." +
+        "Take a screenshot of a URL and compare it pixel-by-pixel against a reference image. The page viewport width is automatically matched to the reference image width. Supports clipping the screenshot to a vertical range with startY/endY or a horizontal range with startX/endX (the reference image must already be cropped to the matching dimensions)." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
         url: z.string().describe(urlCaptureDesc.replace("screenshot", "screenshot and compare")),
@@ -181,6 +181,8 @@ const devPlugin: ScreenshotPlugin = {
         delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
         startY: z.number().optional().describe("Y coordinate to start the screenshot clip from (pixels from top)"),
         endY: z.number().optional().describe("Y coordinate to end the screenshot clip at (pixels from top)"),
+        startX: z.number().optional().describe("X coordinate to start the screenshot clip from (pixels from left). Reference image must already be cropped to match"),
+        endX: z.number().optional().describe("X coordinate to end the screenshot clip at (pixels from left). Reference image must already be cropped to match"),
         ignoreImages: z.boolean().optional().describe("Replace all <img> elements with solid blocks so only their position/size is compared (default: false)"),
         ignoreBackgrounds: z.boolean().optional().describe("Replace all elements with a CSS background-image with solid blocks (default: false)"),
         ignoreAllImages: z.boolean().optional().describe("Shorthand for ignoreImages + ignoreBackgrounds (default: false)"),

@@ -20,6 +20,8 @@ export interface ScreenshotParams {
   delay?: number;
   startY?: number;
   endY?: number;
+  startX?: number;
+  endX?: number;
 }
 
 interface ScreenshotResult {
@@ -49,6 +51,8 @@ export async function screenshotTool(params: ScreenshotParams) {
     delay = 0,
     startY,
     endY,
+    startX,
+    endX,
   } = params;
 
   const tasks: Promise<{ result: ScreenshotResult; consoleLogs: ConsoleEntry[]; actionStop?: ActionStopResult; assertions: AssertionResult[] }>[] = [];
@@ -90,10 +94,10 @@ export async function screenshotTool(params: ScreenshotParams) {
               type: "png",
             };
 
-            if (startY !== undefined || endY !== undefined) {
-              const clipX = 0;
+            if (startY !== undefined || endY !== undefined || startX !== undefined || endX !== undefined) {
+              const clipX = startX ?? 0;
               const clipY = startY ?? 0;
-              const clipWidth = vp.width;
+              const clipWidth = (endX ?? vp.width) - clipX;
               const clipHeight = (endY ?? vp.height) - clipY;
               screenshotOptions.clip = { x: clipX, y: clipY, width: clipWidth, height: clipHeight };
               screenshotOptions.fullPage = false;

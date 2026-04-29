@@ -127,6 +127,8 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
       startY: z.number().optional().describe("Y coordinate to start the screenshot clip from (pixels from top)"),
       endY: z.number().optional().describe("Y coordinate to end the screenshot clip at (pixels from top)"),
+      startX: z.number().optional().describe("X coordinate to start the screenshot clip from (pixels from left). Defaults to 0. For a center crop of width W, pass startX = (viewport.width - W) / 2"),
+      endX: z.number().optional().describe("X coordinate to end the screenshot clip at (pixels from left). Defaults to viewport width"),
       ...useSchemaField,
     },
     wrap(async (params) => screenshotTool(resolveParams(params)) as any),

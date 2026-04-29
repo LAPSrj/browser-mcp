@@ -269,7 +269,7 @@ Surface granularity is **per contract**, not per tool. Tools that share a contra
 
 **Produced by:** `dev` plugin.
 
-**Authoritative for:** full-viewport (or `startY`/`endY`-clipped) live ↔ reference PNG comparison, no selector. Mask contract identical to `compare_element`.
+**Authoritative for:** full-viewport (or `startY`/`endY` / `startX`/`endX`-clipped) live ↔ reference PNG comparison, no selector. Mask contract identical to `compare_element`.
 
 **Not authoritative for:** element-anchored crops (use `compare_element`); CSS-property comparisons (use `design_compare`).
 

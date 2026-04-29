@@ -27,6 +27,8 @@ export interface CompareScreenshotParams {
   delay?: number;
   startY?: number;
   endY?: number;
+  startX?: number;
+  endX?: number;
   ignoreImages?: boolean;
   ignoreBackgrounds?: boolean;
   ignoreAllImages?: boolean;
@@ -60,6 +62,8 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
     delay = 0,
     startY,
     endY,
+    startX,
+    endX,
     ignoreImages,
     ignoreBackgrounds,
     ignoreAllImages,
@@ -101,10 +105,12 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
 
     const screenshotOptions: Record<string, unknown> = { type: "png" };
 
-    if (startY !== undefined || endY !== undefined) {
+    if (startY !== undefined || endY !== undefined || startX !== undefined || endX !== undefined) {
+      const clipX = startX ?? 0;
       const clipY = startY ?? 0;
+      const clipWidth = (endX ?? viewportWidth) - clipX;
       const clipHeight = (endY ?? viewportHeight) - clipY;
-      screenshotOptions.clip = { x: 0, y: clipY, width: viewportWidth, height: clipHeight };
+      screenshotOptions.clip = { x: clipX, y: clipY, width: clipWidth, height: clipHeight };
     }
 
     const screenshotBuffer = await session.page.screenshot(screenshotOptions);
@@ -135,19 +141,20 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
           `  Screenshot: ${pageImg.width}x${pageImg.height}`,
           `  Screenshot saved: ${screenshotPath}`,
           `  Screenshot preview (small): ${previewPath}`,
-          `Adjust startY/endY or viewport to get matching dimensions.`,
+          `Adjust startY/endY/startX/endX or viewport to get matching dimensions.`,
         ].join("\n"),
       });
       return { content };
     }
 
+    const clipX = startX ?? 0;
     const clipY = startY ?? 0;
     const maskCoverage = maskRegions.length > 0
-      ? computeMaskCoverage(maskRegions, { x: 0, y: clipY, width: pageImg.width, height: pageImg.height })
+      ? computeMaskCoverage(maskRegions, { x: clipX, y: clipY, width: pageImg.width, height: pageImg.height })
       : 0;
     if (maskRegions.length > 0) {
-      applyMask(pageImg, maskRegions, 0, clipY);
-      applyMask(refImg, maskRegions, 0, clipY);
+      applyMask(pageImg, maskRegions, clipX, clipY);
+      applyMask(refImg, maskRegions, clipX, clipY);
     }
 
     const { width, height } = refImg;
@@ -168,6 +175,7 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
 
     const clusters = findDiffClusters(diff, { topN: clustersTopN });
     const clusterAnnotations = await annotateClusters(session.page, clusters, {
+      offsetX: clipX,
       offsetY: clipY,
     });
 
@@ -208,7 +216,7 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
           ...(maskRegions.length > 0
             ? [`  Mask: ${maskRegions.length} region${maskRegions.length === 1 ? "" : "s"}, ${maskCoverage.toFixed(1)}% coverage`]
             : []),
-          ...formatClustersCompact(clusters, 0, clipY),
+          ...formatClustersCompact(clusters, clipX, clipY),
           `  Diff: ${diffPath}`,
           `  Actual: ${screenshotPath}`,
           `  Reference: ${referenceImage}`,
@@ -228,7 +236,7 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
           ...maskRegions
             .filter((r) => r.reason)
             .map((r) => `    - [${r.mode}] x=${Math.floor(r.x)} y=${Math.floor(r.y)} w=${Math.ceil(r.width)} h=${Math.ceil(r.height)} — ${r.reason}`),
-          ...formatClusters(clusters, 0, clipY, clusterAnnotations),
+          ...formatClusters(clusters, clipX, clipY, clusterAnnotations),
           `  Reference: ${referenceImage}`,
           `  Screenshot saved: ${screenshotPath}`,
           `  Screenshot preview (small): ${screenshotPreviewPath}`,
