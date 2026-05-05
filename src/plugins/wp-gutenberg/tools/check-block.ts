@@ -25,6 +25,7 @@ export function createCheckBlockHandler(
     post_id: number;
     block_name: string;
     attributes?: Record<string, unknown>;
+    inner_blocks?: unknown[];
     frontend_selector?: string;
     viewport?: { width: number; height: number };
     outputDir?: string;
@@ -33,6 +34,7 @@ export function createCheckBlockHandler(
       post_id,
       block_name,
       attributes,
+      inner_blocks,
       frontend_selector,
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
@@ -90,7 +92,14 @@ export function createCheckBlockHandler(
       }
 
       // 3. Insert block
-      const clientId = await insertBlock(session.page, block_name, attributes);
+      const clientId = await insertBlock(
+        session.page,
+        block_name,
+        attributes,
+        undefined,
+        undefined,
+        inner_blocks,
+      );
       await session.page.waitForTimeout(500);
 
       // 4. Check validity

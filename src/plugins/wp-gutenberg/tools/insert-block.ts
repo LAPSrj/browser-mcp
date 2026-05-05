@@ -2,7 +2,7 @@ import path from "node:path";
 import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, waitForBlockType, getEditorFrame, checkEditorError } from "../utils/editor.js";
-import { insertBlock, getBlocks, isBlockRegistered } from "../utils/wp-data.js";
+import { insertBlock, getBlocks, isBlockRegistered, savePost } from "../utils/wp-data.js";
 
 export function createInsertBlockHandler(
   core: CoreUtils,
@@ -15,8 +15,10 @@ export function createInsertBlockHandler(
     post_id: number;
     block_name: string;
     attributes?: Record<string, unknown>;
+    inner_blocks?: unknown[];
     index?: number;
     root_client_id?: string;
+    save?: boolean;
     screenshot?: boolean;
     viewport?: { width: number; height: number };
     outputDir?: string;
@@ -25,8 +27,10 @@ export function createInsertBlockHandler(
       post_id,
       block_name,
       attributes,
+      inner_blocks,
       index,
       root_client_id,
+      save = false,
       screenshot = true,
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
@@ -87,13 +91,20 @@ export function createInsertBlockHandler(
         attributes,
         index,
         root_client_id,
+        inner_blocks,
       );
 
       // Let the block render
       await session.page.waitForTimeout(500);
 
+      // Persist if requested — otherwise the insert dies with the session.
+      let savedPost: { id: number; link: string; status: string } | null = null;
+      if (save) {
+        savedPost = await savePost(session.page);
+      }
+
       // Get block state
-      const blocks = await getBlocks(session.page);
+      const blocks = await getBlocks(session.page, true);
       const inserted = blocks.find((b) => b.clientId === clientId);
 
       const content: Array<{ type: string; [key: string]: unknown }> = [];
@@ -106,6 +117,10 @@ export function createInsertBlockHandler(
           `Valid: ${inserted?.isValid ?? "unknown"}`,
           `Total blocks in editor: ${blocks.length}`,
           inserted ? `Attributes: ${JSON.stringify(inserted.attributes)}` : "",
+          inserted?.innerBlockCount
+            ? `Inner blocks: ${inserted.innerBlockCount}`
+            : "",
+          savedPost ? `Saved: ${savedPost.link} (${savedPost.status})` : "Not saved (set save: true to persist)",
         ].filter(Boolean).join("\n"),
       });
 

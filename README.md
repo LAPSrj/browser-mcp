@@ -220,7 +220,7 @@ BROWSER_MCP_PLUGINS=wp WP_URL=https://mysite.com WP_USERNAME=admin \
 Depends on `wp`. Enable with `BROWSER_MCP_PLUGINS=wp,wp-gutenberg`.
 Provides block-level tools for WordPress block editor workflows:
 
-- `wp-gutenberg_insert_block` — insert a block via `wp.data`
+- `wp-gutenberg_insert_block` — insert a block via `wp.data`; accepts `inner_blocks` for InnerBlocks parents (recursive tree seeding) and `save: true` to persist (default is in-memory only, ephemeral)
 - `wp-gutenberg_get_blocks` — list blocks in a post
 - `wp-gutenberg_screenshot_block` — editor / frontend screenshots
 - `wp-gutenberg_inspect_toolbar` — structured block toolbar listing
@@ -228,7 +228,7 @@ Provides block-level tools for WordPress block editor workflows:
 - `wp-gutenberg_evaluate` — run JS in an authenticated editor page
 - `wp-gutenberg_check_block` — insert + validate + a11y + screenshots
 - `wp-gutenberg_publish` — save / publish a post
-- `wp-gutenberg_block_html` — normalized editor + frontend HTML
+- `wp-gutenberg_block_html` — normalized editor + frontend HTML for structural diffing. Strips Gutenberg-universal noise (RichText UX, useBlockProps decoration, components-* / appender chrome, default classes for `supports.className: false` blocks, auto-generated wrapper IDs, semantic no-ops). Accepts `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts (intersection observers, scroll listeners, hydration markers).
 - `wp-gutenberg_clear_blocks` — wipe all blocks in a post
 
 Plus custom actions usable in any tool's `actions[]`: `gutenberg_insert`,

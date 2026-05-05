@@ -9,6 +9,7 @@ import {
   editPostStatus,
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
+import { normalizeBlockHtmlOnPage } from "../utils/normalize-html.js";
 
 /**
  * Return normalized HTML for a block in both editor and frontend contexts.
@@ -29,6 +30,10 @@ export function createBlockHtmlHandler(
     block_name?: string;
     frontend_selector?: string;
     save_before_frontend?: boolean;
+    strip_attributes?: string[];
+    strip_classes?: string[];
+    strip_css_vars?: string[];
+    strip_subtrees?: string[];
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -38,6 +43,10 @@ export function createBlockHtmlHandler(
       block_name,
       frontend_selector,
       save_before_frontend = true,
+      strip_attributes,
+      strip_classes,
+      strip_css_vars,
+      strip_subtrees,
     } = params;
 
     const session = await core.launchSession({
@@ -103,7 +112,40 @@ export function createBlockHtmlHandler(
         };
       }
 
-      const editorHtml = normalizeEditorHtml(editorInfo.rawHtml);
+      // Gather default classes for block types that declared
+      // supports.className: false. The editor's useBlockProps adds
+      // wp-block-{slug} regardless; useBlockProps.save respects the
+      // opt-out. Without this strip, every core/paragraph (and friends)
+      // inside an InnerBlocks zone produces a guaranteed editor/frontend
+      // class diff. Done here while we're still on the editor page —
+      // wp.blocks isn't available on the frontend.
+      const stripDefaultClasses = await session.page.evaluate(() => {
+        const wp = (window as any).wp;
+        if (!wp?.blocks?.getBlockTypes) return [] as string[];
+        const out: string[] = [];
+        for (const t of wp.blocks.getBlockTypes()) {
+          if (t?.supports?.className === false) {
+            const cls = wp.blocks.getBlockDefaultClassName?.(t.name);
+            if (cls) out.push(cls);
+          }
+        }
+        return out;
+      });
+
+      // Normalize editor HTML on the editor page (DOM-based — handles
+      // entities, attribute order, quoting consistently).
+      const normalizeOptions = {
+        stripDefaultClasses,
+        stripAttributes: strip_attributes,
+        stripClasses: strip_classes,
+        stripCssVars: strip_css_vars,
+        stripSubtrees: strip_subtrees,
+      };
+      const editorHtml = await normalizeBlockHtmlOnPage(
+        session.page,
+        editorInfo.rawHtml,
+        normalizeOptions,
+      );
       const blockName = block_name || editorInfo.name;
 
       // Gather hints before navigating away from the editor
@@ -135,7 +177,15 @@ export function createBlockHtmlHandler(
         await core.navigateTo(session.page, frontendUrl);
         const lookup = await findBlockOnFrontend(session.page, frontendHints, frontend_selector);
         if (lookup.matches.length > 0) {
-          frontendHtml = lookup.matches[0].html;
+          // Normalize on the frontend page so both sides go through the
+          // same parse → walk → outerHTML pipeline (canonical entities).
+          // Same options — symmetric strips, no-ops on the frontend side
+          // for entries that don't appear there.
+          frontendHtml = await normalizeBlockHtmlOnPage(
+            session.page,
+            lookup.matches[0].html,
+            normalizeOptions,
+          );
           frontendMatchedBy = lookup.matches[0].matchedBy;
           if (lookup.matches.length > 1) {
             diagnostics.frontend_match_count = lookup.matches.length;
@@ -163,65 +213,3 @@ export function createBlockHtmlHandler(
   };
 }
 
-/**
- * Strip editor-only noise from a block's outerHTML so it can be compared
- * structurally against the frontend rendering. Removes:
- *   - data-block, data-rich-text-*, data-type, data-title attributes
- *   - contenteditable, role="document", tabindex, aria-label attributes
- *     that only exist for editor UX
- *   - is-selected / is-hovered / is-highlighted / has-child-selected classes
- *   - .block-editor-block-toolbar and related wrapper nodes
- *   - wp-block-editor internal wrapper classes (block-editor-*)
- */
-function normalizeEditorHtml(raw: string): string {
-  let html = raw;
-
-  // Remove editor-only attributes (data-*, contenteditable, role=document, tabindex, spellcheck,
-  // aria-multiline, aria-describedby-like UX hooks)
-  html = html.replace(/\s(data-(?:block|type|title|rich-text-[\w-]+|empty|wp-block)|contenteditable|spellcheck|aria-multiline|tabindex)="[^"]*"/g, "");
-  html = html.replace(/\s(data-(?:block|type|title|rich-text-[\w-]+|empty|wp-block)|contenteditable|spellcheck|aria-multiline|tabindex)='[^']*'/g, "");
-  html = html.replace(/\srole="document"/g, "");
-  html = html.replace(/\srole='document'/g, "");
-
-  // Strip editor-only classes inside class="..." attributes. Handles single
-  // class values or space-separated lists while preserving the attribute.
-  const editorClasses = [
-    "is-selected",
-    "is-hovered",
-    "is-highlighted",
-    "has-child-selected",
-    "is-multi-selected",
-    "is-typing",
-    "is-focused",
-    "is-focus-mode",
-    "is-reusable",
-    "wp-block-post-content",
-  ];
-  html = html.replace(/class="([^"]*)"/g, (_m, cls) => {
-    const kept = String(cls)
-      .split(/\s+/)
-      .filter((c) => c && !editorClasses.includes(c) && !c.startsWith("block-editor-"))
-      .join(" ");
-    return kept ? `class="${kept}"` : "";
-  });
-  html = html.replace(/class='([^']*)'/g, (_m, cls) => {
-    const kept = String(cls)
-      .split(/\s+/)
-      .filter((c) => c && !editorClasses.includes(c) && !c.startsWith("block-editor-"))
-      .join(" ");
-    return kept ? `class='${kept}'` : "";
-  });
-
-  // Remove the floating block toolbar if it got captured (rare — it's
-  // usually a sibling of the block element, but we strip it defensively).
-  html = html.replace(
-    /<div[^>]*class="[^"]*block-editor-block-toolbar[^"]*"[^>]*>[\s\S]*?<\/div>/g,
-    "",
-  );
-
-  // Collapse whitespace between tags so whitespace-only diffs don't
-  // pollute comparisons.
-  html = html.replace(/>\s+</g, "><").trim();
-
-  return html;
-}

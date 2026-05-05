@@ -71,7 +71,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `insert_block` | Add a block to current post | depends on `wp` |
+| `insert_block` | Add a block to current post | depends on `wp`; `inner_blocks` seeds nested children; `save: true` persists |
 | `get_blocks` | Read current post's block tree | |
 | `screenshot_block` | Crop screenshot to block bbox | |
 | `inspect_toolbar` | Block toolbar state | |
@@ -79,7 +79,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `evaluate` | JS in editor iframe context | |
 | `check_block` | Validity / breakage check | |
 | `publish` | Save + publish current post | |
-| `block_html` | Block's serialized HTML | |
+| `block_html` | Normalized editor + frontend HTML for structural diff | strips Gutenberg noise; `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts |
 | `clear_blocks` | Empty the post | |
 
 ### Session / navigation primitives (every plugin)

@@ -29,6 +29,20 @@ import {
 } from "./utils/wp-data.js";
 import type { Page } from "playwright";
 
+// Recursive schema for an InnerBlocks tree node — { name, attributes?, innerBlocks? }.
+type InnerBlockNode = {
+  name: string;
+  attributes?: Record<string, unknown>;
+  innerBlocks?: InnerBlockNode[];
+};
+const innerBlockSchema: z.ZodType<InnerBlockNode> = z.lazy(() =>
+  z.object({
+    name: z.string().describe('Block name (e.g. "core/paragraph")'),
+    attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes"),
+    innerBlocks: z.array(innerBlockSchema).optional().describe("Nested children"),
+  }),
+);
+
 async function resolveTargetClientId(
   page: Page,
   params: Record<string, unknown>,
@@ -74,13 +88,21 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       description:
         "Insert a Gutenberg block into the WordPress editor. " +
         "Opens the post editor, inserts the block via wp.data, and returns the block state. " +
+        "Use inner_blocks to seed nested children (parent + items) in a single call. " +
+        "By default the insert is in-memory only — the change is discarded when the call returns. " +
+        "Pass save: true to persist via wp.data.dispatch('core/editor').savePost(). " +
         "Optionally takes a screenshot of the editor after insertion.",
       schema: {
         post_id: z.number().describe("WordPress post ID to edit"),
         block_name: z.string().describe('Block name (e.g. "core/paragraph", "my-plugin/my-block")'),
         attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes to set"),
+        inner_blocks: z.array(innerBlockSchema).optional().describe(
+          "Children to seed under this block (recursive). Each node: { name, attributes?, innerBlocks? }. " +
+          "Required for InnerBlocks parents whose items carry meaningful attributes (e.g. social-links).",
+        ),
         index: z.number().optional().describe("Position to insert at within the parent (default: append to end)"),
         root_client_id: z.string().optional().describe("Parent block's clientId for nested insertion"),
+        save: z.boolean().optional().describe("Persist the insert via savePost() before returning (default: false)"),
         screenshot: z.boolean().optional().describe("Take a screenshot of the editor after insertion (default: true)"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
@@ -179,13 +201,17 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "check_block",
       description:
-        "Comprehensive block validation. Inserts a block, checks registration and validity, " +
-        "captures console errors, takes editor + frontend screenshots, extracts frontend HTML, " +
-        "and runs an accessibility check. Returns all results in one call.",
+        "Comprehensive block validation. Inserts a block (optionally with inner_blocks), " +
+        "checks registration and validity, captures console errors, takes editor + frontend screenshots, " +
+        "extracts frontend HTML, and runs an accessibility check. Saves the post before reading the frontend. " +
+        "Returns all results in one call.",
       schema: {
         post_id: z.number().describe("WordPress post ID to use for testing"),
         block_name: z.string().describe('Block name (e.g. "my-plugin/my-block")'),
         attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes to set"),
+        inner_blocks: z.array(innerBlockSchema).optional().describe(
+          "Children to seed under this block (recursive). Each node: { name, attributes?, innerBlocks? }.",
+        ),
         frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
@@ -207,7 +233,12 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       name: "block_html",
       description:
         "Return normalized HTML for a specific block in both editor and frontend contexts. " +
-        "Strips editor-only noise so the two strings can be compared structurally.",
+        "Strips editor-only noise (Gutenberg internals, RichText UX, components-* chrome, " +
+        "InnerBlocks appender chrome, useBlockProps decoration, default classes for " +
+        "supports.className:false blocks) so the two strings can be compared structurally. " +
+        "Project-specific runtime artifacts (intersection-observer markers, scroll listeners, " +
+        "hydration flags) can be passed via strip_attributes / strip_classes / strip_css_vars / " +
+        "strip_subtrees — strips are applied symmetrically to both editor and frontend HTML.",
       schema: {
         post_id: z.number().describe("WordPress post ID"),
         block_index: z.number().optional().describe("Top-level block index, 0-based (default: 0)"),
@@ -216,6 +247,18 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         block_name: z.string().optional().describe("Block name — auto-detected from the editor when omitted"),
         frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
         save_before_frontend: z.boolean().optional().describe("Publish + save before reading the frontend (default: true)"),
+        strip_attributes: z.array(z.string()).optional().describe(
+          'Project-specific attributes to strip globally on every element. Each entry is either an exact name (e.g. "data-scroll-rotate-ready") or a trailing-* prefix pattern (e.g. "data-scroll-rotate-*").',
+        ),
+        strip_classes: z.array(z.string()).optional().describe(
+          "Project-specific class names to strip from class lists on every element (exact match).",
+        ),
+        strip_css_vars: z.array(z.string()).optional().describe(
+          'CSS custom property names to remove from inline style attributes on every element. Include the leading -- (e.g. "--scroll-rotate"). Other declarations on the same element are preserved.',
+        ),
+        strip_subtrees: z.array(z.string()).optional().describe(
+          "Class names that mark project-specific editor chrome. Any element bearing one of these classes is removed entirely with its subtree.",
+        ),
       },
       handler: createBlockHtmlHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -250,6 +293,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         params.attributes as Record<string, unknown> | undefined,
         params.index as number | undefined,
         params.root_client_id as string | undefined,
+        params.inner_blocks as unknown[] | undefined,
       );
     });
 

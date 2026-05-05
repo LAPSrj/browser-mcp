@@ -24,6 +24,8 @@ export interface PostInfo {
  *
  * @param index        Position to insert at (default: append to end of parent)
  * @param rootClientId Parent block's clientId for nested insertion (default: top level)
+ * @param innerBlocks  Children to seed under this block (recursive). Each node:
+ *                     { name, attributes?, innerBlocks? }.
  */
 export async function insertBlock(
   page: Page,
@@ -31,15 +33,23 @@ export async function insertBlock(
   attributes?: Record<string, unknown>,
   index?: number,
   rootClientId?: string,
+  innerBlocks?: unknown[],
 ): Promise<string> {
   return page.evaluate(
-    ({ name, attrs, idx, root }) => {
+    ({ name, attrs, idx, root, inner }) => {
       const wp = (window as any).wp;
-      const block = wp.blocks.createBlock(name, attrs || {});
+      const buildTree = (node: any): any =>
+        wp.blocks.createBlock(
+          node.name,
+          node.attributes || {},
+          Array.isArray(node.innerBlocks) ? node.innerBlocks.map(buildTree) : [],
+        );
+      const children = Array.isArray(inner) ? inner.map(buildTree) : [];
+      const block = wp.blocks.createBlock(name, attrs || {}, children);
       wp.data.dispatch("core/block-editor").insertBlock(block, idx, root);
       return block.clientId as string;
     },
-    { name: blockName, attrs: attributes, idx: index, root: rootClientId },
+    { name: blockName, attrs: attributes, idx: index, root: rootClientId, inner: innerBlocks },
   );
 }
 
