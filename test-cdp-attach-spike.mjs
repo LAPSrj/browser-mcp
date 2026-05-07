@@ -32,20 +32,22 @@ async function probeCdp(host, port) {
 }
 
 async function findReachableHost(port) {
-  const candidates = ['localhost', '127.0.0.1'];
+  // Order matters: in WSL2 NAT the Windows host is reachable via the default-route gateway,
+  // and via the resolv.conf nameserver. localhost only works under mirrored networking.
+  const candidates = [];
   try {
-    const resolv = await fsp.readFile('/etc/resolv.conf', 'utf8');
-    const m = resolv.match(/nameserver\s+([\d.]+)/);
+    const out = execSync('ip route show default', { encoding: 'utf8' });
+    const m = out.match(/default via\s+([\d.]+)/);
     if (m) candidates.push(m[1]);
   } catch {}
   try {
-    const out = execSync(
-      'ip route show default',
-      { encoding: 'utf8' },
-    );
-    const m = out.match(/default via\s+([\d.]+)/);
+    const resolv = await fsp.readFile('/etc/resolv.conf', 'utf8');
+    const m = resolv.match(/nameserver\s+([\d.]+)/);
     if (m && !candidates.includes(m[1])) candidates.push(m[1]);
   } catch {}
+  for (const h of ['localhost', '127.0.0.1']) {
+    if (!candidates.includes(h)) candidates.push(h);
+  }
   for (const h of candidates) {
     const r = await probeCdp(h, port);
     if (r.ok) return r;
@@ -73,6 +75,11 @@ function spawnEdgeDetached() {
     '/B',                                // no new window for the cmd shell
     EDGE_WSL_PATH.replace(/^\/mnt\/c/, 'C:').replace(/\//g, '\\'),
     `--remote-debugging-port=${PORT}`,
+    // Bind on all interfaces — required so WSL2 (NAT) can reach Edge via the host's WSL-gateway IP.
+    // Localhost-only binding (default) is unreachable from WSL2 unless mirrored networking is enabled.
+    '--remote-debugging-address=0.0.0.0',
+    // Accept WS handshakes whose Origin is non-localhost (Chromium 111+ origin check).
+    '--remote-allow-origins=*',
     `--user-data-dir=${PROFILE_WIN}`,
     '--no-first-run',
     '--no-default-browser-check',
