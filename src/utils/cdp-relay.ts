@@ -375,6 +375,11 @@ export async function spawnAttachCdpRelay(
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-default-apps",
+    // --no-first-run alone does NOT suppress Edge's sync-confirmation-dialog landing
+    // page on a fresh isolated profile. --disable-sync is the standard Chromium switch
+    // that turns off Chrome/Edge Sync entirely; in Edge that also short-circuits the
+    // sync FRE flow, so the requested startup URL ("about:blank") wins.
+    "--disable-sync",
     "--disable-features=Translate",
     "about:blank",
   ];
