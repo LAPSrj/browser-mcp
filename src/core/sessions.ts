@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
-import type { Browser, BrowserContext, BrowserServer, Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
 import { getBrowserType, type BrowserName } from "../utils/browser.js";
+import { spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import { isWsl } from "../utils/wsl.js";
 
 // Persistent browser sessions an agent can keep alive across MCP tool
 // calls. Guards against runaway lifetimes with idle + wall-clock TTLs,
@@ -20,6 +22,33 @@ export interface OpenSessionOptions {
   idle_ttl_ms?: number;
   wall_ttl_ms?: number;
   output_dir?: string;
+  /**
+   * Open the browser with a visible window (default: headless). Useful for
+   * human-in-the-loop flows where the user takes over to solve a captcha or
+   * complete login. WSLg renders Linux Chromium's window directly into the
+   * Windows desktop. Ignored when attach_cdp is set (the attached browser's
+   * own visibility is determined by the user-launched process).
+   */
+  headless?: boolean;
+  /**
+   * Attach to an existing or auto-launched Edge / Chromium-channel via
+   * CDP instead of launching a Playwright-managed Chromium. Pass `true` to
+   * use config defaults (auto-launch a fresh isolated Edge), or a string
+   * endpoint URL like `http://localhost:9222` to attach to a user-managed
+   * browser. Strict footgun: do NOT call browser.close() on attach_cdp
+   * sessions — it kills the user's real Edge process.
+   */
+  attach_cdp?: boolean | string;
+  /**
+   * Override config-default auto_launch for this session. When attach_cdp
+   * is `true`, controls whether to spawn Edge if no CDP endpoint is
+   * already reachable. Per-call override takes precedence over config.
+   */
+  auto_launch?: boolean;
+  /** Override config executable_path (Windows path on WSL). attach_cdp only. */
+  executable_path?: string;
+  /** Override config user_data_dir (Windows path on WSL). attach_cdp only. */
+  user_data_dir?: string;
 }
 
 export interface TabInfo {
@@ -67,6 +96,10 @@ interface Session {
   outputDir: string;
   tracing: boolean;
   closing: boolean;
+  /** True for any attach_cdp session (auto_launch or explicit endpoint). Skips browser.close() in close path — that would kill the attached Edge process. */
+  isAttachCdp: boolean;
+  /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/Edge handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
+  attachCdp?: AttachCdpHandle;
 }
 
 const DEFAULT_IDLE_TTL = 5 * 60 * 1000;
@@ -75,6 +108,25 @@ const VIDEO_DEFAULT_WALL_TTL = 2 * 60 * 1000;
 const VIDEO_MAX_WALL_TTL = 10 * 60 * 1000;
 const JANITOR_INTERVAL = 30 * 1000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
+
+/**
+ * Best-effort default Edge executable path per platform. Returns the WSL/Windows-side
+ * path on WSL+Windows, the macOS bundle on Darwin, the standard Linux path on Linux,
+ * or undefined if no candidate is found. Caller can override via opts.executable_path
+ * or BROWSER_MCP_EDGE_EXE.
+ */
+function defaultEdgeExePath(): string | undefined {
+  const fromEnv = process.env.BROWSER_MCP_EDGE_EXE;
+  if (fromEnv) return fromEnv;
+  if (isWsl() || process.platform === "win32") {
+    // System-wide install (most common) and per-user install (LOCALAPPDATA fallback).
+    return String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`;
+  }
+  if (process.platform === "darwin") {
+    return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
+  }
+  return "/usr/bin/microsoft-edge";
+}
 
 class SessionManager {
   private sessions = new Map<string, Session>();
@@ -132,9 +184,53 @@ class SessionManager {
     }
     const idleTTL = opts.idle_ttl_ms ?? DEFAULT_IDLE_TTL;
 
-    const bt = getBrowserType(browserName);
-    const server = await bt.launchServer({ headless: true });
-    const browser = await bt.connect(server.wsEndpoint());
+    let server: BrowserServer | undefined;
+    let browser: Browser;
+    let attachCdp: AttachCdpHandle | undefined;
+
+    if (opts.attach_cdp) {
+      // attach_cdp path — connectOverCDP to an existing or auto-launched browser.
+      // record_video does not work over CDP attach (Playwright's video API requires
+      // a context launched by Playwright, not a connected one).
+      if (recordVideo) {
+        throw new Error(
+          "attach_cdp sessions cannot record video — Playwright's video API requires a launched context, not an attached one.",
+        );
+      }
+      if (browserName !== "chromium") {
+        throw new Error(
+          `attach_cdp sessions are chromium-only (got "${browserName}"). Use Edge/Chrome via attach_cdp; firefox/webkit do not speak CDP.`,
+        );
+      }
+
+      const explicitEndpoint =
+        typeof opts.attach_cdp === "string" ? opts.attach_cdp : undefined;
+
+      if (explicitEndpoint) {
+        // user-managed Edge: connect to the URL they gave us, no auto-launch
+        browser = await chromium.connectOverCDP(explicitEndpoint);
+      } else {
+        // config-driven auto-launch
+        const exe = opts.executable_path ?? defaultEdgeExePath();
+        if (!exe) {
+          throw new Error(
+            "attach_cdp: no executable_path configured and no platform default available. " +
+              "Pass executable_path on open_session, set BROWSER_MCP_EDGE_EXE, or configure it in MCP config.",
+          );
+        }
+        attachCdp = await spawnAttachCdpRelay({
+          sessionId: id,
+          edgeExePath: exe,
+          userDataDirOverride: opts.user_data_dir,
+        });
+        browser = await chromium.connectOverCDP(attachCdp.endpoint);
+      }
+    } else {
+      const bt = getBrowserType(browserName);
+      const headless = opts.headless ?? true;
+      server = await bt.launchServer({ headless });
+      browser = await bt.connect(server.wsEndpoint());
+    }
 
     let videoDir: string | undefined;
     if (recordVideo) {
@@ -142,21 +238,32 @@ class SessionManager {
       await fs.mkdir(videoDir, { recursive: true });
     }
 
-    const contextOpts: Record<string, unknown> = {
-      viewport,
-      userAgent: opts.user_agent,
-      locale: opts.locale,
-      timezoneId: opts.timezone,
-      storageState: opts.storageState,
-    };
-    if (recordVideo && videoDir) {
-      contextOpts.recordVideo = { dir: videoDir, size: viewport };
+    let context: BrowserContext;
+    let page: Page;
+    if (opts.attach_cdp) {
+      // attached browsers come with at least one default context + page already.
+      // Reuse the first context to honor the user's existing profile state.
+      const existingContexts = browser.contexts();
+      context = existingContexts[0] ?? (await browser.newContext());
+      const existingPages = context.pages();
+      page = existingPages[0] ?? (await context.newPage());
+      context.setDefaultTimeout(30000);
+    } else {
+      const contextOpts: Record<string, unknown> = {
+        viewport,
+        userAgent: opts.user_agent,
+        locale: opts.locale,
+        timezoneId: opts.timezone,
+        storageState: opts.storageState,
+      };
+      if (recordVideo && videoDir) {
+        contextOpts.recordVideo = { dir: videoDir, size: viewport };
+      }
+      context = await browser.newContext(contextOpts as any);
+      context.setDefaultTimeout(30000);
+      page = await context.newPage();
     }
 
-    const context = await browser.newContext(contextOpts as any);
-    context.setDefaultTimeout(30000);
-
-    const page = await context.newPage();
     if (opts.url) {
       try {
         await page.goto(opts.url, { waitUntil: "load", timeout: 30000 });
@@ -185,6 +292,8 @@ class SessionManager {
       outputDir,
       tracing: false,
       closing: false,
+      isAttachCdp: !!opts.attach_cdp,
+      attachCdp,
     };
     this.sessions.set(id, session);
     this.ensureJanitor();
@@ -368,10 +477,28 @@ class SessionManager {
       }
     }
 
-    try { await s.context.close(); } catch { /* ignore */ }
-    try { await s.browser.close(); } catch { /* ignore */ }
-    if (s.server) {
-      try { await s.server.close(); } catch { /* ignore */ }
+    if (s.isAttachCdp) {
+      // FOOTGUN GUARD: never call browser.close() on attach_cdp sessions —
+      // it sends Browser.close to the CDP target, which terminates the
+      // attached Edge process. The user's real Edge (in explicit-endpoint
+      // mode) or our isolated spawn (in auto_launch mode) must survive the
+      // disconnect.
+      //
+      // Playwright does not expose a public disconnect on Browsers obtained
+      // via connectOverCDP; the WebSocket simply tears down when the Browser
+      // is GC'd or the process exits. Best we can do here is drop our
+      // references and rely on cleanup() (auto_launch only) to kill the
+      // procs we own. For explicit-endpoint mode, the user keeps Edge alive
+      // and we just leak the WS for the remainder of this process.
+      if (s.attachCdp) {
+        try { await s.attachCdp.cleanup(); } catch { /* ignore */ }
+      }
+    } else {
+      try { await s.context.close(); } catch { /* ignore */ }
+      try { await s.browser.close(); } catch { /* ignore */ }
+      if (s.server) {
+        try { await s.server.close(); } catch { /* ignore */ }
+      }
     }
 
     return {

@@ -107,6 +107,28 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "Hard max session lifetime in ms. Default 1800000 (30 min), or 120000 (2 min) with record_video. Max 600000 (10 min) when record_video is true.",
       ),
       output_dir: z.string().optional().describe('Directory for video artifacts (default: ".browser")'),
+      headless: z.boolean().optional().describe(
+        "When false, opens a visible browser window. Useful for human-in-the-loop captcha/login flows. " +
+          "On WSL, the Linux Chromium window renders directly into the Windows desktop via WSLg. Default: true.",
+      ),
+      attach_cdp: z.union([z.boolean(), z.string()]).optional().describe(
+        "Attach to a CDP-speaking browser instead of launching Playwright Chromium. Pass `true` to auto-launch " +
+          "an isolated Edge using the configured executable_path; or pass an http endpoint URL like " +
+          "\"http://localhost:9222\" to attach to a user-managed browser. Chromium-only. Cannot record video. " +
+          "On WSL, auto-launch transparently spawns a Windows-side TCP relay so the Edge endpoint is reachable " +
+          "across the WSL2 NAT.",
+      ),
+      auto_launch: z.boolean().optional().describe(
+        "Override config-default auto_launch behavior for this attach_cdp session. When true (and attach_cdp is " +
+          "true), spawns a fresh Edge instance. Ignored when attach_cdp is a string endpoint.",
+      ),
+      executable_path: z.string().optional().describe(
+        "Override config executable_path for attach_cdp auto-launch. Windows path on WSL.",
+      ),
+      user_data_dir: z.string().optional().describe(
+        "Override config user_data_dir for attach_cdp auto-launch. Windows path on WSL. When omitted, an " +
+          "isolated session-scoped temp profile is used.",
+      ),
     },
     handler: async (p) => json(await sessionManager.open(p)),
   },
