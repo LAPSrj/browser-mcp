@@ -4,6 +4,11 @@ import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
 import { getBrowserType, type BrowserName } from "../utils/browser.js";
 import { spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import {
+  BROWSER_PRODUCT_SPECS,
+  defaultExePath,
+  resolveBrowserProduct,
+} from "../utils/browser-products.js";
 import { isWsl } from "../utils/wsl.js";
 
 // Persistent browser sessions an agent can keep alive across MCP tool
@@ -31,18 +36,20 @@ export interface OpenSessionOptions {
    */
   headless?: boolean;
   /**
-   * Attach to an existing or auto-launched Edge / Chromium-channel via
-   * CDP instead of launching a Playwright-managed Chromium. Pass `true` to
-   * use config defaults (auto-launch a fresh isolated Edge), or a string
-   * endpoint URL like `http://localhost:9222` to attach to a user-managed
-   * browser. Strict footgun: do NOT call browser.close() on attach_cdp
-   * sessions — it kills the user's real Edge process.
+   * Attach to an existing or auto-launched Chromium-channel browser via CDP
+   * instead of launching a Playwright-managed Chromium. Pass `true` to use
+   * config defaults (auto-launch a fresh isolated browser of the configured
+   * product — see BROWSER_MCP_PRODUCT), or a string endpoint URL like
+   * `http://localhost:9222` to attach to a user-managed browser. Strict
+   * footgun: do NOT call browser.close() on attach_cdp sessions — it kills
+   * the attached browser process.
    */
   attach_cdp?: boolean | string;
   /**
    * Override config-default auto_launch for this session. When attach_cdp
-   * is `true`, controls whether to spawn Edge if no CDP endpoint is
-   * already reachable. Per-call override takes precedence over config.
+   * is `true`, controls whether to spawn the configured browser if no CDP
+   * endpoint is already reachable. Per-call override takes precedence over
+   * config.
    */
   auto_launch?: boolean;
   /** Override config executable_path (Windows path on WSL). attach_cdp only. */
@@ -96,9 +103,9 @@ interface Session {
   outputDir: string;
   tracing: boolean;
   closing: boolean;
-  /** True for any attach_cdp session (auto_launch or explicit endpoint). Skips browser.close() in close path — that would kill the attached Edge process. */
+  /** True for any attach_cdp session (auto_launch or explicit endpoint). Skips browser.close() in close path — that would kill the attached browser process. */
   isAttachCdp: boolean;
-  /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/Edge handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
+  /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
 }
 
@@ -108,25 +115,6 @@ const VIDEO_DEFAULT_WALL_TTL = 2 * 60 * 1000;
 const VIDEO_MAX_WALL_TTL = 10 * 60 * 1000;
 const JANITOR_INTERVAL = 30 * 1000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
-
-/**
- * Best-effort default Edge executable path per platform. Returns the WSL/Windows-side
- * path on WSL+Windows, the macOS bundle on Darwin, the standard Linux path on Linux,
- * or undefined if no candidate is found. Caller can override via opts.executable_path
- * or BROWSER_MCP_EDGE_EXE.
- */
-function defaultEdgeExePath(): string | undefined {
-  const fromEnv = process.env.BROWSER_MCP_EDGE_EXE;
-  if (fromEnv) return fromEnv;
-  if (isWsl() || process.platform === "win32") {
-    // System-wide install (most common) and per-user install (LOCALAPPDATA fallback).
-    return String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`;
-  }
-  if (process.platform === "darwin") {
-    return "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
-  }
-  return "/usr/bin/microsoft-edge";
-}
 
 class SessionManager {
   private sessions = new Map<string, Session>();
@@ -199,7 +187,7 @@ class SessionManager {
       }
       if (browserName !== "chromium") {
         throw new Error(
-          `attach_cdp sessions are chromium-only (got "${browserName}"). Use Edge/Chrome via attach_cdp; firefox/webkit do not speak CDP.`,
+          `attach_cdp sessions are chromium-only (got "${browserName}"). Use a Chromium-channel browser (edge/chrome/brave/vivaldi/opera) via attach_cdp; firefox/webkit do not speak CDP.`,
         );
       }
 
@@ -207,20 +195,23 @@ class SessionManager {
         typeof opts.attach_cdp === "string" ? opts.attach_cdp : undefined;
 
       if (explicitEndpoint) {
-        // user-managed Edge: connect to the URL they gave us, no auto-launch
+        // user-managed browser: connect to the URL they gave us, no auto-launch
         browser = await chromium.connectOverCDP(explicitEndpoint);
       } else {
         // config-driven auto-launch
-        const exe = opts.executable_path ?? defaultEdgeExePath();
+        const isWslOrWin = isWsl() || process.platform === "win32";
+        const product = resolveBrowserProduct({ isWslOrWin });
+        const exe = opts.executable_path ?? defaultExePath(product, { isWslOrWin });
         if (!exe) {
           throw new Error(
-            "attach_cdp: no executable_path configured and no platform default available. " +
-              "Pass executable_path on open_session, set BROWSER_MCP_EDGE_EXE, or configure it in MCP config.",
+            `attach_cdp: no executable_path configured for product "${product}" on this platform, and no canonical default is available. ` +
+              `Pass executable_path on open_session or set BROWSER_MCP_EXECUTABLE_PATH.`,
           );
         }
         attachCdp = await spawnAttachCdpRelay({
           sessionId: id,
-          edgeExePath: exe,
+          executablePath: exe,
+          processName: BROWSER_PRODUCT_SPECS[product].processName,
           userDataDirOverride: opts.user_data_dir,
         });
         browser = await chromium.connectOverCDP(attachCdp.endpoint);

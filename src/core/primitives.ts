@@ -113,14 +113,16 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
       ),
       attach_cdp: z.union([z.boolean(), z.string()]).optional().describe(
         "Attach to a CDP-speaking browser instead of launching Playwright Chromium. Pass `true` to auto-launch " +
-          "an isolated Edge using the configured executable_path; or pass an http endpoint URL like " +
-          "\"http://localhost:9222\" to attach to a user-managed browser. Chromium-only. Cannot record video. " +
-          "On WSL, auto-launch transparently spawns a Windows-side TCP relay so the Edge endpoint is reachable " +
-          "across the WSL2 NAT.",
+          "an isolated Chromium-channel browser (edge/chrome/brave/vivaldi/opera — selected via the " +
+          "BROWSER_MCP_PRODUCT env var, default edge on Windows/WSL or chrome on macOS/Linux) using the " +
+          "configured executable_path; or pass an http endpoint URL like \"http://localhost:9222\" to attach to " +
+          "a user-managed browser. Chromium-only. Cannot record video. On WSL, auto-launch transparently spawns " +
+          "a Windows-side TCP relay so the browser CDP endpoint is reachable across the WSL2 NAT.",
       ),
       auto_launch: z.boolean().optional().describe(
         "Override config-default auto_launch behavior for this attach_cdp session. When true (and attach_cdp is " +
-          "true), spawns a fresh Edge instance. Ignored when attach_cdp is a string endpoint.",
+          "true), spawns a fresh isolated browser instance of the configured product. Ignored when attach_cdp " +
+          "is a string endpoint.",
       ),
       executable_path: z.string().optional().describe(
         "Override config executable_path for attach_cdp auto-launch. Windows path on WSL.",
