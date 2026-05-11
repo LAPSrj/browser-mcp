@@ -1,10 +1,14 @@
+import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions, evaluateScript } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export interface EvaluateScriptParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   script: string;
   browser?: string;
   viewport?: { width: number; height: number };
@@ -16,6 +20,8 @@ export interface EvaluateScriptParams {
 export async function evaluateScriptTool(params: EvaluateScriptParams) {
   const {
     url,
+    session_id,
+    tab_id,
     script,
     browser = "chromium",
     viewport = { width: 1280, height: 720 },
@@ -24,19 +30,38 @@ export async function evaluateScriptTool(params: EvaluateScriptParams) {
     useBrowserStack = false,
   } = params;
 
-  const session = await launchSession({
-    browser: browser as BrowserName,
-    viewport,
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+  } else {
+    const session = await launchSession({
+      browser: browser as BrowserName,
+      viewport,
+      useBrowserStack,
+    });
+    page = session.page;
+    cleanup = () => closeSession(session);
+  }
 
   try {
-    await navigateTo(session.page, url, waitForNetworkIdle);
+    if (url) {
+      await navigateTo(page, url, waitForNetworkIdle);
+    }
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
@@ -44,7 +69,7 @@ export async function evaluateScriptTool(params: EvaluateScriptParams) {
     let resultText: string;
     let errorText: string | undefined;
     try {
-      const raw = await evaluateScript(session.page, script);
+      const raw = await evaluateScript(page, script);
       try {
         resultText = JSON.stringify(raw, null, 2);
       } catch {
@@ -65,6 +90,6 @@ export async function evaluateScriptTool(params: EvaluateScriptParams) {
     content.push({ type: "text", text: resultText });
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }

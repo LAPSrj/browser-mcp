@@ -60,8 +60,29 @@ export async function getEditorFrame(page: Page): Promise<Page | Frame> {
 }
 
 /**
+ * Returns true when the page is already on /wp-admin/post.php?post=<postId>&action=edit
+ * for ANY host. Lets caller-owned sessions authed against a different host
+ * (e.g. staging) skip the goto that would otherwise yank the page to config.wpUrl.
+ */
+function isOnPostEditor(currentUrl: string, postId: number): boolean {
+  try {
+    const u = new URL(currentUrl);
+    if (u.pathname !== "/wp-admin/post.php") return false;
+    if (u.searchParams.get("post") !== String(postId)) return false;
+    if (u.searchParams.get("action") !== "edit") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Navigate to the WordPress post editor and ensure auth + editor readiness.
  * If the session has expired (redirected to login), re-authenticates and retries.
+ *
+ * Detect-and-skip: when the page is already on the target post editor on any
+ * host, skip the goto. Otherwise navigation would force the page to config.wpUrl,
+ * breaking caller-owned sessions authed against a different host.
  */
 export async function navigateToEditor(
   page: Page,
@@ -72,18 +93,20 @@ export async function navigateToEditor(
   const base = config.wpUrl.replace(/\/+$/, "");
   const editorUrl = `${base}/wp-admin/post.php?post=${postId}&action=edit`;
 
-  await page.goto(editorUrl, { waitUntil: "load", timeout: 30000 });
-
-  // Detect auth redirect
-  if (auth.isOnLoginPage(page)) {
-    auth.invalidate();
-    // Re-login on this page (we're already on the login form)
-    await auth.getStorageState(page);
-    // Navigate again
+  if (!isOnPostEditor(page.url(), postId)) {
     await page.goto(editorUrl, { waitUntil: "load", timeout: 30000 });
 
+    // Detect auth redirect
     if (auth.isOnLoginPage(page)) {
-      throw new Error("WordPress authentication failed: unable to access the editor after re-login.");
+      auth.invalidate();
+      // Re-login on this page (we're already on the login form)
+      await auth.getStorageState(page);
+      // Navigate again
+      await page.goto(editorUrl, { waitUntil: "load", timeout: 30000 });
+
+      if (auth.isOnLoginPage(page)) {
+        throw new Error("WordPress authentication failed: unable to access the editor after re-login.");
+      }
     }
   }
 

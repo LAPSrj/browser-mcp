@@ -82,6 +82,8 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `block_html` | Normalized editor + frontend HTML for structural diff | strips Gutenberg noise; `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts |
 | `clear_blocks` | Empty the post | |
 
+> **Hazard (WP_URL host binding).** Every `wp-gutenberg` post-editing tool routes through `navigateToEditor`, which builds `${WP_URL}/wp-admin/post.php?post=${post_id}&action=edit` and navigates there. The env-var `WP_URL` is the host these tools drive — passing a `session_id` authed against a different host (e.g. staging) is not sufficient to retarget the tool; the call will yank the page to `WP_URL`'s host, where the post likely doesn't exist or the session has no cookies. **Detect-and-skip:** when the page is already on `/wp-admin/post.php?post=${post_id}&action=edit` (on any host), the tool skips the navigation — so the working pattern for a non-`WP_URL` host is to first navigate the session to that host's editor URL yourself (via `navigate({ session_id, url })`), then call the `wp-gutenberg` tool with the same `post_id`. There is currently no per-call `wp_url` override; the env var is the only host knob.
+
 ### Session / navigation primitives (every plugin)
 
 | Tool | Purpose |
@@ -208,10 +210,20 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 ### Session contract {#session-contract}
 
 - `open_session({ browser, viewport })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls.
-- All primitives accept optional `session_id` + `tab_id`. Without `session_id`, the tool spins an ephemeral context per call.
+- **Session-aware surfaces** accept optional `session_id` + `tab_id`. Without `session_id`, those tools spin an ephemeral context per call.
 - `close_session({ session_id })` releases the context; `list_sessions()` enumerates active ones.
 
+**Which surfaces accept `session_id`:**
+- **Core primitives** (input/read/cookies/storage/screenshot/wait/navigate, etc.) — all session-aware via the shared `targetField` fragment.
+- **`dev` plugin:** `dom_query`, `evaluate_script`, `trace_start`, `trace_stop`. Other `dev` tools (`console_capture`, `dom_snapshot`, `accessibility_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `computed_styles`, `schema_extract`, the compare/align/visual-diff family) are **ephemeral-only today** — they launch a fresh browser per call and ignore any open session.
+- **`wp-gutenberg` plugin:** all post-editing tools accept `session_id` (routes through `resolveGutenbergSession`).
+- **`design-compare` plugin:** ephemeral-only.
+
 > **Hazard:** ephemeral sessions cannot accept cookies, storage, or auth state from prior calls — every ephemeral call is a fresh anonymous browser. For multi-step flows that need persistence (login → action → capture), open a session and pass `session_id` to every call.
+
+> **Hazard (silent ephemeral on a non-session-aware tool):** passing `session_id` to a tool that doesn't accept it (e.g. `computed_styles`, `console_capture`) is a no-op — Zod drops unknown fields and the tool launches an ephemeral browser anyway. The visible symptom is auth loss (page redirects to a login form) because the ephemeral context has no cookies. Workaround until those surfaces are lifted: drive the inspection through `evaluate_script({ session_id, script: "..." })` or `dom_query({ session_id, queries: [...] })`, both of which honor the session.
+
+> **`evaluate_script` no-nav mode.** When `session_id` is provided and `url` is omitted, `evaluate_script` runs the snippet on the session's current page without navigating. This is the supported path for "run JS on whatever page is open right now" — including running `fetch()` against the page's origin so cookies + nonces flow naturally (REST PUT, custom AJAX endpoints, etc.).
 
 ## Surfaces {#surfaces}
 

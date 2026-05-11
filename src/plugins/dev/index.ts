@@ -360,19 +360,24 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "evaluate_script",
       description:
-        "Run a JavaScript snippet in the page context and return its JSON-serialized result. Unlike the `evaluate` action (fire-and-forget), this tool returns the value. `return` works at the top level (the script is wrapped in an IIFE)." +
+        "Run a JavaScript snippet in the page context and return its JSON-serialized result. Unlike the `evaluate` action (fire-and-forget), this tool returns the value. `return` works at the top level (the script is wrapped in an IIFE). Reuses an open session via `session_id` (no navigation when `url` is omitted); falls back to ephemeral when omitted." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe("URL to navigate to before evaluating. Optional when session_id is provided (evaluate on the session's current page); required when ephemeral"),
+        session_id: z.string().optional().describe("Reuse an open_session. Skips the per-call browser launch; when `url` is omitted the script runs on the session's current page without re-navigating"),
+        tab_id: z.string().optional().describe("Which tab in the session to evaluate in. Defaults to the session's active tab"),
         script: z.string().describe("JS to evaluate. Use `return` to yield a value; result is JSON-stringified in the response"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
         actions: z.array(actionSchema).optional().describe("Actions to run before evaluating. Selector-based actions support optional and timeout params"),
         waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before evaluating (default: true)"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await evaluateScriptTool(withUrl(params))) as any,
+      handler: async (params) => (await evaluateScriptTool({
+        ...params,
+        url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
+      })) as any,
     });
 
     // ---------- dom_query ----------
