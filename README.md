@@ -84,7 +84,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 
@@ -106,6 +106,43 @@ enable the `dev` plugin and use `trace_start` / `trace_stop` around the
 actions you want to capture. The result is a `trace.zip` openable with
 `npx playwright show-trace <file>` — much richer than video when you want to
 understand what the agent did.
+
+#### Sessions + CDP attach mode
+
+`open_session({ attach_cdp: true })` skips Playwright's bundled Chromium and
+launches (or connects to) a real Chromium-channel browser instead. Two
+modes:
+
+- **Auto-launch** — `attach_cdp: true` spawns an isolated Edge instance on
+  a session-scoped temp profile with `--remote-debugging-port` enabled, and
+  attaches via `chromium.connectOverCDP()`. Useful when the real browser
+  engine, real cookies, or installed extensions matter.
+- **Endpoint** — `attach_cdp: "http://localhost:9222"` attaches to a
+  user-managed browser already running with CDP exposed. The MCP never
+  spawns or closes the browser in this mode.
+
+Per-call overrides: `executable_path` (Windows path to the Edge binary —
+overrides `BROWSER_MCP_EDGE_EXE`), `user_data_dir` (reuse an existing
+profile instead of the temp profile), `auto_launch` (explicit override of
+the config default), `headless: false` (visible window — on WSL, attached
+Windows browsers are naturally headed).
+
+**WSL transparency.** WSL2's NAT can't reach Windows-host loopback, so on
+WSL the auto-launch path additionally spawns a session-scoped Windows-side
+PowerShell TCP relay (`0.0.0.0:<relay-port>` → `127.0.0.1:<cdp-port>`).
+The relay tears down with the browser; a 10-minute idle backup timeout
+fires only if browser-PID watching fails. Set `BROWSER_MCP_CDP_DEBUG=1` to
+log relay activity to `%TEMP%\browser-mcp\<session>\relay.log`.
+
+**Footgun.** Never OS-kill the attached browser (Task Manager,
+`taskkill /IM msedge.exe`) — Edge shares its process group with the user's
+real Edge, so this kills both. `close_session` is the only safe teardown:
+it filters by the session's user-data-dir tag and leaves the user's real
+Edge running. Playwright's `browser.close()` is skipped internally for
+attach_cdp sessions for the same reason.
+
+**Limits.** Chromium-channel only (no Firefox / WebKit) — and Edge
+specifically today. Cannot combine with `record_video`.
 
 #### Safeguards
 
@@ -273,6 +310,8 @@ Plugins can register custom action types (e.g. `gutenberg_insert`,
 | `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
 | `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |
 | `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
+| `BROWSER_MCP_EDGE_EXE` | — | Windows path to the Edge executable for `open_session({ attach_cdp: true })` auto-launch. Per-call `executable_path` overrides it. |
+| `BROWSER_MCP_CDP_DEBUG` | `0` | When `1`, the WSL CDP relay logs activity to `%TEMP%\browser-mcp\<session>\relay.log`. |
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
 | `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. |
