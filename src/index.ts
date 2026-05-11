@@ -21,6 +21,12 @@ async function bootstrap(): Promise<{ config: ServerConfig; registry: PluginRegi
   const coreUtils: CoreUtils = {
     launchSession,
     closeSession,
+    getSessionPage: (session_id, tab_id) => {
+      const page = sessionManager.getPage(session_id, tab_id);
+      sessionManager.touch(session_id);
+      return page;
+    },
+    listSessions: () => sessionManager.list(),
     navigateTo,
     runActions,
     saveFile,

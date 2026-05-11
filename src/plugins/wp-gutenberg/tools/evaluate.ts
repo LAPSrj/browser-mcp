@@ -1,6 +1,7 @@
 import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
  * Run arbitrary JS inside an authenticated Gutenberg editor page and return
@@ -23,35 +24,37 @@ export function createEvaluateHandler(
     script: string;
     viewport?: { width: number; height: number };
     waitForEditor?: boolean;
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
       script,
       viewport = { width: 1280, height: 720 },
       waitForEditor = true,
+      session_id,
     } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport,
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_evaluate",
+      sessionHooks,
+      viewport,
     });
 
     const consoleEntries: Array<{ type: string; text: string }> = [];
     const pageErrors: string[] = [];
 
     try {
-      session.page.on("console", (msg) => {
+      resolved.page.on("console", (msg) => {
         consoleEntries.push({ type: msg.type(), text: msg.text() });
       });
-      session.page.on("pageerror", (err) => {
+      resolved.page.on("pageerror", (err) => {
         pageErrors.push(err.message);
       });
 
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -61,7 +64,7 @@ export function createEvaluateHandler(
 
       if (waitForEditor) {
         // wp.data is the baseline — available once the editor JS has booted.
-        await session.page.waitForFunction(
+        await resolved.page.waitForFunction(
           () => typeof (window as any).wp !== "undefined" && (window as any).wp.data,
           { timeout: 15000 },
         );
@@ -69,7 +72,7 @@ export function createEvaluateHandler(
         // contentDocument to be parseable so iframe-reaching scripts don't
         // race the iframe load. Best-effort — older WPs without the iframe
         // still pass through after a short wait.
-        await session.page.waitForFunction(
+        await resolved.page.waitForFunction(
           () => {
             const iframe = document.querySelector('iframe[name="editor-canvas"]') as HTMLIFrameElement | null;
             if (!iframe) return true; // no iframe on this WP version
@@ -85,14 +88,14 @@ export function createEvaluateHandler(
       let value: unknown = undefined;
       let scriptError: string | undefined;
       try {
-        value = await session.page.evaluate(wrapped);
+        value = await resolved.page.evaluate(wrapped);
       } catch (err) {
         scriptError = (err as Error).message;
       }
 
       // Small settle window so any deferred console events raised by the
       // script itself get captured before we return.
-      await session.page.waitForTimeout(200);
+      await resolved.page.waitForTimeout(200);
 
       const payload = {
         value,
@@ -113,12 +116,14 @@ export function createEvaluateHandler(
         }, null, 2);
       }
 
-      return {
+      const response: ToolResponse = {
         content: [{ type: "text", text: valueText }],
         isError: scriptError !== undefined,
       };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

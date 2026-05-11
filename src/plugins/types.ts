@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from "playwright";
 import type { ServerConfig } from "../config.js";
 import type { BrowserSession, LaunchOptions } from "../utils/browser.js";
 import type { AnyAction, ActionStopResult } from "../utils/actions.js";
+import type { SessionInfo } from "../core/sessions.js";
 
 // ---------------------------------------------------------------------------
 // Tool response — matches the MCP content format used by all core tools
@@ -15,6 +16,13 @@ export interface ToolContent {
 export interface ToolResponse {
   content: ToolContent[];
   isError?: boolean;
+  /**
+   * Optional in-band warnings surfaced to the caller without changing the
+   * primary content stream. Plugins use this to nudge agents toward better
+   * usage patterns (e.g. wp-gutenberg flags ephemeral runs when persistent
+   * sessions are open) without breaking response parsers.
+   */
+  _warnings?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +74,17 @@ export interface CoreUtils {
     toolName?: string;
   }): Promise<BrowserSession>;
   closeSession(session: BrowserSession): Promise<void>;
+  /**
+   * Look up the active page for a persistent session opened via the
+   * top-level `open_session` tool. Plugins use this to opt into the
+   * sessionManager-owned lifecycle when a caller passes session_id, rather
+   * than spinning a per-call ephemeral browser via launchSession. Throws if
+   * the session isn't found or has been closed. Touches the session so its
+   * idle TTL doesn't expire mid-call.
+   */
+  getSessionPage(session_id: string, tab_id?: string): Page;
+  /** List currently-open persistent sessions (sessionManager-owned). */
+  listSessions(): SessionInfo[];
   navigateTo(page: Page, url: string, waitForNetworkIdle?: boolean): Promise<void>;
   runActions(
     page: Page,

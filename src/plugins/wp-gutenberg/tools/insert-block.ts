@@ -3,6 +3,7 @@ import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from 
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, waitForBlockType, getEditorFrame, checkEditorError } from "../utils/editor.js";
 import { insertBlock, getBlocks, isBlockRegistered, savePost } from "../utils/wp-data.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createInsertBlockHandler(
   core: CoreUtils,
@@ -22,6 +23,7 @@ export function createInsertBlockHandler(
     screenshot?: boolean;
     viewport?: { width: number; height: number };
     outputDir?: string;
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -34,32 +36,33 @@ export function createInsertBlockHandler(
       screenshot = true,
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
+      session_id,
     } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport,
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_insert_block",
+      sessionHooks,
+      viewport,
     });
 
     const consoleLogs: string[] = [];
 
     try {
       // Capture console errors during the whole session
-      session.page.on("console", (msg) => {
+      resolved.page.on("console", (msg) => {
         if (msg.type() === "error") {
           consoleLogs.push(msg.text());
         }
       });
-      session.page.on("pageerror", (error) => {
+      resolved.page.on("pageerror", (error) => {
         consoleLogs.push(error.message);
       });
 
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
       // Check for editor crash
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -68,10 +71,10 @@ export function createInsertBlockHandler(
       }
 
       // Check if block type is registered
-      const registered = await isBlockRegistered(session.page, block_name);
+      const registered = await isBlockRegistered(resolved.page, block_name);
       if (!registered) {
         // Wait a bit in case it loads late
-        const found = await waitForBlockType(session.page, block_name, 5000);
+        const found = await waitForBlockType(resolved.page, block_name, 5000);
         if (!found) {
           return {
             content: [{
@@ -86,7 +89,7 @@ export function createInsertBlockHandler(
 
       // Insert the block
       const clientId = await insertBlock(
-        session.page,
+        resolved.page,
         block_name,
         attributes,
         index,
@@ -95,16 +98,16 @@ export function createInsertBlockHandler(
       );
 
       // Let the block render
-      await session.page.waitForTimeout(500);
+      await resolved.page.waitForTimeout(500);
 
       // Persist if requested — otherwise the insert dies with the session.
       let savedPost: { id: number; link: string; status: string } | null = null;
       if (save) {
-        savedPost = await savePost(session.page);
+        savedPost = await savePost(resolved.page);
       }
 
       // Get block state
-      const blocks = await getBlocks(session.page, true);
+      const blocks = await getBlocks(resolved.page, true);
       const inserted = blocks.find((b) => b.clientId === clientId);
 
       const content: Array<{ type: string; [key: string]: unknown }> = [];
@@ -126,7 +129,7 @@ export function createInsertBlockHandler(
 
       // Take screenshot if requested
       if (screenshot) {
-        const screenshotBuffer = await session.page.screenshot({ type: "png" });
+        const screenshotBuffer = await resolved.page.screenshot({ type: "png" });
         const filename = core.generateFilename({
           prefix: "gutenberg-insert",
           browser: "chromium",
@@ -152,9 +155,11 @@ export function createInsertBlockHandler(
         });
       }
 
-      return { content };
+      const response: ToolResponse = { content };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

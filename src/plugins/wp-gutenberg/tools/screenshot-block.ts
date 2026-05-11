@@ -12,6 +12,7 @@ import {
   editPostStatus,
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createScreenshotBlockHandler(
   core: CoreUtils,
@@ -33,6 +34,7 @@ export function createScreenshotBlockHandler(
     frontend_selector?: string;
     frontend_padding?: number;
     frontend_crop?: boolean;
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -47,13 +49,14 @@ export function createScreenshotBlockHandler(
       frontend_selector,
       frontend_padding = 0,
       frontend_crop = true,
+      session_id,
     } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport,
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_screenshot_block",
+      sessionHooks,
+      viewport,
     });
 
     try {
@@ -64,9 +67,9 @@ export function createScreenshotBlockHandler(
 
       // --- Editor screenshot ---
       if (context === "editor" || context === "both") {
-        await navigateToEditor(session.page, post_id, config, auth);
+        await navigateToEditor(resolved.page, post_id, config, auth);
 
-        const editorError = await checkEditorError(session.page);
+        const editorError = await checkEditorError(resolved.page);
         if (editorError) {
           return {
             content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -76,11 +79,11 @@ export function createScreenshotBlockHandler(
 
         targetClientId = client_id;
         if (!targetClientId && block_path) {
-          targetClientId = await getBlockClientIdByPath(session.page, block_path) ?? undefined;
+          targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
         }
         if (!targetClientId) {
           const idx = block_index ?? 0;
-          targetClientId = await getBlockClientIdByIndex(session.page, idx) ?? undefined;
+          targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
         }
 
         if (!targetClientId) {
@@ -97,13 +100,13 @@ export function createScreenshotBlockHandler(
         }
 
         if (hide_editor_chrome) {
-          await hideEditorChrome(session.page);
+          await hideEditorChrome(resolved.page);
         } else {
-          await selectBlock(session.page, targetClientId);
+          await selectBlock(resolved.page, targetClientId);
         }
-        await session.page.waitForTimeout(300);
+        await resolved.page.waitForTimeout(300);
 
-        const frame = await getEditorFrame(session.page);
+        const frame = await getEditorFrame(resolved.page);
         const blockSelector = `[data-block="${targetClientId}"]`;
         const blockElement = frame.locator(blockSelector);
 
@@ -112,7 +115,7 @@ export function createScreenshotBlockHandler(
           await blockElement.waitFor({ state: "visible", timeout: 5000 });
           screenshotBuffer = await blockElement.screenshot({ type: "png" });
         } catch {
-          screenshotBuffer = await session.page.screenshot({ type: "png" });
+          screenshotBuffer = await resolved.page.screenshot({ type: "png" });
           content.push({ type: "text", text: "Could not isolate block element — full editor screenshot taken instead." });
         }
 
@@ -132,11 +135,11 @@ export function createScreenshotBlockHandler(
           text: `Editor screenshot: ${filePath} | Preview: ${previewPath}`,
         });
 
-        const blocks = await getBlocks(session.page);
+        const blocks = await getBlocks(resolved.page);
         const blockInfo = blocks.find((b) => b.clientId === targetClientId);
         blockName = blockInfo?.name ?? null;
 
-        frontendUrl = await session.page.evaluate(() => {
+        frontendUrl = await resolved.page.evaluate(() => {
           const wp = (window as any).wp;
           const post = wp.data.select("core/editor").getCurrentPost();
           return post?.link as string | undefined;
@@ -148,8 +151,8 @@ export function createScreenshotBlockHandler(
         });
 
         if ((context === "both") && save_before_frontend) {
-          await editPostStatus(session.page, "publish");
-          await savePost(session.page);
+          await editPostStatus(resolved.page, "publish");
+          await savePost(resolved.page);
         }
       }
 
@@ -159,14 +162,14 @@ export function createScreenshotBlockHandler(
         // (frontend-only path still has to visit the editor to look up the
         // clientId and the frontend URL).
         if (!targetClientId) {
-          await navigateToEditor(session.page, post_id, config, auth);
+          await navigateToEditor(resolved.page, post_id, config, auth);
           targetClientId = client_id;
           if (!targetClientId && block_path) {
-            targetClientId = await getBlockClientIdByPath(session.page, block_path) ?? undefined;
+            targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
           }
           if (!targetClientId) {
             const idx = block_index ?? 0;
-            targetClientId = await getBlockClientIdByIndex(session.page, idx) ?? undefined;
+            targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
           }
           if (!targetClientId) {
             return {
@@ -177,14 +180,14 @@ export function createScreenshotBlockHandler(
               isError: true,
             };
           }
-          const blocks = await getBlocks(session.page);
+          const blocks = await getBlocks(resolved.page);
           blockName = blocks.find((b) => b.clientId === targetClientId)?.name ?? null;
 
           if (save_before_frontend) {
-            await editPostStatus(session.page, "publish");
-            await savePost(session.page);
+            await editPostStatus(resolved.page, "publish");
+            await savePost(resolved.page);
           }
-          frontendUrl = await session.page.evaluate(() => {
+          frontendUrl = await resolved.page.evaluate(() => {
             const wp = (window as any).wp;
             const post = wp.data.select("core/editor").getCurrentPost();
             return post?.link as string | undefined;
@@ -193,7 +196,7 @@ export function createScreenshotBlockHandler(
 
         // Gather hints while wp.data is still available in the editor.
         const frontendHints = blockName
-          ? await getBlockFrontendHints(session.page, blockName, targetClientId)
+          ? await getBlockFrontendHints(resolved.page, blockName, targetClientId)
           : null;
 
         if (!frontendUrl) {
@@ -202,15 +205,15 @@ export function createScreenshotBlockHandler(
             text: "Could not determine frontend URL. The post may not be published.",
           });
         } else {
-          await core.navigateTo(session.page, frontendUrl);
+          await core.navigateTo(resolved.page, frontendUrl);
 
           let frontendBuffer: Buffer | undefined;
           let mode = "fullPage";
           if (frontend_crop && frontendHints) {
-            const lookup = await findBlockOnFrontend(session.page, frontendHints, frontend_selector);
+            const lookup = await findBlockOnFrontend(resolved.page, frontendHints, frontend_selector);
             if (lookup.matches.length > 0) {
               const matchedSelector = lookup.matches[0].matchedBy;
-              const locator = session.page.locator(matchedSelector).first();
+              const locator = resolved.page.locator(matchedSelector).first();
               try {
                 await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
                 const box = await locator.boundingBox();
@@ -220,7 +223,7 @@ export function createScreenshotBlockHandler(
                     const clipY = Math.max(0, Math.floor(box.y - frontend_padding));
                     const clipW = Math.ceil(box.width + frontend_padding * 2);
                     const clipH = Math.ceil(box.height + frontend_padding * 2);
-                    frontendBuffer = await session.page.screenshot({
+                    frontendBuffer = await resolved.page.screenshot({
                       type: "png",
                       clip: { x: clipX, y: clipY, width: clipW, height: clipH },
                     });
@@ -246,7 +249,7 @@ export function createScreenshotBlockHandler(
           }
 
           if (!frontendBuffer) {
-            frontendBuffer = await session.page.screenshot({ type: "png", fullPage: true });
+            frontendBuffer = await resolved.page.screenshot({ type: "png", fullPage: true });
           }
 
           const filename = core.generateFilename({
@@ -267,9 +270,11 @@ export function createScreenshotBlockHandler(
         }
       }
 
-      return { content };
+      const response: ToolResponse = { content };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

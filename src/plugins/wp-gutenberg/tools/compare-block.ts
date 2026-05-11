@@ -16,6 +16,7 @@ import {
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
  * Composite: (post_id, block identifier, referenceImage) → (score, diff PNG,
@@ -47,6 +48,7 @@ export function createCompareBlockHandler(
     maxDiffPercent?: number;
     viewport?: { width: number; height: number };
     outputDir?: string;
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -62,6 +64,7 @@ export function createCompareBlockHandler(
       maxDiffPercent = 5,
       viewport,
       outputDir = defaultOutputDir,
+      session_id,
     } = params;
 
     const refBuffer = await fs.readFile(referenceImage);
@@ -76,16 +79,16 @@ export function createCompareBlockHandler(
       height: Math.max(refImg.height, 900),
     };
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport: resolvedViewport,
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_compare_block",
+      sessionHooks,
+      viewport: resolvedViewport,
     });
 
     try {
-      await navigateToEditor(session.page, post_id, config, auth);
-      const editorError = await checkEditorError(session.page);
+      await navigateToEditor(resolved.page, post_id, config, auth);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -96,15 +99,15 @@ export function createCompareBlockHandler(
       // Resolve target block clientId. Anchor lookup reads block attributes.
       let targetClientId = client_id;
       if (!targetClientId && block_anchor) {
-        const blocks = await getBlocks(session.page, true);
+        const blocks = await getBlocks(resolved.page, true);
         targetClientId = findByAnchor(blocks, block_anchor) ?? undefined;
       }
       if (!targetClientId && block_path) {
-        targetClientId = await getBlockClientIdByPath(session.page, block_path) ?? undefined;
+        targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
       }
       if (!targetClientId) {
         const idx = block_index ?? 0;
-        targetClientId = await getBlockClientIdByIndex(session.page, idx) ?? undefined;
+        targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
       }
       if (!targetClientId) {
         return {
@@ -113,7 +116,7 @@ export function createCompareBlockHandler(
         };
       }
 
-      const blocks = await getBlocks(session.page);
+      const blocks = await getBlocks(resolved.page);
       const blockName = blocks.find((b) => b.clientId === targetClientId)?.name ?? null;
       if (!blockName) {
         return {
@@ -122,14 +125,14 @@ export function createCompareBlockHandler(
         };
       }
 
-      const frontendHints = await getBlockFrontendHints(session.page, blockName, targetClientId);
+      const frontendHints = await getBlockFrontendHints(resolved.page, blockName, targetClientId);
 
       if (save_before_frontend) {
-        await editPostStatus(session.page, "publish");
-        await savePost(session.page);
+        await editPostStatus(resolved.page, "publish");
+        await savePost(resolved.page);
       }
 
-      const frontendUrl = await session.page.evaluate(() => {
+      const frontendUrl = await resolved.page.evaluate(() => {
         const wp = (window as any).wp;
         const post = wp.data.select("core/editor").getCurrentPost();
         return post?.link as string | undefined;
@@ -141,9 +144,9 @@ export function createCompareBlockHandler(
         };
       }
 
-      await core.navigateTo(session.page, frontendUrl);
+      await core.navigateTo(resolved.page, frontendUrl);
 
-      const lookup = await findBlockOnFrontend(session.page, frontendHints, frontend_selector);
+      const lookup = await findBlockOnFrontend(resolved.page, frontendHints, frontend_selector);
       if (lookup.matches.length === 0) {
         return {
           content: [{
@@ -159,7 +162,7 @@ export function createCompareBlockHandler(
       }
 
       const matchedSelector = lookup.matches[0].matchedBy;
-      const locator = session.page.locator(matchedSelector).first();
+      const locator = resolved.page.locator(matchedSelector).first();
       await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
       const box = await locator.boundingBox();
       if (!box) {
@@ -192,7 +195,7 @@ export function createCompareBlockHandler(
         };
       }
 
-      const frontendBuffer = await session.page.screenshot({
+      const frontendBuffer = await resolved.page.screenshot({
         type: "png",
         clip: { x: clipX, y: clipY, width: clipW, height: clipH },
       });
@@ -213,7 +216,7 @@ export function createCompareBlockHandler(
       const diffPercentage = (mismatchedPixels / totalPixels) * 100;
       const isMatch = diffPercentage <= maxDiffPercent;
       const clusters = findDiffClusters(diff, { topN: 5 });
-      const clusterAnnotations = await annotateClusters(session.page, clusters, {
+      const clusterAnnotations = await annotateClusters(resolved.page, clusters, {
         offsetX: clipX,
         offsetY: clipY,
       });
@@ -250,14 +253,16 @@ export function createCompareBlockHandler(
         diff_preview: diffPreviewPath,
       };
 
-      return {
+      const response: ToolResponse = {
         content: [
           { type: "text", text: JSON.stringify(payload, null, 2) },
           { type: "text", text: formatClusters(clusters, clipX, clipY, clusterAnnotations).join("\n") || "(no significant diff clusters)" },
         ],
       };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

@@ -83,6 +83,17 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
 
     // --- Tools ---
 
+    // Shared session_id schema — opt into a persistent open_session()-owned
+    // page rather than spinning a per-call ephemeral browser. Lets multi-call
+    // flows (clear → block_html → check) share editor state instead of each
+    // tool re-navigating from scratch.
+    const sessionIdSchema = z.string().optional().describe(
+      "Persistent session id from open_session(). When provided, the tool runs " +
+      "on that session's active page and the caller owns lifecycle (close via " +
+      "close_session). When omitted, an ephemeral session is launched for this " +
+      "call only.",
+    );
+
     ctx.registerTool({
       name: "insert_block",
       description:
@@ -106,6 +117,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         screenshot: z.boolean().optional().describe("Take a screenshot of the editor after insertion (default: true)"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        session_id: sessionIdSchema,
       },
       handler: createInsertBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
     });
@@ -119,6 +131,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       schema: {
         post_id: z.number().describe("WordPress post ID to inspect"),
         include_inner: z.boolean().optional().describe("Include each block's innerBlocks recursively (default: false)"),
+        session_id: sessionIdSchema,
       },
       handler: createGetBlocksHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -141,6 +154,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
         frontend_padding: z.number().optional().describe("Pixels of padding around the block bbox (default: 0)"),
         frontend_crop: z.boolean().optional().describe("Clip the frontend screenshot to the block bbox (default: true)"),
+        session_id: sessionIdSchema,
       },
       handler: createScreenshotBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
     });
@@ -155,6 +169,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         block_index: z.number().optional().describe("Top-level block index, 0-based"),
         client_id: z.string().optional().describe("Block clientId"),
         block_path: z.array(z.number()).optional().describe("Path to a nested block, e.g. [0, 1]"),
+        session_id: sessionIdSchema,
       },
       handler: createInspectToolbarHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -180,6 +195,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         maxDiffPercent: z.number().optional().describe("Maximum diff % to still match (default: 5)"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        session_id: sessionIdSchema,
       },
       handler: createCompareBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
     });
@@ -194,6 +210,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         script: z.string().describe("JavaScript body. Use `return value` to yield a result"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
         waitForEditor: z.boolean().optional().describe("Wait for wp.data + editor-canvas readiness (default: true)"),
+        session_id: sessionIdSchema,
       },
       handler: createEvaluateHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -215,6 +232,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        session_id: sessionIdSchema,
       },
       handler: createCheckBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
     });
@@ -225,6 +243,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       schema: {
         post_id: z.number().describe("WordPress post ID"),
         status: z.enum(["publish", "draft", "pending", "private"]).optional().describe('Post status (default: "publish")'),
+        session_id: sessionIdSchema,
       },
       handler: createPublishHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -259,6 +278,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         strip_subtrees: z.array(z.string()).optional().describe(
           "Class names that mark project-specific editor chrome. Any element bearing one of these classes is removed entirely with its subtree.",
         ),
+        session_id: sessionIdSchema,
       },
       handler: createBlockHtmlHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });
@@ -271,6 +291,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       schema: {
         post_id: z.number().describe("WordPress post ID to clear"),
         skip_save: z.boolean().optional().describe("Clear in memory but don't save (default: false)"),
+        session_id: sessionIdSchema,
       },
       handler: createClearBlocksHandler(ctx.core, resolvedConfig, auth, sessionHooks),
     });

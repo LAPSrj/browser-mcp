@@ -6,6 +6,7 @@ import {
   getBlockClientIdByIndex,
   getBlockClientIdByPath,
 } from "../utils/wp-data.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
  * Select a block in the editor and return a structured list of the buttons
@@ -23,20 +24,21 @@ export function createInspectToolbarHandler(
     block_index?: number;
     client_id?: string;
     block_path?: number[];
+    session_id?: string;
   }): Promise<ToolResponse> => {
-    const { post_id, block_index, client_id, block_path } = params;
+    const { post_id, block_index, client_id, block_path, session_id } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport: { width: 1440, height: 900 },
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_inspect_toolbar",
+      sessionHooks,
+      viewport: { width: 1440, height: 900 },
     });
 
     try {
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -46,11 +48,11 @@ export function createInspectToolbarHandler(
 
       let targetClientId = client_id;
       if (!targetClientId && block_path) {
-        targetClientId = await getBlockClientIdByPath(session.page, block_path) ?? undefined;
+        targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
       }
       if (!targetClientId) {
         const idx = block_index ?? 0;
-        targetClientId = await getBlockClientIdByIndex(session.page, idx) ?? undefined;
+        targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
       }
       if (!targetClientId) {
         return {
@@ -62,10 +64,10 @@ export function createInspectToolbarHandler(
         };
       }
 
-      await selectBlock(session.page, targetClientId);
-      await session.page.waitForTimeout(400);
+      await selectBlock(resolved.page, targetClientId);
+      await resolved.page.waitForTimeout(400);
 
-      const toolbar = await session.page.evaluate(() => {
+      const toolbar = await resolved.page.evaluate(() => {
         // Block toolbar renders in the parent document (outside the editor
         // canvas iframe). It appears as a .block-editor-block-toolbar node
         // containing .components-toolbar-group children of buttons.
@@ -138,7 +140,7 @@ export function createInspectToolbarHandler(
       };
 
       if (!toolbar.found) {
-        return {
+        const notFound: ToolResponse = {
           content: [{
             type: "text",
             text: [
@@ -148,13 +150,17 @@ export function createInspectToolbarHandler(
             ].join("\n"),
           }],
         };
+        if (resolved.warnings.length > 0) notFound._warnings = resolved.warnings;
+        return notFound;
       }
 
-      return {
+      const response: ToolResponse = {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

@@ -2,6 +2,7 @@ import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from 
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { clearBlocks, getBlocks, savePost } from "../utils/wp-data.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createClearBlocksHandler(
   core: CoreUtils,
@@ -12,20 +13,20 @@ export function createClearBlocksHandler(
   return async (params: {
     post_id: number;
     skip_save?: boolean;
+    session_id?: string;
   }): Promise<ToolResponse> => {
-    const { post_id, skip_save = false } = params;
+    const { post_id, skip_save = false, session_id } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport: { width: 1280, height: 720 },
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_clear_blocks",
+      sessionHooks,
     });
 
     try {
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -33,25 +34,27 @@ export function createClearBlocksHandler(
         };
       }
 
-      const before = await getBlocks(session.page);
-      await clearBlocks(session.page);
+      const before = await getBlocks(resolved.page);
+      await clearBlocks(resolved.page);
 
       const lines = [
         `Post ${post_id}: cleared ${before.length} block(s).`,
       ];
 
       if (!skip_save) {
-        const postInfo = await savePost(session.page);
+        const postInfo = await savePost(resolved.page);
         lines.push(`Saved. Status: ${postInfo.status}`);
       } else {
         lines.push("Save skipped (skip_save: true).");
       }
 
-      return {
+      const response: ToolResponse = {
         content: [{ type: "text", text: lines.join("\n") }],
       };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

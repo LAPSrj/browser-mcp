@@ -10,6 +10,7 @@ import {
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { normalizeBlockHtmlOnPage } from "../utils/normalize-html.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
  * Return normalized HTML for a block in both editor and frontend contexts.
@@ -34,6 +35,7 @@ export function createBlockHtmlHandler(
     strip_classes?: string[];
     strip_css_vars?: string[];
     strip_subtrees?: string[];
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -47,19 +49,19 @@ export function createBlockHtmlHandler(
       strip_classes,
       strip_css_vars,
       strip_subtrees,
+      session_id,
     } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport: { width: 1280, height: 720 },
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_block_html",
+      sessionHooks,
     });
 
     try {
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -70,11 +72,11 @@ export function createBlockHtmlHandler(
       // Resolve target block clientId (client_id > block_path > block_index)
       let targetClientId = client_id;
       if (!targetClientId && block_path) {
-        targetClientId = await getBlockClientIdByPath(session.page, block_path) ?? undefined;
+        targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
       }
       if (!targetClientId) {
         const idx = block_index ?? 0;
-        targetClientId = await getBlockClientIdByIndex(session.page, idx) ?? undefined;
+        targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
       }
 
       if (!targetClientId) {
@@ -88,7 +90,7 @@ export function createBlockHtmlHandler(
       }
 
       // Read the block's name + editor outerHTML from inside the iframe.
-      const editorInfo = await session.page.evaluate((cid) => {
+      const editorInfo = await resolved.page.evaluate((cid) => {
         const wp = (window as any).wp;
         const block = wp.data.select("core/block-editor").getBlock(cid);
         const iframe = document.querySelector(
@@ -119,7 +121,7 @@ export function createBlockHtmlHandler(
       // inside an InnerBlocks zone produces a guaranteed editor/frontend
       // class diff. Done here while we're still on the editor page —
       // wp.blocks isn't available on the frontend.
-      const stripDefaultClasses = await session.page.evaluate(() => {
+      const stripDefaultClasses = await resolved.page.evaluate(() => {
         const wp = (window as any).wp;
         if (!wp?.blocks?.getBlockTypes) return [] as string[];
         const out: string[] = [];
@@ -142,7 +144,7 @@ export function createBlockHtmlHandler(
         stripSubtrees: strip_subtrees,
       };
       const editorHtml = await normalizeBlockHtmlOnPage(
-        session.page,
+        resolved.page,
         editorInfo.rawHtml,
         normalizeOptions,
       );
@@ -150,16 +152,16 @@ export function createBlockHtmlHandler(
 
       // Gather hints before navigating away from the editor
       const frontendHints = blockName
-        ? await getBlockFrontendHints(session.page, blockName, targetClientId)
+        ? await getBlockFrontendHints(resolved.page, blockName, targetClientId)
         : null;
 
       // Save so frontend reflects the current editor state
       if (save_before_frontend) {
-        await editPostStatus(session.page, "publish");
-        await savePost(session.page);
+        await editPostStatus(resolved.page, "publish");
+        await savePost(resolved.page);
       }
 
-      const frontendUrl = await session.page.evaluate(() => {
+      const frontendUrl = await resolved.page.evaluate(() => {
         const wp = (window as any).wp;
         const post = wp.data.select("core/editor").getCurrentPost();
         return post?.link as string | undefined;
@@ -174,15 +176,15 @@ export function createBlockHtmlHandler(
       } else if (!frontendHints) {
         diagnostics.frontend_error = "Could not gather frontend hints (block name unknown).";
       } else {
-        await core.navigateTo(session.page, frontendUrl);
-        const lookup = await findBlockOnFrontend(session.page, frontendHints, frontend_selector);
+        await core.navigateTo(resolved.page, frontendUrl);
+        const lookup = await findBlockOnFrontend(resolved.page, frontendHints, frontend_selector);
         if (lookup.matches.length > 0) {
           // Normalize on the frontend page so both sides go through the
           // same parse → walk → outerHTML pipeline (canonical entities).
           // Same options — symmetric strips, no-ops on the frontend side
           // for entries that don't appear there.
           frontendHtml = await normalizeBlockHtmlOnPage(
-            session.page,
+            resolved.page,
             lookup.matches[0].html,
             normalizeOptions,
           );
@@ -204,11 +206,13 @@ export function createBlockHtmlHandler(
         ...diagnostics,
       };
 
-      return {
+      const response: ToolResponse = {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }

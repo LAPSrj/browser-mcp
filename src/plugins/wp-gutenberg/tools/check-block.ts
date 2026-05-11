@@ -8,6 +8,7 @@ import {
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { walkAccessibilityTree } from "../../../utils/a11y-walker.js";
+import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
  * Comprehensive block validation tool. Inserts a block, checks registration,
@@ -29,6 +30,7 @@ export function createCheckBlockHandler(
     frontend_selector?: string;
     viewport?: { width: number; height: number };
     outputDir?: string;
+    session_id?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -38,25 +40,26 @@ export function createCheckBlockHandler(
       frontend_selector,
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
+      session_id,
     } = params;
 
-    const session = await core.launchSession({
-      browser: "chromium",
-      viewport,
-      sessionHooks,
+    const resolved = await resolveGutenbergSession(core, {
+      session_id,
       toolName: "gutenberg_check_block",
+      sessionHooks,
+      viewport,
     });
 
     const consoleErrors: string[] = [];
 
     try {
       // Capture errors
-      session.page.on("console", (msg) => {
+      resolved.page.on("console", (msg) => {
         if (msg.type() === "error") {
           consoleErrors.push(msg.text());
         }
       });
-      session.page.on("pageerror", (error) => {
+      resolved.page.on("pageerror", (error) => {
         consoleErrors.push(error.message);
       });
 
@@ -64,9 +67,9 @@ export function createCheckBlockHandler(
       const results: Record<string, unknown> = {};
 
       // 1. Navigate to editor
-      await navigateToEditor(session.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, config, auth);
 
-      const editorError = await checkEditorError(session.page);
+      const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
           content: [{ type: "text", text: `Editor error: ${editorError}` }],
@@ -75,9 +78,9 @@ export function createCheckBlockHandler(
       }
 
       // 2. Check block registration
-      let registered = await isBlockRegistered(session.page, block_name);
+      let registered = await isBlockRegistered(resolved.page, block_name);
       if (!registered) {
-        registered = await waitForBlockType(session.page, block_name, 5000);
+        registered = await waitForBlockType(resolved.page, block_name, 5000);
       }
       results.is_registered = registered;
 
@@ -88,28 +91,30 @@ export function createCheckBlockHandler(
           type: "text",
           text: JSON.stringify(results, null, 2),
         });
-        return { content };
+        const earlyResponse: ToolResponse = { content };
+        if (resolved.warnings.length > 0) earlyResponse._warnings = resolved.warnings;
+        return earlyResponse;
       }
 
       // 3. Insert block
       const clientId = await insertBlock(
-        session.page,
+        resolved.page,
         block_name,
         attributes,
         undefined,
         undefined,
         inner_blocks,
       );
-      await session.page.waitForTimeout(500);
+      await resolved.page.waitForTimeout(500);
 
       // 4. Check validity
-      const blocks = await getBlocks(session.page);
+      const blocks = await getBlocks(resolved.page);
       const inserted = blocks.find((b) => b.clientId === clientId);
       results.is_valid = inserted?.isValid ?? false;
       results.block_attributes = inserted?.attributes;
 
       // 5. Editor screenshot
-      const editorBuffer = await session.page.screenshot({ type: "png" });
+      const editorBuffer = await resolved.page.screenshot({ type: "png" });
       const editorFilename = core.generateFilename({
         prefix: "gutenberg-check-editor",
         browser: "chromium",
@@ -123,8 +128,8 @@ export function createCheckBlockHandler(
       results.editor_screenshot = editorPath;
 
       // 6. Publish and check frontend
-      await editPostStatus(session.page, "publish");
-      const postInfo = await savePost(session.page);
+      await editPostStatus(resolved.page, "publish");
+      const postInfo = await savePost(resolved.page);
       results.post_url = postInfo.link;
 
       if (postInfo.link) {
@@ -132,15 +137,15 @@ export function createCheckBlockHandler(
         // this block will render on the frontend (default class, custom
         // className, actual DOM classes from the iframe)
         const frontendHints = await getBlockFrontendHints(
-          session.page,
+          resolved.page,
           block_name,
           clientId,
         );
 
-        await core.navigateTo(session.page, postInfo.link);
+        await core.navigateTo(resolved.page, postInfo.link);
 
         // Frontend screenshot
-        const frontendBuffer = await session.page.screenshot({ type: "png", fullPage: true });
+        const frontendBuffer = await resolved.page.screenshot({ type: "png", fullPage: true });
         const frontendFilename = core.generateFilename({
           prefix: "gutenberg-check-frontend",
           browser: "chromium",
@@ -156,7 +161,7 @@ export function createCheckBlockHandler(
         // Locate the rendered block(s) using hints + optional override.
         // Returns ALL matches, so repeated blocks all get captured.
         const lookup = await findBlockOnFrontend(
-          session.page,
+          resolved.page,
           frontendHints,
           frontend_selector,
         );
@@ -176,7 +181,7 @@ export function createCheckBlockHandler(
         // otherwise fall back to the full body
         const a11yRoot = lookup.matches[0]?.matchedBy;
         try {
-          const a11yTree = await walkAccessibilityTree(session.page, a11yRoot);
+          const a11yTree = await walkAccessibilityTree(resolved.page, a11yRoot);
           if (a11yTree) {
             results.accessibility_snapshot = a11yTree;
           }
@@ -205,9 +210,11 @@ export function createCheckBlockHandler(
         });
       }
 
-      return { content };
+      const response: ToolResponse = { content };
+      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      return response;
     } finally {
-      await core.closeSession(session);
+      await resolved.cleanup();
     }
   };
 }
