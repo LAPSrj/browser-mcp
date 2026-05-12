@@ -167,6 +167,47 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
     schema: {},
     handler: async () => json(sessionManager.list()),
   },
+
+  pause_session: {
+    description:
+      "Snapshot a session's storage state (cookies + localStorage + sessionStorage) and active-tab URL, " +
+      "then close the session. The returned `snapshot` object is opaque-ish JSON the caller persists and " +
+      "later hands to `resume_session` to reopen with the same auth state. Use case: a step in an automated " +
+      "flow needs human input (captcha, MFA prompt) — pause the headless session, the human solves it in a " +
+      "separately-launched headed session against the snapshot, then the automation resumes with updated " +
+      "cookies. NOT supported on attach_cdp sessions (their state is in the underlying browser profile, not " +
+      "in a Playwright-managed context). NOT preserved across pause/resume: in-page JS state, scroll, " +
+      "in-progress form data, dynamic SPA state, secondary tabs.",
+    schema: {
+      session_id: z.string().describe("Session id returned by open_session"),
+    },
+    handler: async (p) => json(await sessionManager.pauseSession(p.session_id)),
+  },
+
+  resume_session: {
+    description:
+      "Reopen a session from a `snapshot` produced by `pause_session`. Returns a NEW session_id (the resumed " +
+      "session inherits storage state but is fresh — it isn't the \"same\" session). The browser engine is " +
+      "locked to the snapshot's value; per-call overrides for headless / idle_ttl_ms / wall_ttl_ms / " +
+      "output_dir are honored. Navigates to the snapshot's saved URL on open.",
+    schema: {
+      snapshot: z.object({
+        storage_state: z.any(),
+        url: z.string(),
+        viewport: z.object({ width: z.number(), height: z.number() }),
+        user_agent: z.string().optional(),
+        locale: z.string().optional(),
+        timezone: z.string().optional(),
+        browser: z.enum(["chromium", "firefox", "webkit"]),
+        paused_at: z.string(),
+      }).describe("The snapshot object returned by pause_session, passed through verbatim."),
+      headless: z.boolean().optional().describe("Override headless mode on the resumed session"),
+      idle_ttl_ms: z.number().optional().describe("Override idle timeout"),
+      wall_ttl_ms: z.number().optional().describe("Override wall-clock timeout"),
+      output_dir: z.string().optional().describe("Override output_dir for video artifacts (resumed sessions get their own dir)"),
+    },
+    handler: async (p) => json(await sessionManager.resumeSession(p)),
+  },
 };
 
 // ---------------------------------------------------------------------------

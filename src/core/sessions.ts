@@ -85,6 +85,39 @@ export interface CloseResult {
   uptime_ms: number;
 }
 
+/**
+ * Opaque-ish state-handover blob produced by `pause_session` and consumed by
+ * `resume_session`. Carries the storage layer (cookies + origin storage) and
+ * the launch options needed to reopen an equivalent session.
+ *
+ * NOT preserved across pause/resume: in-page JS state, scroll position,
+ * in-progress form data, dynamic SPA state, secondary tabs. Use this for
+ * post-login or post-captcha handover where reaching a state via cookies
+ * is enough; not for mid-flow handover.
+ */
+export interface SessionSnapshot {
+  /** Playwright storageState() output — cookies + per-origin localStorage / sessionStorage / IndexedDB. */
+  storage_state: object;
+  /** Active tab URL at pause time. resume_session navigates here on open. */
+  url: string;
+  /** Viewport carried from the paused session. */
+  viewport: { width: number; height: number };
+  /** Optional fields propagated from the original open_session call. */
+  user_agent?: string;
+  locale?: string;
+  timezone?: string;
+  /** Browser engine. resume_session refuses if the consumer requests a different engine. */
+  browser: BrowserName;
+  /** ISO timestamp the snapshot was taken — for debugging stale snapshots. */
+  paused_at: string;
+}
+
+export interface PauseSessionResult {
+  session_id: string;
+  paused_at: string;
+  snapshot: SessionSnapshot;
+}
+
 interface Session {
   id: string;
   browserName: BrowserName;
@@ -107,6 +140,13 @@ interface Session {
   isAttachCdp: boolean;
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
+  /** Launch-time options captured for pause_session — replayed verbatim into resume_session's open(). */
+  pauseFields: {
+    viewport: { width: number; height: number };
+    user_agent?: string;
+    locale?: string;
+    timezone?: string;
+  };
 }
 
 const DEFAULT_IDLE_TTL = 5 * 60 * 1000;
@@ -285,6 +325,12 @@ class SessionManager {
       closing: false,
       isAttachCdp: !!opts.attach_cdp,
       attachCdp,
+      pauseFields: {
+        viewport,
+        user_agent: opts.user_agent,
+        locale: opts.locale,
+        timezone: opts.timezone,
+      },
     };
     this.sessions.set(id, session);
     this.ensureJanitor();
@@ -343,6 +389,110 @@ class SessionManager {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`Session "${id}" not found.`);
     return this.closeInternal(s, "manual");
+  }
+
+  /**
+   * Snapshot the session's storage state + launch options, then close it.
+   *
+   * Use case: an agent's automated flow hit a step that needs human input
+   * (post-login captcha, MFA prompt, age gate). pause_session captures the
+   * cookies/storage and closes the headless session; the human solves the
+   * step in a separate headed instance launched with the snapshot via
+   * resume_session, then the automation continues with the updated state.
+   *
+   * NOT supported on attach_cdp sessions — their state lives in the
+   * underlying browser's User Data profile, not in a Playwright-managed
+   * context, so the snapshot model doesn't apply.
+   *
+   * NOT preserved across pause/resume: in-page JS state, scroll position,
+   * in-progress form data, dynamic SPA state, secondary tabs. Cookies +
+   * origin storage carry; the rest is reset on resume.
+   */
+  async pauseSession(id: string): Promise<PauseSessionResult> {
+    const s = this.get(id);
+    if (s.isAttachCdp) {
+      throw new Error(
+        `pause_session: not supported on attach_cdp sessions — their state is in the underlying browser's profile. ` +
+          `Close the session normally; reattach with a fresh open_session({ attach_cdp: ... }) when ready.`,
+      );
+    }
+    if (s.recordVideo) {
+      throw new Error(
+        `pause_session: not supported when record_video is true (would truncate the video). ` +
+          `Close the session normally to finalize the recording, or open without record_video to enable pause/resume.`,
+      );
+    }
+    if (s.tracing) {
+      throw new Error(
+        `pause_session: not supported while a trace is running. Call trace_stop({ session_id }) first.`,
+      );
+    }
+
+    // storageState() reads cookies + per-origin localStorage / sessionStorage.
+    const storageState = await s.context.storageState();
+    const activePage = s.pages.get(s.activeTabId);
+    const url = activePage?.url() ?? "about:blank";
+
+    const snapshot: SessionSnapshot = {
+      storage_state: storageState,
+      url,
+      viewport: s.pauseFields.viewport,
+      user_agent: s.pauseFields.user_agent,
+      locale: s.pauseFields.locale,
+      timezone: s.pauseFields.timezone,
+      browser: s.browserName,
+      paused_at: new Date().toISOString(),
+    };
+
+    await this.closeInternal(s, "paused");
+
+    return {
+      session_id: id,
+      paused_at: snapshot.paused_at,
+      snapshot,
+    };
+  }
+
+  /**
+   * Reopen a session from a snapshot produced by pause_session.
+   *
+   * Calls open() with the snapshot's storageState + viewport + user_agent /
+   * locale / timezone + url. Returns a NEW session_id (the resumed session
+   * is a fresh session that happens to inherit storage state — it isn't the
+   * "same" session as the one that was paused).
+   *
+   * Accepts per-call overrides for ttl, headless, record_video, output_dir.
+   * The browser engine is locked to the snapshot's value (resuming on a
+   * different engine wouldn't honor the storageState anyway).
+   */
+  async resumeSession(opts: {
+    snapshot: SessionSnapshot;
+    /** Optional overrides — passed through to open(). browser is locked to the snapshot. */
+    headless?: boolean;
+    idle_ttl_ms?: number;
+    wall_ttl_ms?: number;
+    output_dir?: string;
+  }): Promise<SessionInfo> {
+    const snap = opts.snapshot;
+    if (!snap || typeof snap !== "object" || !snap.storage_state || !snap.browser) {
+      throw new Error(
+        `resume_session: snapshot is missing required fields (storage_state + browser at minimum). ` +
+          `Pass the exact object returned by pause_session.`,
+      );
+    }
+    return this.open({
+      browser: snap.browser,
+      url: snap.url,
+      viewport: snap.viewport,
+      user_agent: snap.user_agent,
+      locale: snap.locale,
+      timezone: snap.timezone,
+      storageState: snap.storage_state,
+      headless: opts.headless,
+      idle_ttl_ms: opts.idle_ttl_ms,
+      wall_ttl_ms: opts.wall_ttl_ms,
+      output_dir: opts.output_dir,
+    });
   }
 
   async closeAll(reason: string): Promise<void> {

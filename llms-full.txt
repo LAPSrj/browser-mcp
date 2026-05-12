@@ -90,6 +90,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | Tool | Purpose |
 |---|---|
 | `open_session`, `close_session`, `list_sessions` | persistent context lifecycle |
+| `pause_session`, `resume_session` | snapshot/restore storage state across a close (human-in-loop handover) |
 | `open_tab`, `switch_tab`, `list_tabs`, `close_tab` | tab control inside a session |
 | `navigate`, `go_back`, `go_forward`, `reload` | URL navigation |
 | `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input |
@@ -225,6 +226,19 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 > **Hazard (capture-tools window).** `console_capture` and `network_log` attach their event listeners at tool-call time, so events emitted *before* the call (during prior tool calls or the initial page load) are NOT captured — Playwright only delivers events while a listener is registered on the Page. To capture a fresh page load on a reused session, pass `url` along with `session_id` (the tool will navigate inside the listener window). For "what's already in the page", use `evaluate_script({ session_id, script: "..." })` to read console buffers or perform fetches directly.
 
 > **`performance_metrics` on a reused session** returns metrics from the original navigation (potentially stale). Re-navigate via `navigate({ session_id, url })` first if you want fresh load metrics — or pass `url` to the tool to trigger the navigation inline.
+
+### Pause / resume contract {#pause-resume-contract}
+
+For flows that need to hand off to a human (captcha, MFA prompt, age gate) without losing auth state.
+
+- **`pause_session({ session_id })`** → returns `{ session_id, paused_at, snapshot }`. The `snapshot` is opaque-ish JSON containing `storage_state` (cookies + per-origin localStorage / sessionStorage) plus the launch options (viewport, user_agent, locale, timezone, browser, url at pause time). The original session is closed; treat the returned id as gone.
+- **`resume_session({ snapshot, ...overrides })`** → opens a NEW session hydrated from the snapshot. Returns a new `session_id`. The browser engine is locked to the snapshot's value (resuming chromium-storageState on firefox would silently drop the cookies); per-call overrides for `headless` / `idle_ttl_ms` / `wall_ttl_ms` / `output_dir` are honored.
+
+What does NOT carry across pause/resume: in-page JS state, scroll position, in-progress form data, dynamic SPA state, secondary tabs. Only the storage layer + launch shape. Use this for "I just need cookies after the user solves the captcha"; not for "the agent was halfway through a multi-step form".
+
+**Not supported on `attach_cdp` sessions** — their state lives in the underlying browser's User Data profile, not in a Playwright-managed context, so the snapshot model doesn't apply. Errors with a clear `not_supported` message. To carry state across closes on an `attach_cdp` flow, point `user_data_dir` at a persistent path (or use the same path on the next attach).
+
+**Not supported with `record_video: true`** (would truncate the video file) or while a `trace_start` is active.
 
 > **`evaluate_script` no-nav mode.** When `session_id` is provided and `url` is omitted, `evaluate_script` runs the snippet on the session's current page without navigating. This is the supported path for "run JS on whatever page is open right now" — including running `fetch()` against the page's origin so cookies + nonces flow naturally (REST PUT, custom AJAX endpoints, etc.).
 
@@ -431,6 +445,16 @@ When two sources of truth (live page state, reference image, design spec, prior 
 1. `open_session({browser: "chromium", viewport: {...}})` → returns `session_id`.
 2. Pass `session_id` to every subsequent tool call.
 3. `close_session({session_id})` when done. Sessions auto-touch on every call to keep them alive against the idle timeout.
+
+### Hand off to a human for captcha / MFA, then resume
+
+1. `open_session({ url })` (typically headless) and run the automation up to the captcha / MFA wall.
+2. `pause_session({ session_id })` → keep the returned `snapshot` object. The session is closed.
+3. Launch a headed Edge / Chromium against the same snapshot — either via your own `resume_session({ snapshot, headless: false })` and let the human solve it in the visible window, or by exporting `snapshot.storage_state` to a JSON file Playwright Codegen can load. Solve the wall.
+4. If you went the `resume_session({ headless: false })` route, `pause_session` again once the human is done — that re-snapshots with the post-captcha cookies. If you used an external headed Edge, export its `context.storageState()` back into a fresh snapshot blob (same shape).
+5. `resume_session({ snapshot, headless: true })` → automation continues with auth cookies intact.
+
+Tradeoff: in-page JS state and scroll do NOT survive any pause. If the captcha is mid-flow (form half-filled, SPA-routed deep state), this doesn't help — use `headless: false` on the original `open_session` instead and let the human take over in the same window.
 
 ### Run an a11y audit on a logged-in page
 
