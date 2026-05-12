@@ -252,18 +252,25 @@ async function probeWindowsLocalhostCdp(port: number): Promise<boolean> {
   }
 }
 
+function escapePsLikePattern(s: string): string {
+  // PS -like wildcards: * ? [ ]. Escape any literal occurrence with [c].
+  return s.replace(/[\[\]*?]/g, (c) => `[${c}]`);
+}
+
 async function findBrowserRootPid(
   cdpPort: number,
-  sessionTag: string,
+  userDataDirWin: string,
   processName: string,
 ): Promise<number | null> {
-  // Find the browser process image whose CommandLine contains both
-  // --remote-debugging-port=<port> and the unique session tag (so we never
-  // match the user's real browser). Process name varies per product
-  // (msedge.exe / chrome.exe / brave.exe / vivaldi.exe / opera.exe).
+  // Find the root browser process: the one whose CommandLine carries both
+  // --remote-debugging-port=<port> (only on the root, not on child renderers)
+  // and --user-data-dir=<path>. The path uniquely identifies our spawn
+  // regardless of whether it was auto-generated (bm-cdp-<sessionId>) or
+  // caller-supplied via userDataDirOverride.
   const safe = sanitizeProcessName(processName);
+  const safePath = escapePsLikePattern(userDataDirWin);
   try {
-    const cmd = String.raw`Get-CimInstance Win32_Process -Filter "Name='${safe}'" | Where-Object { $_.CommandLine -like '*--remote-debugging-port=${cdpPort}*' -and $_.CommandLine -like '*${sessionTag}*' } | Select-Object -First 1 -ExpandProperty ProcessId`;
+    const cmd = String.raw`Get-CimInstance Win32_Process -Filter "Name='${safe}'" | Where-Object { $_.CommandLine -like '*--remote-debugging-port=${cdpPort}*' -and $_.CommandLine -like '*${safePath}*' } | Select-Object -First 1 -ExpandProperty ProcessId`;
     const out = runPS(cmd, 5000);
     const n = parseInt(out, 10);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -272,13 +279,33 @@ async function findBrowserRootPid(
   }
 }
 
-async function killBrowserBySessionTag(
-  sessionTag: string,
+async function killBrowserTreeByPid(pid: number): Promise<void> {
+  // taskkill /F /T kills the target AND its entire descendant tree. Chromium
+  // spawns many child processes (renderer / gpu-process / utility / etc.) that
+  // get reparented if you only kill the root, leaving zombies. The earlier
+  // PS Stop-Process by tag implementation hit this — clone procs survived
+  // session close when --user-data-dir was overridden.
+  try {
+    execFileSync(
+      "/mnt/c/Windows/System32/taskkill.exe",
+      ["/F", "/T", "/PID", String(pid)],
+      { encoding: "utf8", timeout: 8000, stdio: "pipe" },
+    );
+  } catch {
+    // best-effort: taskkill exits non-zero if the process already vanished
+  }
+}
+
+async function killBrowserByUserDataDir(
+  userDataDirWin: string,
   processName: string,
 ): Promise<void> {
+  // Fallback when findBrowserRootPid couldn't resolve a PID at spawn time.
+  // Children inherit --user-data-dir, so a path-based filter sweeps the tree.
   const safe = sanitizeProcessName(processName);
+  const safePath = escapePsLikePattern(userDataDirWin);
   try {
-    const cmd = String.raw`Get-CimInstance Win32_Process -Filter "Name='${safe}'" | Where-Object { $_.CommandLine -like '*${sessionTag}*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }`;
+    const cmd = String.raw`Get-CimInstance Win32_Process -Filter "Name='${safe}'" | Where-Object { $_.CommandLine -like '*${safePath}*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }`;
     runPS(cmd, 8000);
   } catch {
     // best-effort
@@ -473,7 +500,7 @@ export async function spawnAttachCdpRelay(
 
   if (!cdpUp) {
     dbg(`browser did not come up. attempts=${attempts} requested_port=${cdpPort} dev_tools_active_port=${actualCdpPort !== cdpPort ? actualCdpPort : "n/a"}`);
-    await killBrowserBySessionTag(sessionTag, processName);
+    await killBrowserByUserDataDir(userDataDirWin, processName);
     throw new Error(
       `attach_cdp: browser spawned but did not open CDP port within ${startupTimeoutMs}ms. ` +
         `attempts=${attempts}, asked_port=${cdpPort}, process=${processName}. ` +
@@ -483,7 +510,7 @@ export async function spawnAttachCdpRelay(
   }
   dbg(`browser up on ${actualCdpPort} after ${attempts} attempts`);
 
-  const browserPid = await findBrowserRootPid(actualCdpPort, sessionTag, processName);
+  const browserPid = await findBrowserRootPid(actualCdpPort, userDataDirWin, processName);
   dbg(`browser root pid: ${browserPid}`);
 
   // ---- 4. Start the PS relay now that we know the browser PID to watch ----
@@ -541,7 +568,8 @@ export async function spawnAttachCdpRelay(
     }
     if (relayPid == null) {
       // tear down everything
-      await killBrowserBySessionTag(sessionTag, processName);
+      if (browserPid != null) await killBrowserTreeByPid(browserPid);
+      else await killBrowserByUserDataDir(userDataDirWin, processName);
       throw new Error(
         `attach_cdp: relay failed to bind on port ${relayPort} within 5s. ` +
           `See log: ${relayLogFileWsl}`,
@@ -570,7 +598,8 @@ export async function spawnAttachCdpRelay(
 
   if (!e2eUp) {
     if (relayPid != null) await killProcessByPid(relayPid);
-    await killBrowserBySessionTag(sessionTag, processName);
+    if (browserPid != null) await killBrowserTreeByPid(browserPid);
+    else await killBrowserByUserDataDir(userDataDirWin, processName);
     throw new Error(
       `attach_cdp: end-to-end probe at ${endpoint} failed. ` +
         (wsl
@@ -584,7 +613,12 @@ export async function spawnAttachCdpRelay(
     if (cleaned) return;
     cleaned = true;
     if (relayPid != null) await killProcessByPid(relayPid);
-    await killBrowserBySessionTag(sessionTag, processName);
+    // Prefer PID-tree teardown (covers all child procs via taskkill /T).
+    // Falls back to user_data_dir path filter only when we never resolved
+    // a PID at spawn — that path also catches every child since they
+    // inherit --user-data-dir on the CommandLine.
+    if (browserPid != null) await killBrowserTreeByPid(browserPid);
+    else await killBrowserByUserDataDir(userDataDirWin, processName);
     if (wsl) {
       try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
     } else if (!opts.userDataDirOverride) {
