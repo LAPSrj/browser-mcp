@@ -58,16 +58,28 @@ const devPlugin: ScreenshotPlugin = {
       url: resolveUrl(p.url, config.baseUrl),
       outputDir: p.outputDir ?? defaultOutputDir,
     });
+    // Variant for session-aware tools where url is optional (omitted when
+    // session_id is provided — tool runs against the session's current page).
+    const withOptionalUrl = <T extends { url?: string }>(p: T): T => ({
+      ...p,
+      url: p.url ? resolveUrl(p.url, config.baseUrl) : undefined,
+    });
+
+    const urlOptionalDesc = "URL to navigate to before running. Optional when session_id is provided (runs on the session's current page); required when ephemeral";
+    const sessionIdDesc = "Reuse an open_session. Skips the per-call browser launch; when `url` is omitted, runs on the session's current page without re-navigating";
+    const tabIdDesc = "Which tab in the session to target. Defaults to the session's active tab";
 
     // ---------- console_capture ----------
     ctx.registerTool({
       name: "console_capture",
       description:
-        "Capture browser console output (logs, warnings, errors) from a page." +
+        "Capture browser console output (logs, warnings, errors) from a page. Session-aware: pass `session_id` to capture from the session's current page (cookies + auth state intact). Capture window starts when the listener attaches — events emitted before this call are NOT seen." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
         actions: z.array(actionSchema).optional().describe("Actions to run. Selector-based actions support optional and timeout params"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
         toFile: z.boolean().optional().describe("Write logs to file (default: false)"),
@@ -75,17 +87,22 @@ const devPlugin: ScreenshotPlugin = {
         summaryOnly: z.boolean().optional().describe("Compact response: { totalLogs, byType, errorPreviews } (top 5 errors/warnings, capped at 200 chars each) instead of the full log body. Page errors collapse to count + 5 previews. Note: structural switch — at very low log counts (~5 or fewer) the aggregate may exceed the raw output; the win materializes at higher volumes (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await consoleCaptureTool(withUrlAndOut(params))) as any,
+      handler: async (params) => (await consoleCaptureTool({
+        ...withOptionalUrl(params),
+        outputDir: params.outputDir ?? defaultOutputDir,
+      })) as any,
     });
 
     // ---------- dom_snapshot ----------
     ctx.registerTool({
       name: "dom_snapshot",
       description:
-        "Get a simplified DOM tree of a page or element. Returns tag names, IDs, classes, and text content." +
+        "Get a simplified DOM tree of a page or element. Returns tag names, IDs, classes, and text content. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         selector: z.string().optional().describe('Root CSS selector (default: "body")'),
         maxDepth: z.number().optional().describe("Max DOM depth to traverse (default: 5)"),
         actions: z.array(actionSchema).optional().describe("Actions to run before snapshot. Selector-based actions support optional and timeout params"),
@@ -94,17 +111,19 @@ const devPlugin: ScreenshotPlugin = {
         profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true. Caller-supplied flags always win over profile defaults'),
         ...useSchemaField,
       },
-      handler: async (params) => (await domSnapshotTool(withUrl(params))) as any,
+      handler: async (params) => (await domSnapshotTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- accessibility_snapshot ----------
     ctx.registerTool({
       name: "accessibility_snapshot",
       description:
-        "Get the accessibility tree of a page (roles, names, values). Useful for verifying a11y. Optionally runs named WCAG-like rule checks and returns pass/fail per rule." +
+        "Get the accessibility tree of a page (roles, names, values). Useful for verifying a11y. Optionally runs named WCAG-like rule checks and returns pass/fail per rule. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         actions: z.array(actionSchema).optional().describe("Actions to run before snapshot. Selector-based actions support optional and timeout params"),
         scope: z.string().optional().describe("CSS selector to scope the snapshot and asserts (default: document.body)"),
         assertRules: z
@@ -125,7 +144,7 @@ const devPlugin: ScreenshotPlugin = {
         summaryOnly: z.boolean().optional().describe("Compact response: { rootRole, totalNodes, maxDepth, byRole, headingCount, landmarkCount, namedNodeCount } instead of the full tree. assertRules findings still surface in full (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await accessibilitySnapshotTool(withUrl(params))) as any,
+      handler: async (params) => (await accessibilitySnapshotTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- axe_audit ----------
@@ -332,70 +351,78 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "network_log",
       description:
-        "Capture network requests made by a page. Returns URL, method, status, content type, and duration." +
+        "Capture network requests made by a page. Returns URL, method, status, content type, and duration. Session-aware: pass `session_id` to capture from the session's current page (cookies + auth state intact). Capture window starts when the listeners attach — requests fired before this call are NOT seen. To capture a fresh load, also pass `url`." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         actions: z.array(actionSchema).optional().describe("Actions to run. Selector-based actions support optional and timeout params"),
         filterUrl: z.string().optional().describe("Regex to filter request URLs"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         summaryOnly: z.boolean().optional().describe("Compact response: { totalRequests, errorCount, byStatus, byContentType, avgDurationMs, slowestN (top 5), errorsTopN (top 5 4xx/5xx) } instead of the full entries array. Note: structural switch — at very low request counts (~5 or fewer) the aggregate may exceed the raw output; the win materializes at higher volumes (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await networkLogTool(withUrl(params))) as any,
+      handler: async (params) => (await networkLogTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- page_metadata ----------
     ctx.registerTool({
       name: "page_metadata",
       description:
-        "Extract page metadata: title, description, Open Graph tags, meta tags, favicon, language, and charset." +
+        "Extract page metadata: title, description, Open Graph tags, meta tags, favicon, language, and charset. Session-aware: pass `session_id` to read from the session's current page without re-navigating." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         actions: z.array(actionSchema).optional().describe("Actions to run before extraction. Selector-based actions support optional and timeout params"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await pageMetadataTool(withUrl(params))) as any,
+      handler: async (params) => (await pageMetadataTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- performance_metrics ----------
     ctx.registerTool({
       name: "performance_metrics",
       description:
-        "Measure page performance: load time, DOM content loaded, FCP, LCP, CLS, TBT, TTFB." +
+        "Measure page performance: load time, DOM content loaded, FCP, LCP, CLS, TBT, TTFB. Session-aware: pass `session_id` to read metrics from the session's current page. When `url` is omitted, returns metrics from the original navigation (may be stale) — re-navigate via navigate({session_id,url}) first for fresh metrics." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium"). Some metrics are Chromium-only.'),
         actions: z.array(actionSchema).optional().describe("Actions to run before measuring. Selector-based actions support optional and timeout params"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         summaryOnly: z.boolean().optional().describe("Compact response: pipe-separated 'LCP=Xms | FCP=Yms | TTFB=Zms | DCL=… | Load=… | CLS=… | TBT=… | transfer=…' line instead of the JSON object (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await performanceMetricsTool(withUrl(params))) as any,
+      handler: async (params) => (await performanceMetricsTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- computed_styles ----------
     ctx.registerTool({
       name: "computed_styles",
       description:
-        "Get the computed/effective CSS styles of a DOM element. Returns all styles or only non-default ones. Optionally traces each property to its source CSS file and line number (Chromium only)." +
+        "Get the computed/effective CSS styles of a DOM element. Returns all styles or only non-default ones. Optionally traces each property to its source CSS file and line number (Chromium only). Session-aware: pass `session_id` to inspect the session's current page without re-navigating." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         selector: z.string().describe("CSS selector of the element to inspect"),
         filter: z.enum(["all", "non-default"]).optional().describe('Which properties to return (default: "non-default")'),
         properties: z.array(z.string()).optional().describe("Limit output to specific CSS properties. When set, `filter` is ignored"),
         includeSource: z.boolean().optional().describe("Include source CSS file + line number. Chromium CDP only (default: false)"),
         includeInherited: z.boolean().optional().describe("When includeSource is true, also return the chain of inherited styles from ancestor elements (default: false)"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
         actions: z.array(actionSchema).optional().describe("Actions to run before inspecting styles. Selector-based actions support optional and timeout params"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await computedStylesTool(withUrl(params))) as any,
+      handler: async (params) => (await computedStylesTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- evaluate_script ----------
@@ -524,16 +551,18 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "schema_extract",
       description:
-        'Parse and validate all <script type="application/ld+json"> structured-data blocks on the page. Returns the parsed JSON, detected schema.org @type values, and heuristic issue flags (json-parse-failed, whitespace-run, escape-chars-in-string, faq-question-in-answer, faq-empty-answer).' +
+        'Parse and validate all <script type="application/ld+json"> structured-data blocks on the page. Returns the parsed JSON, detected schema.org @type values, and heuristic issue flags (json-parse-failed, whitespace-run, escape-chars-in-string, faq-question-in-answer, faq-empty-answer). Session-aware: pass `session_id` to extract from the session\'s current page without re-navigating.' +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
-        url: z.string().describe(urlVisitDesc),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
         actions: z.array(actionSchema).optional().describe("Actions to run before extracting. Selector-based actions support optional and timeout params"),
         useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
         summaryOnly: z.boolean().optional().describe("Compact response: drops `parsed` (full JSON-LD body) and `rawPreview` from each block; keeps summary, types, issues, parse errors. Re-run without to inspect parsed bodies (default: false)"),
         ...useSchemaField,
       },
-      handler: async (params) => (await schemaExtractTool(withUrl(params))) as any,
+      handler: async (params) => (await schemaExtractTool(withOptionalUrl(params))) as any,
     });
   },
 };

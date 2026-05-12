@@ -1,12 +1,16 @@
 import path from "node:path";
+import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export interface ConsoleCaptureParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   browser?: string;
   actions?: AnyAction[];
   outputDir?: string;
@@ -24,6 +28,8 @@ interface ConsoleEntry {
 export async function consoleCaptureTool(params: ConsoleCaptureParams) {
   const {
     url,
+    session_id,
+    tab_id,
     browser = "chromium",
     actions = [],
     outputDir = ".browser",
@@ -32,40 +38,61 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
     summaryOnly = false,
   } = params;
 
-  const session = await launchSession({
-    browser: browser as BrowserName,
-    viewport: { width: 1280, height: 720 },
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+  } else {
+    const session = await launchSession({
+      browser: browser as BrowserName,
+      viewport: { width: 1280, height: 720 },
+      useBrowserStack,
+    });
+    page = session.page;
+    cleanup = () => closeSession(session);
+  }
 
   const consoleLogs: ConsoleEntry[] = [];
   const pageErrors: string[] = [];
 
+  // Listeners attached now — capture window starts from this point. When
+  // reusing a session, any console events emitted during prior tool calls
+  // or the initial page load are NOT captured (Playwright only delivers
+  // events emitted while a listener is registered on the Page).
+  page.on("console", (msg) => {
+    consoleLogs.push({
+      type: msg.type(),
+      text: msg.text(),
+      timestamp: Date.now(),
+    });
+  });
+
+  page.on("pageerror", (error) => {
+    pageErrors.push(error.message);
+  });
+
   try {
-    session.page.on("console", (msg) => {
-      consoleLogs.push({
-        type: msg.type(),
-        text: msg.text(),
-        timestamp: Date.now(),
-      });
-    });
-
-    session.page.on("pageerror", (error) => {
-      pageErrors.push(error.message);
-    });
-
-    await navigateTo(session.page, url);
+    if (url) await navigateTo(page, url);
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
 
     // Small delay to capture any deferred logs
-    await session.page.waitForTimeout(500);
+    await page.waitForTimeout(500);
 
     const logText = consoleLogs
       .map((l) => `[${l.type}] ${l.text}`)
@@ -137,6 +164,6 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
 
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }

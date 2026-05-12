@@ -216,13 +216,15 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 **Which surfaces accept `session_id`:**
 - **Core primitives** (input/read/cookies/storage/screenshot/wait/navigate, etc.) — all session-aware via the shared `targetField` fragment.
-- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`. Other `dev` tools (`console_capture`, `dom_snapshot`, `accessibility_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `computed_styles`, `schema_extract`, the compare/align/visual-diff family) are **ephemeral-only today** — they launch a fresh browser per call and ignore any open session.
+- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`, `accessibility_snapshot`, `computed_styles`, `console_capture`, `dom_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `schema_extract`. Compare/align/visual-diff family remain ephemeral-only (single-screenshot tools — session reuse doesn't unlock value).
 - **`wp-gutenberg` plugin:** all post-editing tools accept `session_id` (routes through `resolveGutenbergSession`).
 - **`design-compare` plugin:** ephemeral-only.
 
 > **Hazard:** ephemeral sessions cannot accept cookies, storage, or auth state from prior calls — every ephemeral call is a fresh anonymous browser. For multi-step flows that need persistence (login → action → capture), open a session and pass `session_id` to every call.
 
-> **Hazard (silent ephemeral on a non-session-aware tool):** passing `session_id` to a tool that doesn't accept it (e.g. `computed_styles`, `console_capture`) is a no-op — Zod drops unknown fields and the tool launches an ephemeral browser anyway. The visible symptom is auth loss (page redirects to a login form) because the ephemeral context has no cookies. Workaround until those surfaces are lifted: drive the inspection through `evaluate_script({ session_id, script: "..." })` or `dom_query({ session_id, queries: [...] })`, both of which honor the session.
+> **Hazard (capture-tools window).** `console_capture` and `network_log` attach their event listeners at tool-call time, so events emitted *before* the call (during prior tool calls or the initial page load) are NOT captured — Playwright only delivers events while a listener is registered on the Page. To capture a fresh page load on a reused session, pass `url` along with `session_id` (the tool will navigate inside the listener window). For "what's already in the page", use `evaluate_script({ session_id, script: "..." })` to read console buffers or perform fetches directly.
+
+> **`performance_metrics` on a reused session** returns metrics from the original navigation (potentially stale). Re-navigate via `navigate({ session_id, url })` first if you want fresh load metrics — or pass `url` to the tool to trigger the navigation inline.
 
 > **`evaluate_script` no-nav mode.** When `session_id` is provided and `url` is omitted, `evaluate_script` runs the snippet on the session's current page without navigating. This is the supported path for "run JS on whatever page is open right now" — including running `fetch()` against the page's origin so cookies + nonces flow naturally (REST PUT, custom AJAX endpoints, etc.).
 

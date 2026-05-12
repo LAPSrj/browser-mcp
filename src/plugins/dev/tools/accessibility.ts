@@ -1,8 +1,10 @@
+import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { walkAccessibilityTree } from "../../../utils/a11y-walker.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export type A11yRuleName =
   | "section-has-name"
@@ -22,7 +24,9 @@ const ALL_RULES: A11yRuleName[] = [
 ];
 
 export interface AccessibilitySnapshotParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
   /** Selector to scope the snapshot + asserts (default: document.body). */
@@ -44,6 +48,8 @@ interface A11yRuleFinding {
 export async function accessibilitySnapshotTool(params: AccessibilitySnapshotParams) {
   const {
     url,
+    session_id,
+    tab_id,
     actions = [],
     useBrowserStack = false,
     scope,
@@ -52,19 +58,36 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
     summaryOnly = false,
   } = params;
 
-  const session = await launchSession({
-    browser: "chromium" as BrowserName,
-    viewport: { width: 1280, height: 720 },
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+  } else {
+    const session = await launchSession({
+      browser: "chromium" as BrowserName,
+      viewport: { width: 1280, height: 720 },
+      useBrowserStack,
+    });
+    page = session.page;
+    cleanup = () => closeSession(session);
+  }
 
   try {
-    await navigateTo(session.page, url);
+    if (url) await navigateTo(page, url);
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
@@ -74,12 +97,12 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
     if (assertionsMsg) content.push({ type: "text", text: assertionsMsg });
 
     if (assertRules && assertRules.length > 0) {
-      const findings = await runA11yRules(session.page, assertRules, scope);
+      const findings = await runA11yRules(page, assertRules, scope);
       content.push({ type: "text", text: formatFindings(findings) });
     }
 
     if (!skipTree) {
-      const snapshot = await walkAccessibilityTree(session.page, scope);
+      const snapshot = await walkAccessibilityTree(page, scope);
       if (!snapshot) {
         content.push({ type: "text", text: "No accessibility tree available for this page." });
       } else if (summaryOnly) {
@@ -103,7 +126,7 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
 
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }
 

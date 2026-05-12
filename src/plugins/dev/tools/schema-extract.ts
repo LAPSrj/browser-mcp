@@ -1,10 +1,14 @@
+import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export interface SchemaExtractParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
   summaryOnly?: boolean;
@@ -34,26 +38,43 @@ interface SchemaBlock {
  * repeated inside answer-text, empty values).
  */
 export async function schemaExtractTool(params: SchemaExtractParams) {
-  const { url, actions = [], useBrowserStack = false, summaryOnly = false } = params;
+  const { url, session_id, tab_id, actions = [], useBrowserStack = false, summaryOnly = false } = params;
 
-  const session = await launchSession({
-    browser: "chromium" as BrowserName,
-    viewport: { width: 1280, height: 720 },
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+  } else {
+    const session = await launchSession({
+      browser: "chromium" as BrowserName,
+      viewport: { width: 1280, height: 720 },
+      useBrowserStack,
+    });
+    page = session.page;
+    cleanup = () => closeSession(session);
+  }
 
   try {
-    await navigateTo(session.page, url);
+    if (url) await navigateTo(page, url);
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
 
-    const rawBlocks: string[] = await session.page.evaluate(() => {
+    const rawBlocks: string[] = await page.evaluate(() => {
       const scripts = document.querySelectorAll<HTMLScriptElement>(
         'script[type="application/ld+json"]',
       );
@@ -149,7 +170,7 @@ export async function schemaExtractTool(params: SchemaExtractParams) {
     }
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }
 

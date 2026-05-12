@@ -1,10 +1,14 @@
+import type { BrowserContext, Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export interface PerformanceMetricsParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   browser?: string;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
@@ -14,30 +18,52 @@ export interface PerformanceMetricsParams {
 export async function performanceMetricsTool(params: PerformanceMetricsParams) {
   const {
     url,
+    session_id,
+    tab_id,
     browser = "chromium",
     actions = [],
     useBrowserStack = false,
     summaryOnly = false,
   } = params;
 
-  const session = await launchSession({
-    browser: browser as BrowserName,
-    viewport: { width: 1280, height: 720 },
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let context: BrowserContext;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+    context = sessionManager.getContext(session_id);
+  } else {
+    const session = await launchSession({
+      browser: browser as BrowserName,
+      viewport: { width: 1280, height: 720 },
+      useBrowserStack,
+    });
+    page = session.page;
+    context = session.context;
+    cleanup = () => closeSession(session);
+  }
 
   try {
-    await navigateTo(session.page, url);
+    if (url) await navigateTo(page, url);
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
 
-    const metrics = await session.page.evaluate(() => {
+    const metrics = await page.evaluate(() => {
       const perf = performance;
       const navigation = perf.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
       const paint = perf.getEntriesByType("paint");
@@ -83,7 +109,7 @@ export async function performanceMetricsTool(params: PerformanceMetricsParams) {
     // Attempt to get TBT via CDP on Chromium
     if (browser === "chromium" && !useBrowserStack) {
       try {
-        const cdp = await session.context.newCDPSession(session.page);
+        const cdp = await context.newCDPSession(page);
         await cdp.send("Performance.enable");
         const cdpMetrics = await cdp.send("Performance.getMetrics");
         const tbt = cdpMetrics.metrics.find(
@@ -125,6 +151,6 @@ export async function performanceMetricsTool(params: PerformanceMetricsParams) {
 
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }

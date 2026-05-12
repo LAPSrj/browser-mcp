@@ -1,10 +1,14 @@
+import type { BrowserContext, Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
+import { sessionManager } from "../../../core/sessions.js";
 
 export interface ComputedStylesParams {
-  url: string;
+  url?: string;
+  session_id?: string;
+  tab_id?: string;
   selector: string;
   filter?: "all" | "non-default";
   properties?: string[];
@@ -41,6 +45,8 @@ interface InheritedEntry {
 export async function computedStylesTool(params: ComputedStylesParams) {
   const {
     url,
+    session_id,
+    tab_id,
     selector,
     filter = "non-default",
     properties,
@@ -51,19 +57,39 @@ export async function computedStylesTool(params: ComputedStylesParams) {
     useBrowserStack = false,
   } = params;
 
-  const session = await launchSession({
-    browser: "chromium" as BrowserName,
-    viewport,
-    useBrowserStack,
-  });
+  if (!session_id && !url) {
+    return {
+      content: [{ type: "text" as const, text: "url is required when session_id is not provided" }],
+      isError: true,
+    };
+  }
+
+  let page: Page;
+  let context: BrowserContext;
+  let cleanup: (() => Promise<void>) | null = null;
+
+  if (session_id) {
+    sessionManager.touch(session_id);
+    page = sessionManager.getPage(session_id, tab_id);
+    context = sessionManager.getContext(session_id);
+  } else {
+    const session = await launchSession({
+      browser: "chromium" as BrowserName,
+      viewport,
+      useBrowserStack,
+    });
+    page = session.page;
+    context = session.context;
+    cleanup = () => closeSession(session);
+  }
 
   try {
-    await navigateTo(session.page, url);
+    if (url) await navigateTo(page, url);
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
     if (actions.length > 0) {
-      const { stoppedAt, assertions } = await runActions(session.page, actions);
+      const { stoppedAt, assertions } = await runActions(page, actions);
       if (stoppedAt) actionStopMsg = formatActionStop(stoppedAt);
       assertionsMsg = formatAssertions(assertions);
     }
@@ -71,9 +97,9 @@ export async function computedStylesTool(params: ComputedStylesParams) {
     let result: StylesResult;
 
     if (includeSource && !useBrowserStack) {
-      result = await getStylesWithSource(session, selector, filter, properties, includeInherited);
+      result = await getStylesWithSource(page, context, selector, filter, properties, includeInherited);
     } else {
-      result = await getComputedStyles(session.page, selector, filter, properties);
+      result = await getComputedStyles(page, selector, filter, properties);
       if (includeSource && useBrowserStack) {
         result.warning = "includeSource is not supported with BrowserStack — source info omitted";
       }
@@ -89,7 +115,7 @@ export async function computedStylesTool(params: ComputedStylesParams) {
     content.push({ type: "text", text: JSON.stringify(result, null, 2) });
     return { content };
   } finally {
-    await closeSession(session);
+    if (cleanup) await cleanup();
   }
 }
 
@@ -177,13 +203,14 @@ async function getComputedStyles(
 }
 
 async function getStylesWithSource(
-  session: Awaited<ReturnType<typeof launchSession>>,
+  page: Page,
+  context: BrowserContext,
   selector: string,
   filter: "all" | "non-default",
   properties?: string[],
   includeInherited?: boolean,
 ): Promise<StylesResult> {
-  const cdp = await session.context.newCDPSession(session.page);
+  const cdp = await context.newCDPSession(page);
 
   // Collect stylesheet headers as they are reported during CSS.enable
   const stylesheetHeaders = new Map<string, { sourceURL: string; startLine: number }>();
@@ -331,7 +358,7 @@ async function getStylesWithSource(
       propsToInclude = properties;
     } else if (filter === "non-default") {
       // Use the page to compute defaults for this tag
-      const defaults = await session.page.evaluate((tagName: string) => {
+      const defaults = await page.evaluate((tagName: string) => {
         const container = document.createElement("div");
         container.style.cssText =
           "position:fixed;left:-99999px;top:-99999px;visibility:hidden;all:initial;";
