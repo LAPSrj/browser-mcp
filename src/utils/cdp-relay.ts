@@ -415,6 +415,26 @@ export async function spawnAttachCdpRelay(
     } else if (process.platform === "win32") {
       mkdirSync(userDataDirWin, { recursive: true });
     }
+
+    // Pre-seed Default/Preferences with translate disabled. --disable-features=Translate
+    // alone is not always enough on Edge — the in-page "Translate this page?" infobar
+    // is also gated on the per-profile `translate.enabled` boolean (defaults to true).
+    // Writing the pref BEFORE first launch is the only way to suppress it on the very
+    // first page visit; Edge picks it up at startup and respects it for the session.
+    // Skipped when the caller supplies their own user_data_dir — that's their profile,
+    // we don't mutate it.
+    try {
+      const defaultDirWin = `${userDataDirWin}\\Default`;
+      const defaultDirNode = wsl ? winToWslPath(defaultDirWin) : defaultDirWin;
+      mkdirSync(defaultDirNode, { recursive: true });
+      const stubPrefs = JSON.stringify({
+        translate: { enabled: false },
+        translate_blocked_languages: ["*"],
+      });
+      writeFileSync(`${defaultDirNode}/Preferences`, stubPrefs, "utf8");
+    } catch (e) {
+      dbg("pre-seed Preferences failed (non-fatal):", (e as Error).message);
+    }
   }
 
   const browserArgs = [
@@ -431,7 +451,13 @@ export async function spawnAttachCdpRelay(
     // it also short-circuits the sync FRE flow, so the requested startup URL
     // ("about:blank") wins across all five products.
     "--disable-sync",
-    "--disable-features=Translate",
+    // Translate suppression: belt-and-suspenders.
+    //   --disable-features=Translate kills the Chromium feature.
+    //   TranslateUI kills the infobar specifically (separate Edge build flag).
+    //   The pre-seeded Default/Preferences above sets translate.enabled=false,
+    //   which catches the case where Edge honors the per-profile pref over
+    //   the feature flag (observed on current Edge 147+ — flag alone isn't enough).
+    "--disable-features=Translate,TranslateUI",
     "about:blank",
   ];
 
