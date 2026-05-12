@@ -87,6 +87,8 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 | `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
+| `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
+| `resume_session` | Reopen from a `pause_session` snapshot. Returns a NEW `session_id` — the resumed context inherits storage state but is a fresh session. Browser engine locked to the snapshot; per-call overrides for `headless`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`. |
 
 Every interactive primitive accepts an optional `session_id` (plus `tab_id`
 for multi-tab sessions). Without `session_id`, the primitive runs against a
@@ -113,19 +115,29 @@ understand what the agent did.
 launches (or connects to) a real Chromium-channel browser instead. Two
 modes:
 
-- **Auto-launch** — `attach_cdp: true` spawns an isolated Edge instance on
-  a session-scoped temp profile with `--remote-debugging-port` enabled, and
-  attaches via `chromium.connectOverCDP()`. Useful when the real browser
-  engine, real cookies, or installed extensions matter.
+- **Auto-launch** — `attach_cdp: true` spawns an isolated browser instance
+  of the configured product on a session-scoped temp profile with
+  `--remote-debugging-port` enabled, and attaches via
+  `chromium.connectOverCDP()`. Product is picked by `BROWSER_MCP_PRODUCT`
+  (one of `edge`, `chrome`, `brave`, `vivaldi`, `opera`); platform default
+  is `edge` on Windows/WSL and `chrome` on macOS/Linux. Useful when the
+  real browser engine, real cookies, or installed extensions matter.
 - **Endpoint** — `attach_cdp: "http://localhost:9222"` attaches to a
   user-managed browser already running with CDP exposed. The MCP never
   spawns or closes the browser in this mode.
 
-Per-call overrides: `executable_path` (Windows path to the Edge binary —
-overrides `BROWSER_MCP_EDGE_EXE`), `user_data_dir` (reuse an existing
-profile instead of the temp profile), `auto_launch` (explicit override of
-the config default), `headless: false` (visible window — on WSL, attached
-Windows browsers are naturally headed).
+Per-call overrides: `executable_path` (path to the browser binary —
+overrides `BROWSER_MCP_EXECUTABLE_PATH`), `user_data_dir` (reuse an
+existing profile instead of the temp profile), `auto_launch` (explicit
+override of the config default), `headless: false` (visible window — on
+WSL, attached Windows browsers are naturally headed).
+
+**Translate popup suppression.** Auto-generated temp profiles get
+`--disable-features=Translate,TranslateUI` AND a pre-seeded
+`Default/Preferences` with `translate.enabled = false` before the browser
+starts — the feature flag alone isn't sufficient on current Edge because
+the infobar is also gated on the per-profile pref. User-supplied
+`user_data_dir` paths are NOT touched.
 
 **WSL transparency.** WSL2's NAT can't reach Windows-host loopback, so on
 WSL the auto-launch path additionally spawns a session-scoped Windows-side
@@ -135,14 +147,20 @@ fires only if browser-PID watching fails. Set `BROWSER_MCP_CDP_DEBUG=1` to
 log relay activity to `%TEMP%\browser-mcp\<session>\relay.log`.
 
 **Footgun.** Never OS-kill the attached browser (Task Manager,
-`taskkill /IM msedge.exe`) — Edge shares its process group with the user's
-real Edge, so this kills both. `close_session` is the only safe teardown:
-it filters by the session's user-data-dir tag and leaves the user's real
-Edge running. Playwright's `browser.close()` is skipped internally for
-attach_cdp sessions for the same reason.
+`taskkill /IM msedge.exe`) — the browser shares its process group with
+the user's real Edge/Chrome/etc, so this kills both. `close_session` is
+the only safe teardown: it kills the spawned browser tree via the root
+PID captured at spawn (`taskkill /F /T`) and leaves any unrelated browser
+windows untouched. Playwright's `browser.close()` is skipped internally
+for attach_cdp sessions for the same reason.
 
-**Limits.** Chromium-channel only (no Firefox / WebKit) — and Edge
-specifically today. Cannot combine with `record_video`.
+**Per-product validation status (Windows/WSL).** Edge ✓, Chrome ✓. Brave
+/ Vivaldi / Opera are code-supported via the same spawn + relay + teardown
+path but not live-validated — per-product FRE dialogs or default-browser
+prompts may surface that aren't documented yet.
+
+**Limits.** Chromium-channel only (no Firefox / WebKit). Cannot combine
+with `record_video`.
 
 #### Safeguards
 
@@ -311,7 +329,8 @@ Plugins can register custom action types (e.g. `gutenberg_insert`,
 | `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
 | `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |
 | `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
-| `BROWSER_MCP_EDGE_EXE` | — | Windows path to the Edge executable for `open_session({ attach_cdp: true })` auto-launch. Per-call `executable_path` overrides it. |
+| `BROWSER_MCP_PRODUCT` | `edge` (WSL/Win) / `chrome` (macOS/Linux) | Which Chromium-channel browser auto-launch uses. One of `edge`, `chrome`, `brave`, `vivaldi`, `opera`. Throws on typo. |
+| `BROWSER_MCP_EXECUTABLE_PATH` | per-product default | Path to the browser executable for `open_session({ attach_cdp: true })` auto-launch. Overrides the product's canonical default; required for Opera on Windows (no machine-wide path). Per-call `executable_path` overrides this. |
 | `BROWSER_MCP_CDP_DEBUG` | `0` | When `1`, the WSL CDP relay logs activity to `%TEMP%\browser-mcp\<session>\relay.log`. |
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
