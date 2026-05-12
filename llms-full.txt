@@ -45,7 +45,8 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `align_elements` | Per-element pixel-shift measurement vs reference PNG; applies CSS transforms to confirm | (contract) align-vs-compare selection |
 | `console_capture` | Capture console messages over a script run | |
 | `dom_snapshot` | Full DOM tree as JSON | |
-| `accessibility_snapshot` | a11y tree | |
+| `accessibility_snapshot` | a11y tree + 6 hand-rolled rule asserts | (surface) accessibility_snapshot — NOT a full WCAG audit |
+| `axe_audit` | Full axe-core WCAG audit (violations + passes + incomplete) | (surface) axe_audit; session-aware |
 | `network_log` | HAR-style network requests over a script run | |
 | `page_metadata` | Title, URL, meta tags | |
 | `performance_metrics` | LCP, FCP, TTFB | |
@@ -215,7 +216,7 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 **Which surfaces accept `session_id`:**
 - **Core primitives** (input/read/cookies/storage/screenshot/wait/navigate, etc.) — all session-aware via the shared `targetField` fragment.
-- **`dev` plugin:** `dom_query`, `evaluate_script`, `trace_start`, `trace_stop`. Other `dev` tools (`console_capture`, `dom_snapshot`, `accessibility_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `computed_styles`, `schema_extract`, the compare/align/visual-diff family) are **ephemeral-only today** — they launch a fresh browser per call and ignore any open session.
+- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`. Other `dev` tools (`console_capture`, `dom_snapshot`, `accessibility_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `computed_styles`, `schema_extract`, the compare/align/visual-diff family) are **ephemeral-only today** — they launch a fresh browser per call and ignore any open session.
 - **`wp-gutenberg` plugin:** all post-editing tools accept `session_id` (routes through `resolveGutenbergSession`).
 - **`design-compare` plugin:** ephemeral-only.
 
@@ -339,6 +340,49 @@ Surface granularity is **per contract**, not per tool. Tools that share a contra
 - *Font-family test fails despite the same font* — the comparison parses primary font from fallback stacks via `parseFontStack`. If both sides use the same primary, it matches. For exact-string match, pre-normalize.
 - *Position / displacement changes don't move the result* — `design_compare` checks the property list you supplied; if `transform` isn't in the list, displacement is invisible. Use `design_audit`'s visual phase for positional verification.
 
+### accessibility_snapshot {#surface-accessibility-snapshot}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** the accessibility tree (roles, names, values) of a page or a CSS-scoped subtree, plus a small fixed set of structural a11y asserts.
+
+**Not authoritative for:** a full WCAG audit. The `assertRules` enum is exactly 6 hand-rolled checks: `section-has-name`, `details-summary-has-heading`, `region-has-roledescription`, `button-has-name`, `img-has-alt`, `form-control-has-label`. Color-contrast, focus-order, ARIA-state, nested-interactive, landmark-uniqueness, page-has-heading-one, and the rest of WCAG 2.x/2.2 are **not covered** — use `axe_audit` for those. Tool is ephemeral-only today (no `session_id`); to run it against an authed page, route through `evaluate_script({session_id, script: "..."})` or use `axe_audit` (session-aware).
+
+**Coordinate frame:** none — pure ARIA tree + selector-based fail reports.
+
+**Common misreads:**
+- *"`assertRules` passed, page must be a11y-clean"* — the 6 rules are a thin slice. Run `axe_audit` for the full picture.
+- *"`accessibility_snapshot({session_id})` ignored my session"* — `session_id` is dropped by the schema (no field). Use `axe_audit` for session-aware audits.
+
+### axe_audit {#surface-axe-audit}
+
+**Produced by:** `dev` plugin.
+
+**Authoritative for:** running an axe-core accessibility audit (WCAG 2.0/2.1/2.2 A+AA + best-practice + experimental tags). Returns structured `violations`, `passes`, `incomplete`, `inapplicable` per the axe-core result schema, plus a summary block with impact counts.
+
+**Not authoritative for:** rule semantics or fix recipes — those live in axe-core's [rule descriptions](https://github.com/dequelabs/axe-core/blob/develop/doc/rule-descriptions.md). Tool returns rule IDs + `helpUrl`s; consult axe-core docs for what each rule checks and how to remediate.
+
+**Coordinate frame:** DOM selectors only. Each violation node's `target` is an array of CSS selectors (axe's standard shape).
+
+**Usage:**
+
+- **Audit a public URL (ephemeral):** `axe_audit({ url: "https://example.com" })` — default tags (`wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `best-practice`). Returns violations + incomplete by default.
+- **Audit a logged-in page:** `open_session` first, then `axe_audit({ session_id })` with `url` omitted — runs against the session's current page so cookies / WP-admin nonces / authed state flow through. The supported path for any audit that needs auth.
+- **Scope to a subtree:** `axe_audit({ session_id, include: ["#main-content"], exclude: [".third-party-widget"] })`.
+- **Run a specific rule set:** `axe_audit({ session_id, rules: ["color-contrast", "label", "button-name"] })`. Overrides `tags` when both are set.
+- **Only WCAG 2.2 AA:** `axe_audit({ session_id, tags: ["wcag22aa"] })`.
+- **Compact response:** `axe_audit({ session_id, summaryOnly: true })` returns counts + impact breakdown without per-violation node detail. Useful for CI gates that just need pass/fail.
+- **Include passes for evidence:** `axe_audit({ session_id, resultTypes: ["violations", "passes"] })`. Defaults to `["violations", "incomplete"]`.
+
+**Response shape (top-level):**
+- `summary`: `{ url, timestamp, counts: {violations, passes, incomplete, inapplicable}, violationsByImpact: {critical, serious, moderate, minor}, testEngine }`.
+- `violations` / `incomplete` / `passes` / `inapplicable` (only the ones in `resultTypes`): array of `{ id, impact, tags, help, helpUrl, nodes: [{ target, html, failureSummary }] }`. `target` is the array of CSS selectors axe emits — pass any element into `dom_query` / `compare_element` to inspect further.
+
+**Common misreads:**
+- *"`incomplete` results count as passes"* — `incomplete` means axe couldn't determine pass/fail (e.g. cross-origin iframe, color-contrast on a gradient background). Triage these as failures-unless-proven-otherwise, not as silent passes.
+- *"`disableRules` suppressed a rule but it's still in `violations`"* — `disableRules` is applied after `tags`/`rules` selection. If the rule is also in your explicit `rules` array, list it only in `rules` or only in `disableRules`, not both.
+- *"axe found color-contrast issues my external tool didn't"* — axe-core's color-contrast rule reads computed styles, so a different background derived from a parent gradient or pseudo-element can give different answers than tools that screenshot the rendered pixels. Both can be right; cross-check with `element_screenshot` if in doubt.
+
 ### list_modes {#surface-list-modes}
 
 **Produced by:** core (always registered, regardless of plugin set).
@@ -385,6 +429,15 @@ When two sources of truth (live page state, reference image, design spec, prior 
 1. `open_session({browser: "chromium", viewport: {...}})` → returns `session_id`.
 2. Pass `session_id` to every subsequent tool call.
 3. `close_session({session_id})` when done. Sessions auto-touch on every call to keep them alive against the idle timeout.
+
+### Run an a11y audit on a logged-in page
+
+1. `open_session` + log in (via `type_text` / `click` against the login form, or via the `wp` plugin's `use: "wordpress"` mode if it's a WP site).
+2. `navigate({session_id, url})` to the page you want to audit.
+3. `axe_audit({session_id})` — omit `url` so the audit runs on the session's current page with cookies intact. Defaults cover WCAG 2.0/2.1 A+AA + best-practice.
+4. Triage: `violations` (axe is confident) and `incomplete` (axe couldn't decide — treat as needs-review). Each entry's `helpUrl` points at the axe-core rule doc with fix guidance.
+5. For CI-style pass/fail: `axe_audit({session_id, summaryOnly: true})` returns only counts + impact breakdown.
+6. To re-audit after a fix, just call `axe_audit({session_id})` again; the session keeps the page state. To audit a different page, `navigate({session_id, url: newUrl})` then re-audit.
 
 ## Diagnosis {#diagnosis}
 

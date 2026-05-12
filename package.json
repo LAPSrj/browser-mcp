@@ -22,6 +22,7 @@
   ],
   "license": "PolyForm-Strict-1.0.0",
   "dependencies": {
+    "@axe-core/playwright": "^4.11.3",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "pixelmatch": "^6.0.0",
     "playwright": "^1.52.0",

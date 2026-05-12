@@ -11,6 +11,7 @@ import { sessionManager } from "../../core/sessions.js";
 import { consoleCaptureTool } from "./tools/console-capture.js";
 import { domSnapshotTool } from "./tools/dom-snapshot.js";
 import { accessibilitySnapshotTool } from "./tools/accessibility.js";
+import { axeAuditTool } from "./tools/axe-audit.js";
 import { visualDiffTool } from "./tools/visual-diff.js";
 import { compareScreenshotTool } from "./tools/compare-screenshot.js";
 import { compareElementTool } from "./tools/compare-element.js";
@@ -125,6 +126,47 @@ const devPlugin: ScreenshotPlugin = {
         ...useSchemaField,
       },
       handler: async (params) => (await accessibilitySnapshotTool(withUrl(params))) as any,
+    });
+
+    // ---------- axe_audit ----------
+    ctx.registerTool({
+      name: "axe_audit",
+      description:
+        "Run an axe-core accessibility audit on the page. Injects axe-core into the page context, runs the configured rule set, and returns structured violations/passes/incomplete/inapplicable results. Default rule set covers WCAG 2.0/2.1 A+AA plus best-practice. Session-aware: pass `session_id` to audit the page that's currently open (cookies + auth state intact) without re-navigating. See axe-core docs (https://github.com/dequelabs/axe-core/blob/develop/doc/rule-descriptions.md) for the rule catalog + result schema." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().optional().describe("URL to navigate to before auditing. Optional when session_id is provided (audit the session's current page); required when ephemeral"),
+        session_id: z.string().optional().describe("Reuse an open_session. Skips the per-call browser launch; when `url` is omitted the audit runs against the session's current page without re-navigating"),
+        tab_id: z.string().optional().describe("Which tab in the session to audit. Defaults to the session's active tab"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium"). axe-core is browser-agnostic'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
+        actions: z.array(actionSchema).optional().describe("Actions to run before auditing (e.g. open a menu, dismiss a modal). Selector-based actions support optional and timeout params"),
+        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before auditing (default: true)"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        include: z.array(z.string()).optional().describe("CSS selectors to limit the audit to. When omitted, audits the entire document"),
+        exclude: z.array(z.string()).optional().describe("CSS selectors to exclude from the audit (e.g. third-party widgets you don't own)"),
+        tags: z.array(z.enum([
+          "wcag2a",
+          "wcag2aa",
+          "wcag2aaa",
+          "wcag21a",
+          "wcag21aa",
+          "wcag22aa",
+          "best-practice",
+          "ACT",
+          "section508",
+          "experimental",
+        ])).optional().describe('Rule tag filter. Default ["wcag2a","wcag2aa","wcag21a","wcag21aa","best-practice"]. Mutually exclusive with `rules` — when both are set, `rules` wins'),
+        rules: z.array(z.string()).optional().describe("Specific axe rule IDs to run (e.g. [\"color-contrast\",\"label\",\"button-name\"]). Overrides `tags` when set. See axe-core docs for the full rule catalog"),
+        disableRules: z.array(z.string()).optional().describe("Specific axe rule IDs to disable. Applied on top of `tags` or `rules`. Useful for suppressing known-noisy rules per call"),
+        resultTypes: z.array(z.enum(["violations", "passes", "incomplete", "inapplicable"])).optional().describe('Which result buckets to return in full. Default ["violations","incomplete"]. The summary block (counts + impact breakdown) is always returned'),
+        summaryOnly: z.boolean().optional().describe("Return only the summary block (counts + impact breakdown), no per-violation details (default: false)"),
+        ...useSchemaField,
+      },
+      handler: async (params) => (await axeAuditTool({
+        ...params,
+        url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
+      })) as any,
     });
 
     // ---------- visual_diff ----------

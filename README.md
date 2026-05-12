@@ -225,7 +225,8 @@ Tools that only DevTools can deliver — stuff a real user can't see.
 | `console_capture` | Capture console logs. |
 | `network_log` | Capture network requests. |
 | `dom_snapshot` | Simplified DOM tree. |
-| `accessibility_snapshot` | Accessibility tree + optional WCAG-like rule checks. |
+| `accessibility_snapshot` | Accessibility tree + 6 hand-rolled structural checks. **Not** a full WCAG audit — use `axe_audit` for that. |
+| `axe_audit` | Full axe-core WCAG 2.x audit. Session-aware. Returns structured violations / passes / incomplete / inapplicable with rule IDs and CSS selectors. |
 | `computed_styles` | Effective CSS for an element; optional CSS source tracing. |
 | `performance_metrics` | Core Web Vitals + load timing. |
 | `visual_diff` | Pixel-diff two PNGs. |
