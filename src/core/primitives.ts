@@ -111,7 +111,19 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "When false, opens a visible browser window. Useful for human-in-the-loop captcha/login flows. " +
           "On WSL, the Linux Chromium window renders directly into the Windows desktop via WSLg. Default: true.",
       ),
-      attach_cdp: z.union([z.boolean(), z.string()]).optional().describe(
+      // attach_cdp accepts boolean OR endpoint URL string. Some MCP clients
+      // string-coerce booleans (true → "true") on the wire; without the
+      // preprocess below, "true" would be accepted as the URL variant and
+      // Playwright would fail with ERR_INVALID_URL. The URL variant is also
+      // narrowed to require http(s):// so no other accidental string can
+      // masquerade as an endpoint.
+      attach_cdp: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.union([
+          z.boolean(),
+          z.string().regex(/^https?:\/\//i, "attach_cdp string must be an http(s) endpoint URL like http://localhost:9222"),
+        ]),
+      ).optional().describe(
         "Attach to a CDP-speaking browser instead of launching Playwright Chromium. Pass `true` to auto-launch " +
           "an isolated Chromium-channel browser (edge/chrome/brave/vivaldi/opera — selected via the " +
           "BROWSER_MCP_PRODUCT env var, default edge on Windows/WSL or chrome on macOS/Linux) using the " +
@@ -119,7 +131,10 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
           "a user-managed browser. Chromium-only. Cannot record video. On WSL, auto-launch transparently spawns " +
           "a Windows-side TCP relay so the browser CDP endpoint is reachable across the WSL2 NAT.",
       ),
-      auto_launch: z.boolean().optional().describe(
+      auto_launch: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
         "Override config-default auto_launch behavior for this attach_cdp session. When true (and attach_cdp is " +
           "true), spawns a fresh isolated browser instance of the configured product. Ignored when attach_cdp " +
           "is a string endpoint.",
