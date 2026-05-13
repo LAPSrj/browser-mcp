@@ -200,6 +200,20 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
     handler: async (p) => json(await sessionManager.closeBrowser(p.session_id, p.force)),
   },
 
+  browser_status: {
+    description:
+      "Read-only introspection of the shared-profile coordination state for an attach_cdp session. Returns " +
+      "sidecar view (cdp_port, relay_port, root_pid, process_name, spawned_at, full attached_sessions list) " +
+      "plus this agent's perspective: how it attached (\"spawn\" vs \"existing\"), tab counts (own / orphan), " +
+      "and peer count (other browser-mcp servers attached to this same browser). Use to debug multi-agent " +
+      "scenarios — \"who owns this tab?\", \"is the sidecar consistent?\", \"how many peers are attached?\". " +
+      "Non-attach_cdp sessions get a minimal response (is_attach_cdp:false + own_tabs_count).",
+    schema: {
+      session_id: z.string().describe("Session id to introspect"),
+    },
+    handler: async (p) => json(await sessionManager.browserStatus(p.session_id)),
+  },
+
   claim_tab: {
     description:
       "Take ownership of an unowned tab in the shared browser context. Use case: a popup opened with " +

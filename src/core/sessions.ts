@@ -611,6 +611,83 @@ class SessionManager {
   }
 
   /**
+   * Read-only snapshot of a shared-profile's coordination state, from
+   * this session's perspective. Returns the sidecar's view (root_pid,
+   * cdp_port, attached_sessions[]) plus counts of own-tabs vs orphans
+   * visible to this agent. Useful when debugging "which session owns
+   * this tab" in multi-agent scenarios.
+   */
+  async browserStatus(session_id: string): Promise<{
+    session_id: string;
+    is_attach_cdp: boolean;
+    attached_via: "spawn" | "existing" | null;
+    user_data_dir: string | null;
+    sidecar: {
+      cdp_port: number;
+      relay_port: number | null;
+      root_pid: number;
+      process_name: string;
+      spawned_at: string;
+      attached_sessions: Array<{ session_id: string; browser_mcp_pid: number; attached_at: string }>;
+    } | null;
+    own_tabs_count: number;
+    orphan_tabs_count: number;
+    peer_count: number;
+    this_browser_mcp_pid: number;
+  }> {
+    const s = this.get(session_id);
+    if (!s.isAttachCdp || !s.attachCdp) {
+      return {
+        session_id,
+        is_attach_cdp: false,
+        attached_via: null,
+        user_data_dir: null,
+        sidecar: null,
+        own_tabs_count: s.pages.size,
+        orphan_tabs_count: 0,
+        peer_count: 0,
+        this_browser_mcp_pid: process.pid,
+      };
+    }
+    const userDataDirWin = s.attachCdp.userDataDir;
+    const userDataDirWsl = isWsl()
+      ? execFileSync("/usr/bin/wslpath", ["-u", userDataDirWin], { encoding: "utf8" }).trim()
+      : userDataDirWin;
+    const sidecar = readSidecar(userDataDirWsl);
+    const ownPages = new Set<Page>();
+    for (const sx of this.sessions.values()) {
+      if (!sx.closing && sx.context === s.context) {
+        for (const p of sx.pages.values()) ownPages.add(p);
+      }
+    }
+    const allPages = s.context.pages();
+    const orphanCount = allPages.filter((p) => !ownPages.has(p)).length;
+    const peerCount = sidecar
+      ? sidecar.attached_sessions.filter((a) => a.browser_mcp_pid !== process.pid).length
+      : 0;
+    return {
+      session_id,
+      is_attach_cdp: true,
+      attached_via: s.attachCdp.attachedVia,
+      user_data_dir: userDataDirWin,
+      sidecar: sidecar
+        ? {
+            cdp_port: sidecar.cdp_port,
+            relay_port: sidecar.relay_port,
+            root_pid: sidecar.root_pid,
+            process_name: sidecar.process_name,
+            spawned_at: sidecar.spawned_at,
+            attached_sessions: sidecar.attached_sessions,
+          }
+        : null,
+      own_tabs_count: s.pages.size,
+      orphan_tabs_count: orphanCount,
+      peer_count: peerCount,
+      this_browser_mcp_pid: process.pid,
+    };
+  }
+
+  /**
    * Take ownership of an unowned tab in the shared browser context.
    * Useful for rel="noopener" popups (opener is null, so the
    * context.on('page') filter doesn't auto-claim them) and for tabs
