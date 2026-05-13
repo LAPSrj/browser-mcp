@@ -56,6 +56,15 @@ export interface OpenSessionOptions {
   executable_path?: string;
   /** Override config user_data_dir (Windows path on WSL). attach_cdp only. */
   user_data_dir?: string;
+  /**
+   * When reusing a profile dir (user_data_dir) that has session-restore state
+   * from a prior run, Chromium reopens the previous tabs by default. The
+   * agent then sees a window full of unrelated pages on attach. Pass
+   * `restore_previous_tabs: true` to opt into that behavior; default `false`
+   * closes every restored tab on attach and keeps one clean page (about:blank
+   * when no `url` is given). attach_cdp only.
+   */
+  restore_previous_tabs?: boolean;
 }
 
 export interface TabInfo {
@@ -279,6 +288,31 @@ class SessionManager {
       const existingPages = context.pages();
       page = existingPages[0] ?? (await context.newPage());
       context.setDefaultTimeout(30000);
+
+      // Default: don't let Chromium's session-restore tabs leak into the
+      // agent's view. When attaching to a profile that has saved session
+      // state (the common case for persistent per-agent profiles), Edge
+      // reopens every previous tab on top of the startup URL we asked for.
+      // The agent then has to disambiguate "did I open this or did the
+      // last run?" Opt in with restore_previous_tabs:true if you want
+      // those tabs back.
+      if (opts.restore_previous_tabs !== true) {
+        const allPages = context.pages();
+        // Prefer keeping a page already on about:blank — less wasteful
+        // than navigating an arbitrary restored page away from its URL.
+        const blankPage = allPages.find((p) => p.url() === "about:blank");
+        if (blankPage && blankPage !== page) {
+          page = blankPage;
+        }
+        for (const p of allPages) {
+          if (p !== page) {
+            await p.close().catch(() => { /* page may already be navigating; ignore */ });
+          }
+        }
+        if (!opts.url && page.url() !== "about:blank") {
+          try { await page.goto("about:blank", { timeout: 5000 }); } catch { /* best-effort */ }
+        }
+      }
     } else {
       const contextOpts: Record<string, unknown> = {
         viewport,

@@ -146,6 +146,15 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "Override config user_data_dir for attach_cdp auto-launch. Windows path on WSL. When omitted, an " +
           "isolated session-scoped temp profile is used.",
       ),
+      restore_previous_tabs: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "When attaching to a profile that has saved session-restore state from a prior run, Chromium " +
+          "reopens every previous tab by default — leaking them into the agent's view. Default `false` " +
+          "closes every restored tab on attach and keeps one clean page (about:blank when no `url` is " +
+          "given). Pass `true` to opt into Chromium's default restore-tabs behavior. attach_cdp only.",
+      ),
     },
     handler: async (p) => json(await sessionManager.open(p)),
   },

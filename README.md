@@ -130,7 +130,10 @@ Per-call overrides: `executable_path` (path to the browser binary —
 overrides `BROWSER_MCP_EXECUTABLE_PATH`), `user_data_dir` (reuse an
 existing profile instead of the temp profile), `auto_launch` (explicit
 override of the config default), `headless: false` (visible window — on
-WSL, attached Windows browsers are naturally headed).
+WSL, attached Windows browsers are naturally headed),
+`restore_previous_tabs: true` (opt into Chromium's session-restore — by
+default browser-mcp closes restored tabs on attach so the agent isn't
+greeted by tabs from a prior run).
 
 **Translate popup suppression.** Auto-generated temp profiles get
 `--disable-features=Translate,TranslateUI` AND a pre-seeded
