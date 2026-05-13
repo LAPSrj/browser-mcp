@@ -113,7 +113,13 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
       ),
       idle_ttl_ms: z.number().optional().describe("Close when no tool touches the session for this many ms (default: 300000)"),
       wall_ttl_ms: z.number().optional().describe(
-        "Hard max session lifetime in ms. Default 1800000 (30 min), or 120000 (2 min) with record_video. Max 600000 (10 min) when record_video is true.",
+        "Wall-clock time-to-live in ms. Default 1800000 (30 min). " +
+          "**No server-side cap for non-recording sessions** — pass any value you need " +
+          "(e.g. 28800000 for 8h, 86400000 for 24h) when you need a long-lived session " +
+          "like a human-driven support chat or interactive debug. `idle_ttl_ms` still " +
+          "guards against zombie sessions independently. " +
+          "Video-recording sessions: default 120000 (2 min), hard max 600000 (10 min) — " +
+          "videos grow fast and a long-running recording is almost always a bug.",
       ),
       output_dir: z.string().optional().describe('Directory for video artifacts (default: ".browser")'),
       headless: z.boolean().optional().describe(

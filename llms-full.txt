@@ -530,6 +530,39 @@ To debug "who has what tab in this browser":
 - `list_tabs({session_id, include_other_agents: true})` — surfaces orphan / peer-owned pages alongside your own.
 - `claim_tab({session_id, url_pattern})` — take ownership of an orphan tab (no opener, or peer-server-owned page you want to drive). Substring match by default; wrap in `/regex/flags` for regex.
 
+### Long-lived attach_cdp sessions (chat, support flows, interactive debug)
+
+The default `wall_ttl_ms` is 30 minutes — fine for short automated flows but too short for human-driven work (live chat with a vendor, mid-debugging-session pauses, multi-step interactive workflows where the human is sometimes thinking). **There is no server-side cap on `wall_ttl_ms` for non-recording sessions** — pass any value you need.
+
+```jsonc
+// 8-hour session for a human-driven GoDaddy support chat
+{ "tool": "open_session", "params": {
+  "attach_cdp": true,
+  "user_data_dir": "C:\\Users\\me\\AppData\\Local\\ops-profile",
+  "wall_ttl_ms": 28800000,   // 8 hours
+  "idle_ttl_ms": 1800000      // 30 min idle (still want to catch true zombies)
+}}
+
+// 24-hour session for an overnight bake / long debug
+{ "tool": "open_session", "params": {
+  "attach_cdp": true,
+  "user_data_dir": "C:\\Users\\me\\AppData\\Local\\ops-profile",
+  "wall_ttl_ms": 86400000   // 24 hours
+}}
+```
+
+Common values:
+- 8h = `28800000` (a working day with breaks)
+- 24h = `86400000` (overnight, weekend)
+
+What's still guarding against runaway sessions:
+- **`idle_ttl_ms`** — closes the session when no tool has touched it for that long. Default 5 min. Set higher (30 min, 1h) if your human-driven flow has long thinking-pauses. Independent of `wall_ttl_ms`.
+- **Multi-agent sidecar PID-liveness sweep** — if the consumer browser-mcp process dies during a long session, the next `attach_cdp` open on the same profile catches the stale `attached_sessions` entry and prunes it. Sidecar's `root_pid` is also re-checked Windows-side, so a force-killed Edge doesn't leave ghost state.
+
+When NOT to use a long `wall_ttl_ms`:
+- **Video recording is on (`record_video: true`)**: capped at 10 minutes hard. Long recordings produce huge files and "I forgot to stop recording" should cost you minutes, not gigabytes.
+- **Short ephemeral tool calls**: omit `wall_ttl_ms` entirely and the 30-min default is fine.
+
 ### Run an a11y audit on a logged-in page
 
 1. `open_session` + log in (via `type_text` / `click` against the login form, or via the `wp` plugin's `use: "wordpress"` mode if it's a WP site).
@@ -556,6 +589,7 @@ Quick symptom lookup:
 | `align_elements` reports `content-change` for elements that visibly look misaligned | [Content vs translation misclassification](#content-vs-translation) |
 | `evaluate_script("el.click()")` returns success but the page state doesn't change; a save button stays disabled after a value-setter eval; framework synthetic-event handlers don't fire | [Synthetic-click no-event-trigger](#synthetic-click-no-event-trigger) |
 | `target="_blank" href="data:..."` click returns success but no popup tab appears; `context.pages()` stays the same; `waitForEvent("page")` times out | [Data-URL popup silently blocked](#data-url-popup-blocked) |
+| Session gets killed at exactly the `wall_ttl_ms` value you passed (e.g. 1h cut on a long support chat); felt like a "cap" but you set it yourself | [wall_ttl_ms misread as a cap](#wall-ttl-misread) |
 
 ### Mode not registered {#mode-not-registered}
 
@@ -637,6 +671,23 @@ This is unrelated to popup blockers, `rel="noopener"`, or `--disable-popup-block
 - For test fixtures where you control the page-load: use Playwright's `page.setContent()` after the popup opens, instead of relying on the href.
 
 **Test-writer gotcha:** an automated test that builds a kitchen-sink page entirely from a single `data:` URL and tries to open popups within it will look like multi-CDP, popup-blocking, or auto-attach is broken — none of those are the cause. Re-run with `about:blank` popup hrefs to isolate. The diagnostic question is "did `context.pages()` grow by 1 after my click?" — if no, the navigation was suppressed before any popup target was created.
+
+### wall_ttl_ms misread as a cap {#wall-ttl-misread}
+
+**Symptom:** A long-running `attach_cdp` session (live chat with a vendor, interactive debugging session, multi-hour automation) gets cleanly closed by the session manager at exactly the `wall_ttl_ms` value you passed — e.g. a session opened with `wall_ttl_ms: 3600000` dies at the 1-hour mark, mid-conversation. The agent assumes browser-mcp has a hard 1-hour cap and works around it; in fact the cut was the agent's own ttl value.
+
+**Cause:** the tool description for `wall_ttl_ms` historically read "Default 1800000 (30 min)" without explicitly stating "no upper bound." Read in a hurry, that scans as "30-min default, must be capped, 1h feels conservative." Caller passes `3600000`, gets killed at 3600000ms, concludes "the server caps at 1h." Server doesn't — it's honoring exactly what the caller asked for.
+
+There is **NO server-side cap on `wall_ttl_ms` for non-recording sessions**. Source-of-truth (sessions.ts):
+- Video-recording sessions: clamped to `VIDEO_MAX_WALL_TTL` (10 min). This IS a server cap.
+- All other sessions: caller value honored verbatim. Zod schema has no `.max()`.
+
+**Fix:**
+1. Pass the value you actually need. For human-driven flows, 8h (`28800000`) or 24h (`86400000`) is appropriate.
+2. Pair with a reasonable `idle_ttl_ms` (still guards against true zombie sessions).
+3. See § Common workflows › Long-lived attach_cdp sessions for the recipe.
+
+**For implementers:** if you find yourself wanting "infinite wall TTL," pass `Number.MAX_SAFE_INTEGER` (~285,000 years in ms) — it'll outlive the session in any practical sense. A "no expiry" sentinel value (`0`, `-1`) isn't accepted today; that's a deliberate "every session has an upper bound" guard.
 
 ### Content vs translation misclassification {#content-vs-translation}
 
