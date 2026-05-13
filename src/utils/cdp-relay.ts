@@ -20,6 +20,11 @@ import {
 } from "node:fs";
 import { sanitizeProcessName } from "./browser-products.js";
 import { isWsl, readWslGatewayIp } from "./wsl.js";
+import {
+  aliveWindowsPids,
+  removeSession,
+  withSidecarLock,
+} from "./browser-sidecar.js";
 
 export interface SpawnAttachCdpOptions {
   sessionId: string;
@@ -59,7 +64,16 @@ export interface AttachCdpHandle {
   cdpPort: number;
   /** WSL-gateway IP used for the endpoint, if WSL. */
   gateway: string | null;
-  /** Tear down: kill relay, kill our browser profile procs, remove temp files. Idempotent. */
+  /**
+   * How this handle was obtained:
+   *  - "spawn": we launched Chromium fresh and own the lifecycle.
+   *  - "existing": another browser-mcp session was already running on this
+   *    profile; we attached to its CDP port instead of spawning a competitor.
+   *    Our cleanup must NOT kill the browser unless we're the last attached
+   *    session (refcount via the sidecar file).
+   */
+  attachedVia: "spawn" | "existing";
+  /** Tear down: kill relay, kill our browser profile procs, remove temp files. Idempotent. Refcount-aware. */
   cleanup: () => Promise<void>;
 }
 
@@ -377,11 +391,87 @@ export async function spawnAttachCdpRelay(
         return dir;
       })());
 
-  const cdpPort = opts.cdpPort ?? pickFreePort(9300, 9399);
-  const relayPort = wsl ? (opts.relayPort ?? pickFreePort(9400, 9499)) : null;
+  const cdpPortReq = opts.cdpPort ?? pickFreePort(9300, 9399);
+  const relayPortReq = wsl ? (opts.relayPort ?? pickFreePort(9400, 9499)) : null;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 15_000;
   // Sanitize once up front — any per-spec typo blows up before we spawn.
   const processName = sanitizeProcessName(opts.processName);
+
+  // Ensure user_data_dir exists so the sidecar (.bm-browser.json) can live in it.
+  // The sidecar is the cross-process coordination point for "multiple browser-mcp
+  // servers sharing one profile" — see browser-sidecar.ts.
+  const userDataDirWsl = wsl ? winToWslPath(userDataDirWin) : userDataDirWin;
+  if (!existsSync(userDataDirWsl)) {
+    mkdirSync(userDataDirWsl, { recursive: true });
+  }
+
+  // ---- Sidecar-coordinated spawn-or-attach ----
+  // Acquire the sidecar lock and hold it across the entire decide → spawn →
+  // record sequence. Other concurrent open_session calls on the same profile
+  // wait on the lock; that's the desired serialization (without it, two
+  // servers could both decide to spawn and one would crash on Chromium's
+  // own profile file-lock).
+  return withSidecarLock<AttachCdpHandle>(userDataDirWsl, async (current) => {
+    // ---- ATTACH path: existing browser is alive ----
+    if (current) {
+      const stillAlive = aliveWindowsPids([current.root_pid]).has(current.root_pid);
+      if (stillAlive) {
+        dbg("sidecar: attaching to existing browser", {
+          root_pid: current.root_pid,
+          cdp_port: current.cdp_port,
+          relay_port: current.relay_port,
+          existing_sessions: current.attached_sessions.length,
+        });
+        const gateway = wsl ? readWslGatewayIp() : null;
+        const endpoint = wsl
+          ? `http://${gateway}:${current.relay_port}`
+          : `http://localhost:${current.cdp_port}`;
+        const updatedInfo = {
+          ...current,
+          attached_sessions: [
+            ...current.attached_sessions,
+            { session_id: opts.sessionId, browser_mcp_pid: process.pid, attached_at: new Date().toISOString() },
+          ],
+        };
+        let cleaned = false;
+        const cleanup = async () => {
+          if (cleaned) return;
+          cleaned = true;
+          const removal = await removeSession({ userDataDirWsl, session_id: opts.sessionId });
+          if (removal.was_last) {
+            dbg("cleanup (attach-via=existing): was_last → killing browser tree + relay");
+            if (current.relay_pid != null) await killProcessByPid(current.relay_pid);
+            await killBrowserTreeByPid(current.root_pid);
+            if (wsl) {
+              try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
+            } else if (!opts.userDataDirOverride) {
+              try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+            }
+          } else {
+            dbg(`cleanup (attach-via=existing): ${removal.remaining} sibling session(s) still attached → leaving browser up`);
+          }
+        };
+        return {
+          updated: updatedInfo,
+          result: {
+            endpoint,
+            userDataDir: current.user_data_dir,
+            browserPid: current.root_pid,
+            relayPid: current.relay_pid,
+            relayPort: current.relay_port,
+            cdpPort: current.cdp_port,
+            gateway,
+            attachedVia: "existing",
+            cleanup,
+          },
+        };
+      }
+      dbg("sidecar present but root_pid is dead; falling through to spawn", { stale_root_pid: current.root_pid });
+    }
+
+    // ---- SPAWN path: no live browser, launch fresh ----
+    const cdpPort = cdpPortReq;
+    const relayPort = relayPortReq;
 
   // ---- 1. Spawn the relay (WSL only) ----
   let relayPid: number | null = null;
@@ -634,34 +724,68 @@ export async function spawnAttachCdpRelay(
     );
   }
 
-  let cleaned = false;
-  const cleanup = async () => {
-    if (cleaned) return;
-    cleaned = true;
-    if (relayPid != null) await killProcessByPid(relayPid);
-    // Prefer PID-tree teardown (covers all child procs via taskkill /T).
-    // Falls back to user_data_dir path filter only when we never resolved
-    // a PID at spawn — that path also catches every child since they
-    // inherit --user-data-dir on the CommandLine.
-    if (browserPid != null) await killBrowserTreeByPid(browserPid);
-    else await killBrowserByUserDataDir(userDataDirWin, processName);
-    if (wsl) {
-      try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
-    } else if (!opts.userDataDirOverride) {
-      try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+    if (browserPid === null) {
+      throw new Error(
+        `attach_cdp: spawned Chromium but could not resolve root PID via Win32_Process. ` +
+          `Sidecar refcount semantics require a stable root PID for cross-server coordination. ` +
+          `Aborting spawn.`,
+      );
     }
-  };
 
-  return {
-    endpoint,
-    userDataDir: userDataDirWin,
-    browserPid,
-    relayPid,
-    relayPort,
-    cdpPort: actualCdpPort,
-    gateway,
-    cleanup,
-  };
+    // Build the sidecar record reflecting our fresh spawn.
+    const newSidecar = {
+      schema_version: 1 as const,
+      cdp_port: actualCdpPort,
+      relay_port: relayPort,
+      relay_pid: relayPid,
+      root_pid: browserPid,
+      process_name: processName,
+      user_data_dir: userDataDirWin,
+      spawned_at: new Date().toISOString(),
+      attached_sessions: [
+        { session_id: opts.sessionId, browser_mcp_pid: process.pid, attached_at: new Date().toISOString() },
+      ],
+    };
+
+    let cleaned = false;
+    const cleanup = async () => {
+      if (cleaned) return;
+      cleaned = true;
+      const removal = await removeSession({ userDataDirWsl, session_id: opts.sessionId });
+      if (removal.was_last) {
+        dbg("cleanup (attach-via=spawn): was_last → killing browser tree + relay");
+        if (relayPid != null) await killProcessByPid(relayPid);
+        // Prefer PID-tree teardown (covers all child procs via taskkill /T).
+        // Falls back to user_data_dir path filter only when we never resolved
+        // a PID at spawn — that path also catches every child since they
+        // inherit --user-data-dir on the CommandLine.
+        if (browserPid != null) await killBrowserTreeByPid(browserPid);
+        else await killBrowserByUserDataDir(userDataDirWin, processName);
+        if (wsl) {
+          try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
+        } else if (!opts.userDataDirOverride) {
+          try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+        }
+      } else {
+        dbg(`cleanup (attach-via=spawn): ${removal.remaining} other session(s) attached to OUR spawned browser → leaving browser up`);
+      }
+    };
+
+    return {
+      updated: newSidecar,
+      result: {
+        endpoint,
+        userDataDir: userDataDirWin,
+        browserPid,
+        relayPid,
+        relayPort,
+        cdpPort: actualCdpPort,
+        gateway,
+        attachedVia: "spawn",
+        cleanup,
+      },
+    };
+  });
 }
 
 export const _internals = {

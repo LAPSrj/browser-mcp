@@ -157,6 +157,19 @@ PID captured at spawn (`taskkill /F /T`) and leaves any unrelated browser
 windows untouched. Playwright's `browser.close()` is skipped internally
 for attach_cdp sessions for the same reason.
 
+**Multi-server shared profile.** Multiple browser-mcp servers (typically
+one per Claude Code conversation) can share a single `user_data_dir`. The
+first to open spawns Chromium and writes a sidecar file
+(`<user_data_dir>/.bm-browser.json`) recording the root PID + CDP port +
+attached sessions. Subsequent opens detect the sidecar and attach to the
+existing browser instead of trying to spawn a competitor. `close_session`
+removes the session from the sidecar; when the last session leaves,
+the browser tree is taskkill'd. Per-tab ownership uses each popup's
+`Page.opener()` parent-child link — each session only sees, controls,
+and closes its own tabs. `rel="noopener"` popups become orphans (no
+opener; not auto-claimed by any session). See § Multi-server in
+`llms-full.txt` for the full contract.
+
 **Per-product validation status (Windows/WSL).** Edge ✓, Chrome ✓. Brave
 / Vivaldi / Opera are code-supported via the same spawn + relay + teardown
 path but not live-validated — per-product FRE dialogs or default-browser

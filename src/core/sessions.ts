@@ -285,32 +285,48 @@ class SessionManager {
       // Reuse the first context to honor the user's existing profile state.
       const existingContexts = browser.contexts();
       context = existingContexts[0] ?? (await browser.newContext());
-      const existingPages = context.pages();
-      page = existingPages[0] ?? (await context.newPage());
       context.setDefaultTimeout(30000);
 
-      // Default: don't let Chromium's session-restore tabs leak into the
-      // agent's view. When attaching to a profile that has saved session
-      // state (the common case for persistent per-agent profiles), Edge
-      // reopens every previous tab on top of the startup URL we asked for.
-      // The agent then has to disambiguate "did I open this or did the
-      // last run?" Opt in with restore_previous_tabs:true if you want
-      // those tabs back.
-      if (opts.restore_previous_tabs !== true) {
-        const allPages = context.pages();
-        // Prefer keeping a page already on about:blank — less wasteful
-        // than navigating an arbitrary restored page away from its URL.
-        const blankPage = allPages.find((p) => p.url() === "about:blank");
-        if (blankPage && blankPage !== page) {
-          page = blankPage;
-        }
-        for (const p of allPages) {
-          if (p !== page) {
-            await p.close().catch(() => { /* page may already be navigating; ignore */ });
+      const attachedToExisting = attachCdp?.attachedVia === "existing";
+
+      if (attachedToExisting) {
+        // Multi-server mode: another browser-mcp session is already attached
+        // to this profile and may own existing tabs in the shared context.
+        // DON'T inherit any existing page — create a fresh one. The owner-
+        // ship filter on context.on('page') (added below) will keep our
+        // session.pages clean of other servers' tabs going forward.
+        page = await context.newPage();
+        // restore_previous_tabs cleanup is also skipped — those "previous"
+        // tabs may be another active session's current work.
+      } else {
+        // Single-server / spawn path: behavior unchanged from before.
+        const existingPages = context.pages();
+        page = existingPages[0] ?? (await context.newPage());
+
+        // Default: don't let Chromium's session-restore tabs leak into the
+        // agent's view. When attaching to a profile that has saved session
+        // state (the common case for persistent per-agent profiles), Edge
+        // reopens every previous tab on top of the startup URL we asked for.
+        // The agent then has to disambiguate "did I open this or did the
+        // last run?" Opt in with restore_previous_tabs:true if you want
+        // those tabs back. Skipped on attached-to-existing — those tabs may
+        // belong to OTHER active sessions.
+        if (opts.restore_previous_tabs !== true) {
+          const allPages = context.pages();
+          // Prefer keeping a page already on about:blank — less wasteful
+          // than navigating an arbitrary restored page away from its URL.
+          const blankPage = allPages.find((p) => p.url() === "about:blank");
+          if (blankPage && blankPage !== page) {
+            page = blankPage;
           }
-        }
-        if (!opts.url && page.url() !== "about:blank") {
-          try { await page.goto("about:blank", { timeout: 5000 }); } catch { /* best-effort */ }
+          for (const p of allPages) {
+            if (p !== page) {
+              await p.close().catch(() => { /* page may already be navigating; ignore */ });
+            }
+          }
+          if (!opts.url && page.url() !== "about:blank") {
+            try { await page.goto("about:blank", { timeout: 5000 }); } catch { /* best-effort */ }
+          }
         }
       }
     } else {
@@ -376,15 +392,49 @@ class SessionManager {
     // blind to them and the agent has to fall back to evaluate_script
     // window.open hacks. context.on('page') catches every popup;
     // page.on('close') catches external closes (user X-button, page.close).
+    //
+    // Multi-server safety: in shared-profile mode another browser-mcp
+    // server may be attached to the same context. Its tabs (and the
+    // popups it opens) fire 'page' events on OUR listener too. Use
+    // Page.opener() — the browser's own parent-child tracking — to claim
+    // only popups whose opener is a page in OUR session.pages map.
+    // Pages with no opener (rel=noopener, or sibling-server's main tabs
+    // surfaced at attach time) are not claimed.
     this.attachPageLifecycle(session, page, "main");
     context.on("page", (popupPage) => {
-      const tid = this.nextAutoTabId(session);
-      session.pages.set(tid, popupPage);
-      session.pageOrder.push(tid);
-      // Do NOT auto-switch activeTabId — leave that to the caller via
-      // switch_tab. The agent gets visibility (list_tabs surfaces it)
-      // but explicit-attention semantics stay intact.
-      this.attachPageLifecycle(session, popupPage, tid);
+      // De-dup against addTab's pre-registration. addTab calls
+      // context.newPage() then synchronously inserts the new Page under
+      // a caller-chosen tab_id; the 'page' event for that creation fires
+      // microtasks later. If our session.pages already references this
+      // Page object, addTab already claimed it.
+      for (const p of session.pages.values()) {
+        if (p === popupPage) return;
+      }
+      // Opener-based ownership: only claim popups whose opener is a tab
+      // WE own. context.on('page') fires on every server attached to the
+      // shared context, but Page.opener() resolves locally to each
+      // server's Playwright connection — only the server that owns the
+      // opening page sees opener as one of its own session.pages.
+      const opener = popupPage.opener?.() ?? null;
+      Promise.resolve(opener).then((resolvedOpener) => {
+        if (!resolvedOpener) return; // rel=noopener, or sibling server's tab — leave as orphan
+        let isOurs = false;
+        for (const p of session.pages.values()) {
+          if (p === resolvedOpener) { isOurs = true; break; }
+        }
+        if (!isOurs) return;
+        // Belated re-check the dedup in case addTab claimed during the await
+        for (const p of session.pages.values()) {
+          if (p === popupPage) return;
+        }
+        const tid = this.nextAutoTabId(session);
+        session.pages.set(tid, popupPage);
+        session.pageOrder.push(tid);
+        // Do NOT auto-switch activeTabId — leave that to the caller via
+        // switch_tab. The agent gets visibility (list_tabs surfaces it)
+        // but explicit-attention semantics stay intact.
+        this.attachPageLifecycle(session, popupPage, tid);
+      }).catch(() => { /* opener() can reject if the page closed mid-resolve; ignore */ });
     });
 
     return this.info(session);
