@@ -171,11 +171,50 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
   close_session: {
     description:
       "Close a persistent session opened via open_session. Returns any video file paths produced while the session was open. " +
-      "If the server exits while the session is still open, it's closed automatically on SIGINT/SIGTERM.",
+      "If the server exits while the session is still open, it's closed automatically on SIGINT/SIGTERM. " +
+      "On attach_cdp sessions sharing a profile with other browser-mcp servers, this only closes OUR session — the browser " +
+      "stays running as long as other sessions are attached (last-out auto-kills via sidecar refcount).",
     schema: {
       session_id: z.string().describe("Session id returned by open_session"),
     },
     handler: async (p) => json(await sessionManager.close(p.session_id)),
+  },
+
+  close_browser: {
+    description:
+      "Force-nuke an attach_cdp browser tree, including the shared profile if multi-server. Polite default " +
+      "(`force:false`) refuses if other browser-mcp servers are attached and tells the caller to use plain " +
+      "close_session (last-out auto-kills via sidecar refcount). With `force:true`, taskkills the browser tree " +
+      "anyway — other servers' sessions become abandoned-but-running (their next tool call discovers the CDP " +
+      "disconnect). Use force for recovery when the browser is in a weird state; plain close_session is the right " +
+      "move 99% of the time.",
+    schema: {
+      session_id: z.string().describe("Session id (any attach_cdp session attached to the browser you want to kill)"),
+      force: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "Override the polite refusal when other browser-mcp servers are still attached. Their sessions are abandoned (CDP disconnects on next tool call).",
+      ),
+    },
+    handler: async (p) => json(await sessionManager.closeBrowser(p.session_id, p.force)),
+  },
+
+  claim_tab: {
+    description:
+      "Take ownership of an unowned tab in the shared browser context. Use case: a popup opened with " +
+      "`rel=\"noopener\"` has `opener === null` and the opener-filter doesn't auto-claim it; or you want to grab " +
+      "a tab that pre-existed before your session attached. Matches the first unowned page whose URL matches " +
+      "`url_pattern` (substring by default; wrap in `/.../flags` for regex). Throws if no unowned page matches.",
+    schema: {
+      session_id: z.string().describe("Session that will own the claimed tab"),
+      url_pattern: z.string().describe(
+        "URL pattern to match against. Substring by default (`example.com`). " +
+        "Wrap in `/.../flags` for regex (e.g. `/checkout-[0-9]+/i`).",
+      ),
+      target_index: z.number().optional().describe("When multiple unowned pages match, pick the Nth (0-indexed). Default 0."),
+    },
+    handler: async (p) => json(await sessionManager.claimTab(p)),
   },
 
   list_sessions: {
@@ -644,12 +683,52 @@ export const tabPrimitives: Record<string, PrimitiveDef> = {
   },
 
   list_tabs: {
-    description: "List all tabs in a session (url + which is active).",
-    schema: { session_id: z.string().describe("Session id") },
+    description:
+      "List all tabs in a session (url + which is active). With `include_other_agents:true` on a " +
+      "multi-server shared profile (attach_cdp), also reports pages in the shared browser context that " +
+      "aren't owned by this Node — each with `owner: \"self\" | \"orphan\"`. \"self\" entries carry a " +
+      "tab_id you can pass to switch_tab/close_tab; orphans don't (use claim_tab to take ownership first).",
+    schema: {
+      session_id: z.string().describe("Session id"),
+      include_other_agents: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "Also list pages in the shared browser context that aren't owned by this Node's SessionManager. " +
+        "Useful for debugging multi-agent scenarios — see what other browser-mcp servers (or pre-existing " +
+        "tabs) have open in the same browser. Default false.",
+      ),
+    },
     handler: async (p) => {
       const info = sessionManager.list().find((s) => s.session_id === p.session_id);
       if (!info) return err(`Session "${p.session_id}" not found.`);
-      return json({ session_id: info.session_id, active_tab_id: info.active_tab_id, tabs: info.tabs });
+      const own = info.tabs.map((t) => ({ ...t, owner: "self" as const }));
+      if (!p.include_other_agents) {
+        return json({ session_id: info.session_id, active_tab_id: info.active_tab_id, tabs: own });
+      }
+      // Surface unowned pages from the shared context.
+      const session = sessionManager.get(p.session_id);
+      const ourPages = new Set<unknown>();
+      for (const sx of sessionManager.list()) {
+        const live = sessionManager.get(sx.session_id);
+        if (live.context === session.context) {
+          for (const pg of live.pages.values()) ourPages.add(pg);
+        }
+      }
+      const allPages = session.context.pages();
+      const orphans = allPages
+        .filter((pg) => !ourPages.has(pg))
+        .map((pg) => ({
+          tab_id: null as string | null,
+          url: pg.url(),
+          active: false,
+          owner: "orphan" as const,
+        }));
+      return json({
+        session_id: info.session_id,
+        active_tab_id: info.active_tab_id,
+        tabs: [...own, ...orphans],
+      });
     },
   },
 

@@ -93,6 +93,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 |---|---|
 | `open_session`, `close_session`, `list_sessions` | persistent context lifecycle |
 | `pause_session`, `resume_session` | snapshot/restore storage state across a close (human-in-loop handover) |
+| `close_browser`, `claim_tab` | multi-server shared-profile primitives (attach_cdp): force-nuke the browser, take ownership of orphan tabs |
 | `open_tab`, `switch_tab`, `list_tabs`, `close_tab` | tab control inside a session |
 | `navigate`, `go_back`, `go_forward`, `reload` | URL navigation |
 | `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input |
@@ -262,9 +263,19 @@ Coordinated via a sidecar file `<user_data_dir>/.bm-browser.json` (with a `.bm-b
 Tab ownership across sessions is enforced by the opener filter described in the popup-auto-track note above. Practically: each session sees only its own tabs in `list_tabs`, can only `switch_tab` to its own tabs, and `close_session` only closes its own tabs.
 
 Limitations:
-- `rel="noopener"` popups have `opener === null` and become orphans — no auto-claim, manual `addTab` workflow needed (`claim_tab` primitive is a Phase 2 follow-up).
+- `rel="noopener"` popups: Playwright's `Page.opener()` resolves through CDP's `Target.openerId` (which IS set regardless of `rel="noopener"` — the noopener attribute only nulls JS-side `window.opener`). So opener-filter claims rel=noopener popups normally. True orphans appear only for pages with no CDP openerId — typically `context.newPage()` calls from another browser-mcp server, or tabs that existed before any browser-mcp attached. Use `claim_tab({ session_id, url_pattern })` to take ownership of these.
 - Sidecar lock is held during the full spawn flow (up to ~60s timeout). A second session attempting to open during the first's spawn window will block until the first writes the sidecar.
 - Once one session has spawned, subsequent attaches are fast (no spawn, no relay re-setup).
+
+### Multi-server primitives {#multi-server-primitives}
+
+Three primitives layer on top of the shared-profile architecture:
+
+- **`close_browser({ session_id, force? })`** — force-nuke a shared-profile browser tree. Polite default (`force: false`) refuses if other browser-mcp servers are still attached and tells you to use `close_session` instead (last-out auto-kills via sidecar refcount). With `force: true`, taskkills the browser anyway — other servers' sessions become abandoned-but-running, surfacing as CDP disconnects on their next tool call. Use force for recovery scenarios (browser is in a weird state and you need a clean slate). Plain `close_session` is the right teardown 99% of the time.
+
+- **`claim_tab({ session_id, url_pattern, target_index? })`** — take ownership of an unowned tab in the shared browser context. `url_pattern` is a substring by default; wrap in `/.../flags` for regex. Returns the new `tab_id` under which the page is now tracked. Errors clearly when no unowned page matches. Use for tabs another browser-mcp server opened that you want to drive, or for pre-existing tabs in the profile.
+
+- **`list_tabs({ session_id, include_other_agents? })`** — `include_other_agents: true` adds unowned pages in the shared context to the output with `owner: "orphan"` (no `tab_id`; use `claim_tab` to take ownership first). Default `false` (only your tabs surface). Pure observability; useful for debugging multi-agent scenarios.
 
 > **`attach_cdp` mode on `open_session`** (chromium-only). `attach_cdp: true` auto-launches an isolated real Edge instance on a session-scoped temp profile and connects over CDP; `attach_cdp: "http://host:port"` attaches to a user-managed browser already running with CDP exposed. Use when the real browser engine, real cookies, or installed extensions/policies matter — not when Playwright's bundled Chromium suffices. Cannot combine with `record_video`. Per-call knobs: `executable_path` (overrides `BROWSER_MCP_EDGE_EXE`), `user_data_dir` (reuse a persistent profile dir), `auto_launch` (explicit override), `headless` (default true; pass false for visible window), `restore_previous_tabs` (default false — closes any session-restore tabs Chromium reopens on attach; pass true to opt into Chromium's native restore behavior). **Per-product validation status (Windows/WSL):** Edge ✓ (validated 2026-05-07 + lifecycle fix 2026-05-12), Chrome ✓ (validated 2026-05-12). Brave / Vivaldi / Opera are code-supported but not live-validated — the same spawn + relay + teardown path executes, but per-product FRE dialogs or default-browser prompts may surface that we haven't documented. **Footgun:** never OS-kill the attached browser (Task Manager, `taskkill /IM msedge.exe`) — Edge shares its process group with the user's real Edge, so OS-kill takes both down. `close_session` is the only safe teardown; it kills the spawned browser tree via the root PID captured at spawn (taskkill /F /T). On WSL, a transparent Windows-side PowerShell TCP relay bridges WSL2 NAT to Windows-host loopback CDP (relay torn down with the browser; `BROWSER_MCP_CDP_DEBUG=1` logs to `%TEMP%\browser-mcp\<session>\relay.log`).
 

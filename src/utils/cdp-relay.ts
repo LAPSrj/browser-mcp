@@ -788,6 +788,47 @@ export async function spawnAttachCdpRelay(
   });
 }
 
+/**
+ * Force-nuke an attach_cdp browser tree by reading the sidecar at the given
+ * Windows user_data_dir. Used by close_browser({force:true}) to kill a
+ * shared-profile browser even when other browser-mcp servers are still
+ * attached. Those servers' Playwright connections will discover the
+ * disconnect on their next CDP call.
+ *
+ * Removes the sidecar file as well so subsequent open_session calls on the
+ * same profile see a clean slate.
+ *
+ * No-op if the sidecar is absent or the recorded root_pid is already dead.
+ */
+export async function forceKillProfile(userDataDirWin: string): Promise<{
+  killed_root_pid: number | null;
+  killed_relay_pid: number | null;
+  abandoned_sessions: number;
+}> {
+  const wsl = isWsl();
+  const wslPath = wsl ? winToWslPath(userDataDirWin) : userDataDirWin;
+  const { readSidecar } = await import("./browser-sidecar.js");
+  const sidecar = readSidecar(wslPath);
+  if (!sidecar) return { killed_root_pid: null, killed_relay_pid: null, abandoned_sessions: 0 };
+
+  if (sidecar.relay_pid != null) await killProcessByPid(sidecar.relay_pid);
+  await killBrowserTreeByPid(sidecar.root_pid);
+
+  // Best-effort sidecar removal — withSidecarLock would block other
+  // operations; force mode is meant to be aggressive, not polite.
+  try {
+    const { unlinkSync, existsSync } = await import("node:fs");
+    const sidecarFile = `${wslPath}/.bm-browser.json`;
+    if (existsSync(sidecarFile)) unlinkSync(sidecarFile);
+  } catch { /* ignore */ }
+
+  return {
+    killed_root_pid: sidecar.root_pid,
+    killed_relay_pid: sidecar.relay_pid,
+    abandoned_sessions: sidecar.attached_sessions.length,
+  };
+}
+
 export const _internals = {
   RELAY_PS,
   resolveWindowsTemp,

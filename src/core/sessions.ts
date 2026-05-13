@@ -3,7 +3,9 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
 import { getBrowserType, type BrowserName } from "../utils/browser.js";
-import { spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import { forceKillProfile, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import { readSidecar } from "../utils/browser-sidecar.js";
+import { execFileSync } from "node:child_process";
 import {
   BROWSER_PRODUCT_SPECS,
   defaultExePath,
@@ -509,6 +511,160 @@ class SessionManager {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`Session "${id}" not found.`);
     return this.closeInternal(s, "manual");
+  }
+
+  /**
+   * Force-nuke the entire browser tree for an attach_cdp session — even
+   * if other browser-mcp servers are attached. Polite default (`force:
+   * false`) refuses if siblings are attached and tells the caller to
+   * close their own session normally (auto last-out will handle the
+   * common case). Force mode taskkills the shared browser and removes
+   * the sidecar; other servers' sessions become abandoned-but-running
+   * until they discover the CDP disconnect on their next tool call.
+   *
+   * Use force when you really need the profile gone (recovery from a
+   * weird browser state, clearing for a fresh start). Plain close_session
+   * is the right move 99% of the time.
+   */
+  async closeBrowser(id: string, force = false): Promise<{
+    session_id: string;
+    killed: boolean;
+    force_used: boolean;
+    other_sessions_abandoned: number;
+    own_sessions_closed: string[];
+    reason?: string;
+  }> {
+    const s = this.get(id);
+    if (!s.isAttachCdp || !s.attachCdp) {
+      throw new Error(
+        `close_browser: session "${id}" is not an attach_cdp session. ` +
+          `For Playwright-launched sessions, plain close_session is the correct teardown.`,
+      );
+    }
+
+    const userDataDirWin = s.attachCdp.userDataDir;
+    const userDataDirWsl = isWsl()
+      ? execFileSync("/usr/bin/wslpath", ["-u", userDataDirWin], { encoding: "utf8" }).trim()
+      : userDataDirWin;
+    const sidecar = readSidecar(userDataDirWsl);
+
+    // No sidecar — fall back to plain close. There's nothing to "force".
+    if (!sidecar) {
+      const closed = await this.closeInternal(s, "close_browser");
+      return {
+        session_id: id,
+        killed: true,
+        force_used: false,
+        other_sessions_abandoned: 0,
+        own_sessions_closed: [closed.session_id],
+      };
+    }
+
+    const ourPid = process.pid;
+    const otherServers = sidecar.attached_sessions.filter((a) => a.browser_mcp_pid !== ourPid);
+    if (otherServers.length > 0 && !force) {
+      return {
+        session_id: id,
+        killed: false,
+        force_used: false,
+        other_sessions_abandoned: 0,
+        own_sessions_closed: [],
+        reason:
+          `refused: ${otherServers.length} other browser-mcp server(s) are still attached to this browser. ` +
+          `Use close_session (last-out auto-kills when they all leave), or pass force:true to nuke anyway ` +
+          `(their sessions will be abandoned — their next tool call will surface a CDP disconnect).`,
+      };
+    }
+
+    // Close all OUR sessions attached to this same user_data_dir first, so
+    // Playwright drops its references cleanly before the browser dies.
+    const ourSessionsHere: Session[] = [];
+    for (const sx of this.sessions.values()) {
+      if (sx.isAttachCdp && sx.attachCdp && !sx.closing && sx.attachCdp.userDataDir === userDataDirWin) {
+        ourSessionsHere.push(sx);
+      }
+    }
+    const ownClosedIds: string[] = [];
+    for (const sx of ourSessionsHere) {
+      try {
+        const r = await this.closeInternal(sx, "close_browser");
+        ownClosedIds.push(r.session_id);
+      } catch { /* best-effort */ }
+    }
+
+    // If force was needed (others were attached when we started), our
+    // closeInternal -> handle.cleanup -> removeSession dance may have left
+    // the browser alive because was_last:false. Drop the hammer.
+    let abandoned = 0;
+    if (force && otherServers.length > 0) {
+      const result = await forceKillProfile(userDataDirWin);
+      abandoned = result.abandoned_sessions;
+    }
+
+    return {
+      session_id: id,
+      killed: true,
+      force_used: force && otherServers.length > 0,
+      other_sessions_abandoned: abandoned,
+      own_sessions_closed: ownClosedIds,
+    };
+  }
+
+  /**
+   * Take ownership of an unowned tab in the shared browser context.
+   * Useful for rel="noopener" popups (opener is null, so the
+   * context.on('page') filter doesn't auto-claim them) and for tabs
+   * that pre-existed before our session attached.
+   *
+   * Matches by URL pattern (substring or `/regex/flags` form). Returns
+   * the new tab_id under which the page is now tracked, or throws if
+   * no unowned page matches.
+   */
+  async claimTab(opts: {
+    session_id: string;
+    url_pattern: string;
+    target_index?: number;
+  }): Promise<{ tab_id: string; url: string }> {
+    const s = this.get(opts.session_id);
+    const allPages = s.context.pages();
+
+    // Determine which pages this Node's SessionManager already owns
+    // (across all our sessions on this BrowserContext, not just this one).
+    const ownedPages = new Set<Page>();
+    for (const sx of this.sessions.values()) {
+      if (!sx.closing && sx.context === s.context) {
+        for (const p of sx.pages.values()) ownedPages.add(p);
+      }
+    }
+    const unowned = allPages.filter((p) => !ownedPages.has(p));
+
+    // Match by URL pattern. /…/flags = regex; else substring.
+    const m = /^\/(.+)\/([gimsuy]*)$/.exec(opts.url_pattern);
+    const re = m ? new RegExp(m[1], m[2]) : null;
+    const candidates = unowned.filter((p) => {
+      const url = p.url();
+      return re ? re.test(url) : url.includes(opts.url_pattern);
+    });
+
+    if (candidates.length === 0) {
+      throw new Error(
+        `claim_tab: no unowned page matches "${opts.url_pattern}". ` +
+          `Unowned page URLs in this context: ${unowned.map((p) => p.url()).join(", ") || "(none)"}.`,
+      );
+    }
+
+    const idx = opts.target_index ?? 0;
+    if (idx >= candidates.length) {
+      throw new Error(`claim_tab: target_index ${idx} out of range (${candidates.length} matches)`);
+    }
+    const page = candidates[idx];
+
+    const tid = this.nextAutoTabId(s);
+    s.pages.set(tid, page);
+    s.pageOrder.push(tid);
+    this.attachPageLifecycle(s, page, tid);
+    this.touch(opts.session_id);
+    return { tab_id: tid, url: page.url() };
   }
 
   /**
