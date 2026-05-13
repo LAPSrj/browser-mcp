@@ -369,7 +369,43 @@ class SessionManager {
     this.sessions.set(id, session);
     this.ensureJanitor();
     this.bindShutdownSignals();
+
+    // Auto-track popup tabs. Without this, target="_blank" links and
+    // window.open() calls create new Pages in the BrowserContext that our
+    // session.pages map never learns about — list_tabs / switch_tab go
+    // blind to them and the agent has to fall back to evaluate_script
+    // window.open hacks. context.on('page') catches every popup;
+    // page.on('close') catches external closes (user X-button, page.close).
+    this.attachPageLifecycle(session, page, "main");
+    context.on("page", (popupPage) => {
+      const tid = this.nextAutoTabId(session);
+      session.pages.set(tid, popupPage);
+      session.pageOrder.push(tid);
+      // Do NOT auto-switch activeTabId — leave that to the caller via
+      // switch_tab. The agent gets visibility (list_tabs surfaces it)
+      // but explicit-attention semantics stay intact.
+      this.attachPageLifecycle(session, popupPage, tid);
+    });
+
     return this.info(session);
+  }
+
+  /**
+   * Wire a Page's close lifecycle into the session so external closes
+   * (popup user-X, page.close() from script) automatically prune the
+   * session's pages map + pageOrder + reselect activeTabId if needed.
+   */
+  private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
+    page.on("close", () => {
+      if (session.closing) return; // closeInternal handles its own teardown
+      session.pages.delete(tabId);
+      session.pageOrder = session.pageOrder.filter((t) => t !== tabId);
+      if (session.activeTabId === tabId) {
+        // Fall back to the most-recently-added remaining tab, or "main"
+        // if everything is gone (the session will get reaped soon).
+        session.activeTabId = session.pageOrder[session.pageOrder.length - 1] ?? "main";
+      }
+    });
   }
 
   get(id: string): Session {
@@ -542,9 +578,23 @@ class SessionManager {
     if (s.pages.has(tid)) {
       throw new Error(`Tab "${tid}" already exists in session.`);
     }
+    // newPage() fires context.on('page') — but that handler would auto-assign
+    // a tab id from nextAutoTabId() (potentially a different one than the
+    // caller-supplied tab_id). Pre-seed the map with our chosen tid so the
+    // context handler sees it already exists and skips re-tracking.
     const page = await s.context.newPage();
+    // The context.on('page') handler already registered this page under a
+    // freshly-allocated auto tab id. Re-key it under the caller's chosen id.
+    let autoTid: string | undefined;
+    for (const [k, v] of s.pages.entries()) {
+      if (v === page) { autoTid = k; break; }
+    }
+    if (autoTid && autoTid !== tid) {
+      s.pages.delete(autoTid);
+      s.pageOrder = s.pageOrder.filter((t) => t !== autoTid);
+    }
     s.pages.set(tid, page);
-    s.pageOrder.push(tid);
+    if (!s.pageOrder.includes(tid)) s.pageOrder.push(tid);
     s.activeTabId = tid;
     if (url) {
       try {
