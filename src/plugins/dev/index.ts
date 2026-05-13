@@ -22,6 +22,7 @@ import { performanceMetricsTool } from "./tools/performance.js";
 import { computedStylesTool } from "./tools/computed-styles.js";
 import { evaluateScriptTool } from "./tools/evaluate-script.js";
 import { schemaExtractTool } from "./tools/schema-extract.js";
+import { listInteractiveElementsTool } from "./tools/list-interactive-elements.js";
 import { domQueryTool } from "./tools/dom-query.js";
 
 // Dev plugin: developer-inspection tools that a regular user can't perform
@@ -118,7 +119,10 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "accessibility_snapshot",
       description:
-        "Get the accessibility tree of a page (roles, names, values). Useful for verifying a11y. Optionally runs named WCAG-like rule checks and returns pass/fail per rule. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
+        "Discover what's clickable / nameable on the page via the accessibility tree — roles + accessible names + values. " +
+        "Best entry point when you don't yet know the page structure: returns every interactive role (button, link, textbox, combobox, checkbox, menuitem, …) with its accessible name, so you can feed names directly into `click({selector: 'role=button[name=\"Submit\"]'})`. " +
+        "Pass `summaryOnly:true` for a role-count overview, or `assertRules` to run named WCAG-like checks alongside the tree. " +
+        "Also useful for verifying a11y compliance. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
@@ -429,7 +433,13 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "evaluate_script",
       description:
-        "Run a JavaScript snippet in the page context and return its JSON-serialized result. Unlike the `evaluate` action (fire-and-forget), this tool returns the value. `return` works at the top level (the script is wrapped in an IIFE). Reuses an open session via `session_id` (no navigation when `url` is omitted); falls back to ephemeral when omitted." +
+        "Run a JavaScript snippet in the page context and return its JSON-serialized result. `return` works at the top level (the script is wrapped in an IIFE). Reuses an open session via `session_id` (no navigation when `url` is omitted); falls back to ephemeral when omitted. " +
+        "**REACH FOR THIS LAST.** Most intents have a dedicated tool that is safer and shorter: " +
+        "for clicks use `click({selector})` — JS `el.click()` does NOT dispatch trusted events, so React/Vue/Angular synthetic-event handlers may silently ignore it (see § Diagnosis › synthetic-click-no-event-trigger). " +
+        "For typing use `type_text({selector, text})` — setting `input.value` directly bypasses framework change detection. " +
+        "For element discovery use `dom_query` (typed schema for filtered queries) or `accessibility_snapshot` (the page's clickables-by-role+name tree, summaryOnly available). " +
+        "For waits use `wait_for_selector` (event-driven) over sleep loops. " +
+        "Use `evaluate_script` for things the dedicated tools genuinely can't express: custom `fetch()` from the page origin, calling page-defined JS APIs (e.g. `wp.data`), reading non-DOM page state (perf entries, JS globals), monkey-patching for diagnostics." +
         (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
       schema: {
         url: z.string().optional().describe("URL to navigate to before evaluating. Optional when session_id is provided (evaluate on the session's current page); required when ephemeral"),
@@ -545,6 +555,36 @@ const devPlugin: ScreenshotPlugin = {
         sessionManager.setTracing(p.session_id, false);
         return { content: [{ type: "text" as const, text: JSON.stringify({ path: filePath }, null, 2) }] };
       },
+    });
+
+    // ---------- list_interactive_elements ----------
+    ctx.registerTool({
+      name: "list_interactive_elements",
+      description:
+        "Discover everything clickable / typable on the page in one call. Returns each interactive element " +
+        "(link, button, input, select, textarea, contenteditable, role=button|link|tab|option|combobox|checkbox|radio|menuitem|...) " +
+        "with its `tag`, `type`, `role`, accessible `name`, visible `text`, current `value` (for form fields), " +
+        "`rect`, `visible`, and a `selector_hint` you can paste directly into `click({ selector: ... })` or " +
+        "`type_text({ selector: ... })`. The selector_hint prefers `role=ROLE[name=\"NAME\"]` (most robust), " +
+        "falls back to `text=\"...\"` for short visible text, then to id/name attribute selectors, last " +
+        "to nth-of-type. **Use this before reaching for `evaluate_script`** to find clickables — it's typed, " +
+        "session-aware, and the selector_hint values are click-ready. " +
+        "Scope the scan with `scope` (default `body`). Hidden elements are filtered by default — pass " +
+        "`include_hidden: true` to surface them. Caps at 100 elements by default; pass `cap` to raise." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        scope: z.string().optional().describe("CSS selector to scope the scan (default: \"body\")"),
+        cap: z.number().optional().describe("Max elements to return. Default 100. truncated:true in the response signals more were available."),
+        include_hidden: z.boolean().optional().describe("Include non-visible elements (hidden, off-screen). Default false."),
+        actions: z.array(actionSchema).optional().describe("Actions to run before listing. Selector-based actions support optional and timeout params"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
+        ...useSchemaField,
+      },
+      handler: async (params) => (await listInteractiveElementsTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- schema_extract ----------

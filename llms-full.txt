@@ -45,13 +45,15 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `align_elements` | Per-element pixel-shift measurement vs reference PNG; applies CSS transforms to confirm | (contract) align-vs-compare selection |
 | `console_capture` | Capture console messages over a script run | |
 | `dom_snapshot` | Full DOM tree as JSON | |
-| `accessibility_snapshot` | a11y tree + 6 hand-rolled rule asserts | (surface) accessibility_snapshot — NOT a full WCAG audit |
+| `dom_query` | Batched DOM read by selector with typed schema (text/rect/computed/attributes per query) | preferred over raw `evaluate_script` for element discovery |
+| `accessibility_snapshot` | a11y tree + 6 hand-rolled rule asserts | (surface) accessibility_snapshot — NOT a full WCAG audit; also the cheapest discovery tool for clickables-by-role+name |
+| `list_interactive_elements` | Every clickable / typable on the page with role + name + rect + click-ready `selector_hint` | preferred entry point for "what can I click here?" — bundled discovery, one call |
 | `axe_audit` | Full axe-core WCAG audit (violations + passes + incomplete) | (surface) axe_audit; session-aware |
 | `network_log` | HAR-style network requests over a script run | |
 | `page_metadata` | Title, URL, meta tags | |
 | `performance_metrics` | LCP, FCP, TTFB | |
 | `computed_styles` | `getComputedStyle()` for selector | |
-| `evaluate_script` | Run JS in page context, return result | |
+| `evaluate_script` | Run JS in page context, return result | **reach for last** — use dedicated tools for click / type / discovery / wait first |
 | `trace_start` / `trace_stop` | Playwright trace zip | |
 | `schema_extract` | JSON-LD / microdata / OG tags | |
 
@@ -217,7 +219,7 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 **Which surfaces accept `session_id`:**
 - **Core primitives** (input/read/cookies/storage/screenshot/wait/navigate, etc.) — all session-aware via the shared `targetField` fragment.
-- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`, `accessibility_snapshot`, `computed_styles`, `console_capture`, `dom_snapshot`, `network_log`, `page_metadata`, `performance_metrics`, `schema_extract`. Compare/align/visual-diff family remain ephemeral-only (single-screenshot tools — session reuse doesn't unlock value).
+- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`, `accessibility_snapshot`, `computed_styles`, `console_capture`, `dom_snapshot`, `list_interactive_elements`, `network_log`, `page_metadata`, `performance_metrics`, `schema_extract`. Compare/align/visual-diff family remain ephemeral-only (single-screenshot tools — session reuse doesn't unlock value).
 - **`wp-gutenberg` plugin:** all post-editing tools accept `session_id` (routes through `resolveGutenbergSession`).
 - **`design-compare` plugin:** ephemeral-only.
 
@@ -456,6 +458,23 @@ When two sources of truth (live page state, reference image, design spec, prior 
 
 Tradeoff: in-page JS state and scroll do NOT survive any pause. If the captcha is mid-flow (form half-filled, SPA-routed deep state), this doesn't help — use `headless: false` on the original `open_session` instead and let the human take over in the same window.
 
+### Drive a paginated, framework-controlled table
+
+For "find a row by name → click its edit button → modify a field → save → next page → repeat" flows on Vue/React/Angular admin panels (DNS zone editors, user management, log viewers). The pattern below uses trusted clicks and event-firing input so framework synthetic-event handlers actually trigger (see § Diagnosis › synthetic-click-no-event-trigger for the antipattern).
+
+1. **Open the session.** `open_session({ attach_cdp: true, user_data_dir: <persistent path>, url: <table URL> })`. Persistent profile so login cookies carry across runs.
+2. **Survey the page once.** `list_interactive_elements({ session_id })` (preferred — bundled discovery with click-ready `selector_hint`), OR `accessibility_snapshot({ session_id, summaryOnly: true })` for the role+name overview, OR `dom_query({ session_id, queries: [{ selector: "table tbody tr", fields: ["text", "rect"], match: "all" }] })` to enumerate rows.
+3. **Find your target row by visible text.** Use the role/text selector forms directly — no JS needed:
+   - `click({ session_id, selector: "tr:has-text(\"RAFAEL SBRISSIA\") button[aria-label=\"Edit\"]" })` — CSS:has-text inside a row.
+   - Or `dom_query` once to extract the row's selector hint, then `click` that.
+4. **Wait for the editor surface, then modify.** `wait_for_selector({ session_id, selector: "input[name=\"content\"]" })` → `type_text({ session_id, selector: "input[name=\"content\"]", text: "186.202.153.64", clear: true })`. `type_text` uses real keyboard events; setting `input.value` from `evaluate_script` does NOT fire React/Vue change detection and your save button stays disabled.
+5. **Click save.** `click({ session_id, selector: "role=button[name=\"Save\"]" })` — role-by-name survives class-name mangling across releases.
+6. **Wait for the save confirmation.** `wait_for_selector({ session_id, selector: "[role=alert]:has-text(\"saved\")" })` or whatever your app emits. Don't use `wait({ ms: 1500 })` and pray.
+7. **Advance pagination.** Find the next-page control once via `accessibility_snapshot` (look for `role=button name="Next"` / `name="Próxima página"` etc.), then loop: `click({ selector: "button[aria-label=\"Próxima página\"]" })` → `wait_for_selector({ selector: "tbody tr" })` → re-scan.
+8. **Per-page idempotency.** Before clicking edit on a row, re-`dom_query` the table for that row — DOM identity does not carry across navigations. Use the row's stable text content (a person's name, a DNS record name) as the anchor, not a stale element handle.
+
+Anti-pattern this recipe replaces: scripting all of the above through `evaluate_script` with `document.querySelectorAll('*').filter(text-match).click()`. Synthetic clicks don't fire framework handlers on every page; the failure is silent; debugging is painful. Use the dedicated tools and let Playwright dispatch trusted events.
+
 ### Run an a11y audit on a logged-in page
 
 1. `open_session` + log in (via `type_text` / `click` against the login form, or via the `wp` plugin's `use: "wordpress"` mode if it's a WP site).
@@ -480,6 +499,7 @@ Quick symptom lookup:
 | `align_elements` reports `ambiguous-minimum` warning, or two distant deltas with similar scores | [Repetitive-UI ambiguity](#repetitive-ui-ambiguity) |
 | `align_elements` reports `hit-search-edge` and a delta equal to `maxRadius` | [Search radius too small](#search-radius-too-small) |
 | `align_elements` reports `content-change` for elements that visibly look misaligned | [Content vs translation misclassification](#content-vs-translation) |
+| `evaluate_script("el.click()")` returns success but the page state doesn't change; a save button stays disabled after a value-setter eval; framework synthetic-event handlers don't fire | [Synthetic-click no-event-trigger](#synthetic-click-no-event-trigger) |
 
 ### Mode not registered {#mode-not-registered}
 
@@ -530,6 +550,22 @@ When the consumer's mask configuration is built from upstream design-tooling out
 **Cause:** the real shift exceeds the search radius. Cluster geometry is supposed to set the radius automatically (a 12px-tall red strip implies ≤ 12px of vertical shift), but baseline diff clustering caps at `topClusters` and a small element near a much larger cluster can hit the ceiling.
 
 **Fix:** raise `maxRadius` (e.g. 120) and re-run. If the shift is genuinely large (> ~100px), DOM-reported coordinates may be the better starting point — use `compare_element` with `alignOn` and a known anchor pair instead. The element being far off-position from where its DOM position implies is itself a finding worth surfacing.
+
+### Synthetic-click no-event-trigger {#synthetic-click-no-event-trigger}
+
+**Symptom:** A script run via `evaluate_script` calls `element.click()` (or `input.value = "..."`) and returns success — but the page doesn't actually navigate, the save button stays disabled, or the form submission silently no-ops. Re-running the same call doesn't help. Falling back to `dom_snapshot` shows the page is still on the pre-click state.
+
+**Cause:** JS-level `element.click()` and direct property assignments like `input.value = "..."` dispatch *untrusted* events — `Event.isTrusted === false`. Frameworks that use synthetic event systems (React via SyntheticEvent, Vue via v-on bindings that read internal state, Angular's NgZone-tracked handlers) often ignore or partially process untrusted events, especially on framework-managed inputs. The DOM mutation happens but the framework's reactive layer never sees it; the save button's `disabled` binding stays bound to the framework's stale internal state. The 99% case where this surfaces is Vue/React admin panels (Vuetify, Material-UI, etc.) where every input is `<v-text-field>` / a wrapped `<input>` with internal state tracking.
+
+**Fix:** use the dedicated tools, which dispatch trusted events through Playwright:
+- For clicks: `click({ session_id, selector })` instead of `evaluate_script("el.click()")`. Playwright's `page.click()` resolves the element actionability (visible, enabled, stable), then dispatches a real `mousedown`/`mouseup`/`click` sequence with `isTrusted: true`.
+- For input value changes: `type_text({ session_id, selector, text, clear: true })` instead of `evaluate_script("input.value = '...'")`. Playwright sends real keystroke events, which the framework's input-event listener honors.
+- For checkboxes / radios: `check` / `uncheck` for the same reason.
+- For dropdowns: `select_option({ session_id, selector, value })` over `evaluate_script("select.value = '...'")`.
+
+If you absolutely must use `evaluate_script` (e.g. for a click on a page-defined custom element handler that only listens for synthetic clicks, or for forcing a state mutation when the trusted-click path is blocked by an overlay), follow up with `el.dispatchEvent(new Event("input", {bubbles: true}))` and `el.dispatchEvent(new Event("change", {bubbles: true}))` to give the framework a chance to react. But that's a last resort — the trusted-event path through `click` / `type_text` is shorter, safer, and works on more sites.
+
+**Why this is easy to miss:** the failure is silent and the script return value is "success" (the click() call did not throw). The only signal is downstream — your post-click `wait_for_selector` times out, or the next page doesn't navigate to where it should. Detect by running the same flow through `click({ selector })` once; if the trusted-event path succeeds where `evaluate_script` failed, you've confirmed it.
 
 ### Content vs translation misclassification {#content-vs-translation}
 

@@ -74,7 +74,16 @@ const targetField = {
 };
 
 const selectorField = {
-  selector: z.string().describe("CSS selector of the target element"),
+  selector: z.string().describe(
+    "Selector for the target element. Accepts: " +
+    "CSS (e.g. `#id`, `.btn.primary`, `nav > a:first-child`); " +
+    "Playwright role+name (e.g. `role=button[name=\"Submit\"]`, `role=link[name=\"Sign in\"]`); " +
+    "Playwright text (e.g. `text=\"Save\"` exact, `text=Save` substring); " +
+    "CSS:has-text (e.g. `button:has-text(\"Save\")`). " +
+    "Role-by-name is the most robust default — survives CSS-module hash mangling, ad-hoc class renames, and re-layouts. " +
+    "Use `text=` only within a single locale (breaks on i18n). " +
+    "Do NOT invent CSS like `.MuiButton-root.css-1g2hf83` — build-hashed class names break on every release.",
+  ),
 };
 const timeoutField = {
   timeout: z.number().optional().describe("Action timeout in ms (default: 30000)"),
