@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>OOPIF parent</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 16px; }
+    iframe { width: 480px; height: 320px; border: 2px solid #444; }
+    .parent-btn { padding: 8px 16px; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>OOPIF parent page</h1>
+  <button id="parentBtn" class="parent-btn" onclick="this.dataset.clicked='1'">parent button</button>
+  <p>Iframe below is loaded from <code id="ifrUrl">CHILD_URL</code> (cross-origin when ports differ).</p>
+  <iframe id="childFrame" name="childFrame" src="CHILD_URL"></iframe>
+</body>
+</html>

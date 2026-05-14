@@ -9,6 +9,7 @@ import {
 } from "../utils/browser.js";
 import { sessionManager } from "./sessions.js";
 import { useSchemaField } from "../utils/schemas.js";
+import { resolveLocator } from "../utils/locator.js";
 
 // All the user-replicable browser primitives — the things a human can do
 // in a browser without opening DevTools. Each primitive accepts an
@@ -82,7 +83,10 @@ const selectorField = {
     "CSS:has-text (e.g. `button:has-text(\"Save\")`). " +
     "Role-by-name is the most robust default — survives CSS-module hash mangling, ad-hoc class renames, and re-layouts. " +
     "Use `text=` only within a single locale (breaks on i18n). " +
-    "Do NOT invent CSS like `.MuiButton-root.css-1g2hf83` — build-hashed class names break on every release.",
+    "Do NOT invent CSS like `.MuiButton-root.css-1g2hf83` — build-hashed class names break on every release. " +
+    "Cross-frame piercing: join an iframe selector and the inner selector with whitespace-padded ` >>> ` " +
+    "(works for same-origin frames AND cross-origin OOPIFs). " +
+    "Example: `iframe[src*=\"octadesk\"] >>> #sendButton`. Nest multiple times for nested frames: `iframe.outer >>> iframe.inner >>> #btn`.",
   ),
 };
 const timeoutField = {
@@ -378,7 +382,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await page.click(p.selector, {
+      await resolveLocator(page, p.selector).click({
         button: p.button,
         clickCount: p.click_count,
         force: p.force,
@@ -401,13 +405,14 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
+      const target = resolveLocator(page, p.selector);
       const clear = p.clear !== false;
       if (clear) {
-        await page.fill(p.selector, p.text, { timeout: p.timeout });
+        await target.fill(p.text, { timeout: p.timeout });
       } else {
-        await page.locator(p.selector).pressSequentially(p.text, { timeout: p.timeout });
+        await target.pressSequentially(p.text, { timeout: p.timeout });
       }
-      if (p.press_enter) await page.press(p.selector, "Enter");
+      if (p.press_enter) await target.press("Enter");
       return ok(`Typed ${p.text.length} chars into ${p.selector}`);
     }),
   },
@@ -425,7 +430,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        await page.press(p.selector, p.key, { timeout: p.timeout });
+        await resolveLocator(page, p.selector).press(p.key, { timeout: p.timeout });
       } else {
         await page.keyboard.press(p.key);
       }
@@ -443,7 +448,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await page.hover(p.selector, { force: p.force, timeout: p.timeout });
+      await resolveLocator(page, p.selector).hover({ force: p.force, timeout: p.timeout });
       return ok(`Hovered ${p.selector}`);
     }),
   },
@@ -462,7 +467,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        await page.locator(p.selector).scrollIntoViewIfNeeded({ timeout: p.timeout });
+        await resolveLocator(page, p.selector).scrollIntoViewIfNeeded({ timeout: p.timeout });
         return ok(`Scrolled ${p.selector} into view`);
       }
       if (p.to === "top") {
@@ -490,7 +495,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await page.dragAndDrop(p.from_selector, p.to_selector, { timeout: p.timeout });
+      const from = resolveLocator(page, p.from_selector);
+      const to = resolveLocator(page, p.to_selector);
+      await from.dragTo(to, { timeout: p.timeout });
       return ok(`Dragged ${p.from_selector} → ${p.to_selector}`);
     }),
   },
@@ -511,7 +518,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       if (p.value !== undefined) opts.value = p.value;
       if (p.label !== undefined) opts.label = p.label;
       if (p.index !== undefined) opts.index = p.index;
-      const picked = await page.selectOption(p.selector, opts, { timeout: p.timeout });
+      const picked = await resolveLocator(page, p.selector).selectOption(opts, { timeout: p.timeout });
       return json({ selected: picked });
     }),
   },
@@ -520,7 +527,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Check a checkbox or radio button. No-op if already checked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await page.check(p.selector, { timeout: p.timeout });
+      await resolveLocator(page, p.selector).check({ timeout: p.timeout });
       return ok(`Checked ${p.selector}`);
     }),
   },
@@ -529,7 +536,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Uncheck a checkbox. No-op if already unchecked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await page.uncheck(p.selector, { timeout: p.timeout });
+      await resolveLocator(page, p.selector).uncheck({ timeout: p.timeout });
       return ok(`Unchecked ${p.selector}`);
     }),
   },
@@ -544,7 +551,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await page.setInputFiles(p.selector, p.paths, { timeout: p.timeout });
+      await resolveLocator(page, p.selector).setInputFiles(p.paths, { timeout: p.timeout });
       return ok(`Uploaded ${p.paths.length} file(s) to ${p.selector}`);
     }),
   },
@@ -565,7 +572,7 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await page.waitForSelector(p.selector, { state: p.state, timeout: p.timeout });
+      await resolveLocator(page, p.selector).waitFor({ state: p.state, timeout: p.timeout });
       return ok(`Selector ${p.selector} reached state ${p.state ?? "visible"}`);
     }),
   },
@@ -626,7 +633,7 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       const sel = p.selector ?? "body";
-      const text = await page.locator(sel).first().innerText();
+      const text = await resolveLocator(page, sel).first().innerText();
       return ok(text);
     }),
   },
@@ -640,7 +647,7 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      const val = await page.locator(p.selector).first().getAttribute(p.attribute);
+      const val = await resolveLocator(page, p.selector).first().getAttribute(p.attribute);
       return json({ selector: p.selector, attribute: p.attribute, value: val });
     }),
   },
@@ -654,7 +661,7 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        const html = await page.locator(p.selector).first().evaluate((el) => el.outerHTML);
+        const html = await resolveLocator(page, p.selector).first().evaluate((el) => el.outerHTML);
         return ok(html);
       }
       return ok(await page.content());
@@ -911,7 +918,7 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
         : path.join(outputDir, `capture-${Date.now()}.png`);
       await ensureOutput(filePath);
       const buf = p.selector
-        ? await page.locator(p.selector).first().screenshot({ type: "png" })
+        ? await resolveLocator(page, p.selector).first().screenshot({ type: "png" })
         : await page.screenshot({ type: "png", fullPage: p.full_page === true });
       await fs.writeFile(filePath, buf);
       return json({ path: filePath, bytes: buf.byteLength, selector: p.selector ?? null });

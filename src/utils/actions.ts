@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import type { CustomActionHandler } from "../plugins/types.js";
+import { resolveLocator } from "./locator.js";
 
 // Module-level custom action handlers from plugins.
 // Set once at startup by the server after loading plugins.
@@ -163,19 +164,22 @@ export async function runActions(
           const opts: Record<string, unknown> = {};
           if (timeout !== undefined) opts.timeout = timeout;
           if (a.force) opts.force = true;
-          await page.click(a.selector, opts);
+          await resolveLocator(page, a.selector).click(opts);
           break;
         }
         case "type": {
           const a = act as TypeAction;
           const timeout = resolveTimeout(a);
-          await page.fill(a.selector, a.text, timeout !== undefined ? { timeout } : undefined);
+          await resolveLocator(page, a.selector).fill(
+            a.text,
+            timeout !== undefined ? { timeout } : undefined,
+          );
           break;
         }
         case "wait_for_selector": {
           const a = act as WaitForSelectorAction;
           const timeout = resolveTimeout(a) ?? 30000;
-          await page.waitForSelector(a.selector, { timeout });
+          await resolveLocator(page, a.selector).waitFor({ timeout });
           break;
         }
         case "wait":
@@ -184,7 +188,7 @@ export async function runActions(
         case "scroll_to": {
           const a = act as ScrollToAction;
           const timeout = resolveTimeout(a);
-          await page.locator(a.selector).scrollIntoViewIfNeeded(
+          await resolveLocator(page, a.selector).scrollIntoViewIfNeeded(
             timeout !== undefined ? { timeout } : undefined,
           );
           break;
@@ -198,14 +202,13 @@ export async function runActions(
           const opts: Record<string, unknown> = {};
           if (timeout !== undefined) opts.timeout = timeout;
           if (a.force) opts.force = true;
-          await page.hover(a.selector, opts);
+          await resolveLocator(page, a.selector).hover(opts);
           break;
         }
         case "select": {
           const a = act as SelectAction;
           const timeout = resolveTimeout(a);
-          await page.selectOption(
-            a.selector,
+          await resolveLocator(page, a.selector).selectOption(
             a.value,
             timeout !== undefined ? { timeout } : undefined,
           );
@@ -269,7 +272,7 @@ async function runAssertion(page: Page, index: number, act: Action): Promise<Ass
     switch (act.action) {
       case "assert_visible": {
         const a = act as AssertVisibleAction;
-        const locator = page.locator(a.selector);
+        const locator = resolveLocator(page, a.selector);
         try {
           await locator.first().waitFor({ state: "visible", timeout: a.timeout ?? 3000 });
           return { index, action: a.action, selector: a.selector, passed: true, message: `visible` };
@@ -285,7 +288,7 @@ async function runAssertion(page: Page, index: number, act: Action): Promise<Ass
       }
       case "assert_hidden": {
         const a = act as AssertHiddenAction;
-        const locator = page.locator(a.selector);
+        const locator = resolveLocator(page, a.selector);
         try {
           await locator.first().waitFor({ state: "hidden", timeout: a.timeout ?? 3000 });
           return { index, action: a.action, selector: a.selector, passed: true, message: `hidden` };
@@ -307,7 +310,7 @@ async function runAssertion(page: Page, index: number, act: Action): Promise<Ass
             message: `invalid: cannot use both equals and absent`,
           };
         }
-        const value = await page.locator(a.selector).first().getAttribute(a.attribute);
+        const value = await resolveLocator(page, a.selector).first().getAttribute(a.attribute);
         if (a.absent) {
           const passed = value === null;
           return {
@@ -330,7 +333,7 @@ async function runAssertion(page: Page, index: number, act: Action): Promise<Ass
       }
       case "assert_text": {
         const a = act as AssertTextAction;
-        const raw = await page.locator(a.selector).first().textContent();
+        const raw = await resolveLocator(page, a.selector).first().textContent();
         const text = (raw ?? "").trim();
         if (a.equals !== undefined) {
           const passed = text === a.equals;
@@ -353,7 +356,7 @@ async function runAssertion(page: Page, index: number, act: Action): Promise<Ass
       }
       case "assert_count": {
         const a = act as AssertCountAction;
-        const count = await page.locator(a.selector).count();
+        const count = await resolveLocator(page, a.selector).count();
         const passed = count === a.equals;
         return {
           index, action: a.action, selector: a.selector, passed,

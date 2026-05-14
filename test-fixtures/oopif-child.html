@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>OOPIF child</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 16px; background: #fafafa; }
+    .send-btn { padding: 8px 16px; background: #2563eb; color: white; border: 0; border-radius: 4px; cursor: pointer; }
+    .send-btn[data-clicked="1"] { background: #16a34a; }
+    input { padding: 6px 10px; width: 240px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h2>Child frame (mimics Octadesk send-button shape)</h2>
+  <input id="messageInput" type="text" placeholder="Type a message..." />
+  <button id="sendButton" class="send-btn" onclick="onSend(this)">Send</button>
+  <p>Last typed: <span id="lastValue">(none)</span></p>
+  <p>Click count: <span id="clickCount">0</span></p>
+  <script>
+    // Mimic a React-style handler that mutates UI state on real click events.
+    // Position-only clicks at the parent-iframe surface don't get here in
+    // many OOPIF cases — that's the bug we're fixing.
+    let clicks = 0;
+    function onSend(btn) {
+      clicks += 1;
+      btn.dataset.clicked = "1";
+      document.getElementById("clickCount").textContent = String(clicks);
+      const v = document.getElementById("messageInput").value;
+      document.getElementById("lastValue").textContent = v || "(empty)";
+    }
+  </script>
+</body>
+</html>
