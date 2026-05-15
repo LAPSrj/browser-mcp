@@ -257,15 +257,34 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         "supports.className:false blocks) so the two strings can be compared structurally. " +
         "Project-specific runtime artifacts (intersection-observer markers, scroll listeners, " +
         "hydration flags) can be passed via strip_attributes / strip_classes / strip_css_vars / " +
-        "strip_subtrees — strips are applied symmetrically to both editor and frontend HTML.",
+        "strip_subtrees — strips are applied symmetrically to both editor and frontend HTML. " +
+        "On block-theme posts the editor wraps the post body in a canvas template tree where " +
+        "core/post-content is a leaf; the default source:\"auto\" detects this and resolves the " +
+        "target block against the parsed post body instead. Pass source:\"template\" to force " +
+        "the canvas-tree resolution or source:\"post_content\" to force the parsed-post-body path.",
       schema: {
         post_id: z.number().describe("WordPress post ID"),
         block_index: z.number().optional().describe("Top-level block index, 0-based (default: 0)"),
-        client_id: z.string().optional().describe("Block clientId"),
+        client_id: z.string().optional().describe(
+          "Block clientId. Not usable with source: \"post_content\" — parsed-post-body blocks " +
+          "have synthetic clientIds that don't match the inner BlockEditor store; pass " +
+          "block_name, block_path, or block_index instead.",
+        ),
         block_path: z.array(z.number()).optional().describe("Path to a nested block"),
         block_name: z.string().optional().describe("Block name — auto-detected from the editor when omitted"),
         frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
         save_before_frontend: z.boolean().optional().describe("Publish + save before reading the frontend (default: true)"),
+        source: z.enum(["auto", "template", "post_content"]).optional().describe(
+          "Which block tree to resolve the target in. " +
+          "\"auto\" (default): if the canvas tree contains a core/post-content leaf, parse " +
+          "wp.data.select(\"core/editor\").getEditedPostContent() and resolve there; otherwise " +
+          "resolve against the canvas tree. Behaviorally identical to \"template\" on classic-theme " +
+          "posts (no leaf). " +
+          "\"template\": always resolve against wp.data.select(\"core/block-editor\").getBlocks() — " +
+          "on block-theme posts this is the template-wrapped view (core/post-content shows as a stub). " +
+          "\"post_content\": always parse getEditedPostContent() into a block tree and resolve there. " +
+          "Use when the inserted block lives in post body on a block-theme post.",
+        ),
         strip_attributes: z.array(z.string()).optional().describe(
           'Project-specific attributes to strip globally on every element. Each entry is either an exact name (e.g. "data-scroll-rotate-ready") or a trailing-* prefix pattern (e.g. "data-scroll-rotate-*").',
         ),

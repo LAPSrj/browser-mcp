@@ -7,7 +7,13 @@ import {
   getBlockFrontendHints,
   savePost,
   editPostStatus,
+  canvasHasPostContentLeaf,
+  parsePostContentBlocks,
+  resolvePostContentTarget,
+  locatePostContentBlockElement,
+  getBlockTypeRegistryHints,
 } from "../utils/wp-data.js";
+import type { BlockFrontendHints } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { normalizeBlockHtmlOnPage } from "../utils/normalize-html.js";
 import { resolveGutenbergSession } from "../utils/session.js";
@@ -31,6 +37,7 @@ export function createBlockHtmlHandler(
     block_name?: string;
     frontend_selector?: string;
     save_before_frontend?: boolean;
+    source?: "auto" | "template" | "post_content";
     strip_attributes?: string[];
     strip_classes?: string[];
     strip_css_vars?: string[];
@@ -45,6 +52,7 @@ export function createBlockHtmlHandler(
       block_name,
       frontend_selector,
       save_before_frontend = true,
+      source = "auto",
       strip_attributes,
       strip_classes,
       strip_css_vars,
@@ -69,49 +77,138 @@ export function createBlockHtmlHandler(
         };
       }
 
-      // Resolve target block clientId (client_id > block_path > block_index)
-      let targetClientId = client_id;
-      if (!targetClientId && block_path) {
-        targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
-      }
-      if (!targetClientId) {
-        const idx = block_index ?? 0;
-        targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
-      }
-
-      if (!targetClientId) {
-        return {
-          content: [{
-            type: "text",
-            text: `Block not found. Provide client_id, block_path, or block_index pointing at an existing block.`,
-          }],
-          isError: true,
-        };
+      // Pick the resolution mode. "auto" detects a core/post-content leaf in
+      // the canvas tree — the WP invariant signaling that post body lives in
+      // a nested BlockEditorProvider invisible to core/block-editor.getBlocks().
+      let effectiveSource: "template" | "post_content";
+      if (source === "post_content") {
+        effectiveSource = "post_content";
+      } else if (source === "template") {
+        effectiveSource = "template";
+      } else {
+        effectiveSource = (await canvasHasPostContentLeaf(resolved.page))
+          ? "post_content"
+          : "template";
       }
 
-      // Read the block's name + editor outerHTML from inside the iframe.
-      const editorInfo = await resolved.page.evaluate((cid) => {
-        const wp = (window as any).wp;
-        const block = wp.data.select("core/block-editor").getBlock(cid);
-        const iframe = document.querySelector(
-          'iframe[name="editor-canvas"]',
-        ) as HTMLIFrameElement | null;
-        const doc = iframe?.contentDocument || document;
-        const el = doc.querySelector(`[data-block="${cid}"]`);
-        return {
-          name: (block?.name as string) || null,
-          rawHtml: el ? el.outerHTML : null,
-        };
-      }, targetClientId);
+      let reportedClientId: string | null = null;
+      let editorRawHtml: string | null = null;
+      let resolvedBlockName: string | null = null;
+      let postContentHints: {
+        customClassName: string | null;
+        domClasses: string[];
+      } | null = null;
 
-      if (!editorInfo.rawHtml) {
-        return {
-          content: [{
-            type: "text",
-            text: `Could not find the block's rendered element in the editor iframe.`,
-          }],
-          isError: true,
+      if (effectiveSource === "post_content") {
+        if (client_id) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                `client_id is not usable with source: "post_content" — blocks parsed ` +
+                `from getEditedPostContent() have synthetic clientIds that don't ` +
+                `match the inner BlockEditor store. Use block_name, block_path, or ` +
+                `block_index.`,
+            }],
+            isError: true,
+          };
+        }
+
+        const tree = await parsePostContentBlocks(resolved.page);
+        const target = resolvePostContentTarget(tree, {
+          block_path,
+          block_index,
+          block_name,
+        });
+        if (!target) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Block not found in post body. ` +
+                (block_name
+                  ? `No block named "${block_name}" in the post content parsed from getEditedPostContent().`
+                  : `No block at the given block_path / block_index in the parsed post content.`),
+            }],
+            isError: true,
+          };
+        }
+
+        const located = await locatePostContentBlockElement(
+          resolved.page,
+          target.name,
+          target.sameNameIndex,
+          (target.attributes.anchor as string | undefined) ?? null,
+        );
+        if (!located) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Resolved "${target.name}" in the parsed post content but couldn't ` +
+                `find its rendered element inside the editor iframe's ` +
+                `[data-type="core/post-content"] wrapper.`,
+            }],
+            isError: true,
+          };
+        }
+
+        editorRawHtml = located.rawHtml;
+        reportedClientId = located.domClientId;
+        resolvedBlockName = target.name;
+        postContentHints = {
+          customClassName: (target.attributes.className as string | undefined) ?? null,
+          domClasses: located.domClasses,
         };
+      } else {
+        // template path — canonical behavior. Resolve via core/block-editor's
+        // outer store, identical to the pre-`source` plugin.
+        let targetClientId = client_id;
+        if (!targetClientId && block_path) {
+          targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
+        }
+        if (!targetClientId) {
+          const idx = block_index ?? 0;
+          targetClientId = await getBlockClientIdByIndex(resolved.page, idx) ?? undefined;
+        }
+
+        if (!targetClientId) {
+          return {
+            content: [{
+              type: "text",
+              text: `Block not found. Provide client_id, block_path, or block_index pointing at an existing block.`,
+            }],
+            isError: true,
+          };
+        }
+
+        const editorInfo = await resolved.page.evaluate((cid) => {
+          const wp = (window as any).wp;
+          const block = wp.data.select("core/block-editor").getBlock(cid);
+          const iframe = document.querySelector(
+            'iframe[name="editor-canvas"]',
+          ) as HTMLIFrameElement | null;
+          const doc = iframe?.contentDocument || document;
+          const el = doc.querySelector(`[data-block="${cid}"]`);
+          return {
+            name: (block?.name as string) || null,
+            rawHtml: el ? el.outerHTML : null,
+          };
+        }, targetClientId);
+
+        if (!editorInfo.rawHtml) {
+          return {
+            content: [{
+              type: "text",
+              text: `Could not find the block's rendered element in the editor iframe.`,
+            }],
+            isError: true,
+          };
+        }
+
+        editorRawHtml = editorInfo.rawHtml;
+        reportedClientId = targetClientId;
+        resolvedBlockName = editorInfo.name;
       }
 
       // Gather default classes for block types that declared
@@ -145,15 +242,32 @@ export function createBlockHtmlHandler(
       };
       const editorHtml = await normalizeBlockHtmlOnPage(
         resolved.page,
-        editorInfo.rawHtml,
+        editorRawHtml,
         normalizeOptions,
       );
-      const blockName = block_name || editorInfo.name;
+      const blockName = block_name || resolvedBlockName;
 
-      // Gather hints before navigating away from the editor
-      const frontendHints = blockName
-        ? await getBlockFrontendHints(resolved.page, blockName, targetClientId)
-        : null;
+      // Gather frontend hints before navigating away. In post_content mode we
+      // already have customClassName + editorDomClasses from the parsed block
+      // and located DOM element; only the registry-derived parts need a query.
+      let frontendHints: BlockFrontendHints | null = null;
+      if (blockName) {
+        if (effectiveSource === "post_content" && postContentHints) {
+          const reg = await getBlockTypeRegistryHints(resolved.page, blockName);
+          frontendHints = {
+            defaultClassName: reg.defaultClassName,
+            customClassName: postContentHints.customClassName,
+            supportsClassName: reg.supportsClassName,
+            editorDomClasses: postContentHints.domClasses,
+          };
+        } else if (reportedClientId) {
+          frontendHints = await getBlockFrontendHints(
+            resolved.page,
+            blockName,
+            reportedClientId,
+          );
+        }
+      }
 
       // Save so frontend reflects the current editor state
       if (save_before_frontend) {
@@ -198,8 +312,9 @@ export function createBlockHtmlHandler(
       }
 
       const result = {
-        client_id: targetClientId,
+        client_id: reportedClientId,
         block_name: blockName,
+        source: effectiveSource,
         editor: editorHtml,
         frontend: frontendHtml,
         frontend_matched_by: frontendMatchedBy,

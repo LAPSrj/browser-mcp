@@ -293,3 +293,240 @@ export async function clearBlocks(page: Page): Promise<void> {
     wp.data.dispatch("core/block-editor").resetBlocks([]);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Post-content sourcing (block-theme posts)
+//
+// In WP 6.5+ block themes, a post's editor mounts a canvas template tree
+// (`core/template-part[header] → main-wrapper → core/post-content → footer`)
+// where `core/post-content` is a renderer leaf. The actual post body blocks
+// live in a nested `useEntityBlockEditor("postType","post")` provider and are
+// invisible to `wp.data.select("core/block-editor").getBlocks()` from outside.
+// To capture a block in the post body, parse `getEditedPostContent()` for
+// resolution and use `[data-block]` on the rendered DOM to pull outerHTML.
+// ---------------------------------------------------------------------------
+
+export interface ParsedPostContentBlock {
+  /** Synthetic clientId from `wp.blocks.parse` — NOT the inner-store clientId on the rendered DOM. */
+  clientId: string;
+  name: string;
+  attributes: Record<string, unknown>;
+  innerBlocks: ParsedPostContentBlock[];
+}
+
+/**
+ * Detect whether the canvas tree contains a `core/post-content` leaf at any
+ * depth. This is the WP-defined signal that post body lives in a nested store
+ * — a deterministic invariant, not a heuristic.
+ */
+export async function canvasHasPostContentLeaf(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const wp = (window as any).wp;
+    const blocks = wp.data.select("core/block-editor").getBlocks();
+    const walk = (arr: any[]): boolean => {
+      for (const b of arr) {
+        if (b?.name === "core/post-content") return true;
+        if (Array.isArray(b?.innerBlocks) && b.innerBlocks.length > 0) {
+          if (walk(b.innerBlocks)) return true;
+        }
+      }
+      return false;
+    };
+    return walk(blocks);
+  });
+}
+
+/**
+ * Parse the post body (`getEditedPostContent()`) into a block tree. ClientIds
+ * are synthetic — locate the DOM element via `locatePostContentBlockElement`.
+ */
+export async function parsePostContentBlocks(
+  page: Page,
+): Promise<ParsedPostContentBlock[]> {
+  return page.evaluate(() => {
+    const wp = (window as any).wp;
+    const html = (wp.data.select("core/editor").getEditedPostContent() as string) ?? "";
+    const parsed = wp.blocks.parse(html) as any[];
+    const serialize = (b: any): any => ({
+      clientId: b.clientId,
+      name: b.name,
+      attributes: b.attributes || {},
+      innerBlocks: Array.isArray(b.innerBlocks) ? b.innerBlocks.map(serialize) : [],
+    });
+    return parsed.map(serialize);
+  });
+}
+
+export interface PostContentResolution {
+  name: string;
+  attributes: Record<string, unknown>;
+  /** Path through the parsed tree, e.g. [0, 1]. */
+  path: number[];
+  /** Depth-first index among same-name occurrences in the parsed tree. */
+  sameNameIndex: number;
+}
+
+/**
+ * Resolve a target block within the parsed post body by name / index / path.
+ * Returns null if nothing matches.
+ */
+export function resolvePostContentTarget(
+  tree: ParsedPostContentBlock[],
+  by: { block_path?: number[]; block_index?: number; block_name?: string },
+): PostContentResolution | null {
+  // Compute the same-name index for a target identified by its depth-first path.
+  const sameNameIndexFor = (path: number[], name: string): number => {
+    let count = 0;
+    let found = false;
+    const walk = (arr: ParsedPostContentBlock[], prefix: number[]): boolean => {
+      for (let i = 0; i < arr.length; i++) {
+        const p = [...prefix, i];
+        const isTarget = p.length === path.length && p.every((v, k) => v === path[k]);
+        if (arr[i].name === name) {
+          if (isTarget) {
+            found = true;
+            return true;
+          }
+          count++;
+        }
+        if (isTarget) {
+          found = true;
+          return true;
+        }
+        if (walk(arr[i].innerBlocks, p)) return true;
+      }
+      return false;
+    };
+    walk(tree, []);
+    return found ? count : -1;
+  };
+
+  if (by.block_path) {
+    let arr = tree;
+    let current: ParsedPostContentBlock | null = null;
+    for (const idx of by.block_path) {
+      if (!Array.isArray(arr) || idx < 0 || idx >= arr.length) return null;
+      current = arr[idx];
+      arr = current.innerBlocks;
+    }
+    if (!current) return null;
+    return {
+      name: current.name,
+      attributes: current.attributes,
+      path: by.block_path,
+      sameNameIndex: sameNameIndexFor(by.block_path, current.name),
+    };
+  }
+
+  if (typeof by.block_index === "number") {
+    const idx = by.block_index;
+    if (idx < 0 || idx >= tree.length) return null;
+    const b = tree[idx];
+    return {
+      name: b.name,
+      attributes: b.attributes,
+      path: [idx],
+      sameNameIndex: sameNameIndexFor([idx], b.name),
+    };
+  }
+
+  if (by.block_name) {
+    const target = by.block_name;
+    let hit: { block: ParsedPostContentBlock; path: number[] } | null = null;
+    const find = (arr: ParsedPostContentBlock[], prefix: number[]): void => {
+      for (let i = 0; i < arr.length; i++) {
+        if (hit) return;
+        const p = [...prefix, i];
+        if (arr[i].name === target) {
+          hit = { block: arr[i], path: p };
+          return;
+        }
+        find(arr[i].innerBlocks, p);
+      }
+    };
+    find(tree, []);
+    if (!hit) return null;
+    const found = hit as { block: ParsedPostContentBlock; path: number[] };
+    return {
+      name: found.block.name,
+      attributes: found.block.attributes,
+      path: found.path,
+      sameNameIndex: sameNameIndexFor(found.path, found.block.name),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Locate a post-body block's rendered element in the editor iframe.
+ *
+ *   1. If `anchor` is set, prefer `iframe doc.querySelector("#<anchor>")`.
+ *   2. Else: find `[data-type="<name>"]` elements inside the canvas
+ *      `[data-type="core/post-content"]` wrapper, in document order, and
+ *      pick the one at `sameNameIndex`.
+ */
+export async function locatePostContentBlockElement(
+  page: Page,
+  blockName: string,
+  sameNameIndex: number,
+  anchor: string | null,
+): Promise<{ rawHtml: string; domClientId: string | null; domClasses: string[] } | null> {
+  return page.evaluate(
+    ({ name, nth, anchorAttr }) => {
+      const iframe = document.querySelector(
+        'iframe[name="editor-canvas"]',
+      ) as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument || document;
+
+      if (anchorAttr) {
+        const el = doc.getElementById(anchorAttr);
+        if (el) {
+          return {
+            rawHtml: el.outerHTML,
+            domClientId: el.getAttribute("data-block"),
+            domClasses: Array.from(el.classList),
+          };
+        }
+        // Anchor not in DOM yet — fall through to position-based.
+      }
+
+      const postContentWrapper = doc.querySelector('[data-type="core/post-content"]');
+      if (!postContentWrapper) return null;
+
+      const sameNameElements = Array.from(
+        postContentWrapper.querySelectorAll(`[data-type="${CSS.escape(name)}"]`),
+      );
+      if (nth < 0 || nth >= sameNameElements.length) return null;
+      const el = sameNameElements[nth];
+      return {
+        rawHtml: el.outerHTML,
+        domClientId: el.getAttribute("data-block"),
+        domClasses: Array.from(el.classList),
+      };
+    },
+    { name: blockName, nth: sameNameIndex, anchorAttr: anchor },
+  );
+}
+
+/**
+ * Build the registry-derived parts of `BlockFrontendHints` for a block name.
+ * Used in post_content mode where the block-instance className and editor-DOM
+ * classes are already available from the parsed block + located element, but
+ * we still need defaultClassName + supportsClassName from the block registry.
+ */
+export async function getBlockTypeRegistryHints(
+  page: Page,
+  blockName: string,
+): Promise<{ defaultClassName: string | null; supportsClassName: boolean }> {
+  return page.evaluate((name) => {
+    const wp = (window as any).wp;
+    const blockType = wp.blocks.getBlockType(name);
+    let defaultClassName: string | null = null;
+    if (typeof wp.blocks.getBlockDefaultClassName === "function") {
+      defaultClassName = wp.blocks.getBlockDefaultClassName(name) || null;
+    }
+    const supportsClassName = blockType?.supports?.className !== false;
+    return { defaultClassName, supportsClassName };
+  }, blockName);
+}
