@@ -263,8 +263,12 @@ export async function spawnOrAttachDecision(opts: {
     if (current.relay_pid != null) pidsToCheck.push(current.relay_pid);
     const aliveWin = aliveWindowsPids(pidsToCheck);
     if (!aliveWin.has(current.root_pid)) {
-      // Browser is dead but sidecar was orphaned. Wipe and respawn.
-      return { updated: null, result: { kind: "spawn" } };
+      // Sidecar's recorded root is dead. DON'T wipe — that destroys
+      // information the orphan-scan in cdp-relay.ts wants to consult.
+      // The caller proceeds to its spawn/adopt branch; if it ultimately
+      // does spawn, it will overwrite this sidecar with its own at
+      // the end of the same withSidecarLock callback.
+      return { updated: current, result: { kind: "spawn" } };
     }
     return { updated: current, result: { kind: "attach", info: current } };
   });
@@ -354,9 +358,19 @@ export async function appendSession(opts: {
 /**
  * Remove the session from attached_sessions. Returns:
  *   - was_last: true → caller is responsible for taskkilling the browser
- *               tree + relay. Sidecar file already deleted.
+ *               tree + relay AND then calling finalizeSidecarTeardown to
+ *               unlink the sidecar. The sidecar is left on disk with an
+ *               empty attached_sessions list so that if the kill fails,
+ *               the next open_session can still discover state.
  *   - was_last: false → other sessions remain. Just disconnect CDP,
  *               leave browser running.
+ *
+ * Ordering rationale: sidecar deletion is decoupled from "I am the last
+ * attached session" and reattached to "the browser has actually exited."
+ * If a taskkill partial-fails (Edge tray respawn, watchdog, swallowed PS
+ * error), the next open_session sees a sidecar pointing at the still-alive
+ * browser and attaches normally instead of falling into the spawn path and
+ * lock-conflicting with the surviving Chromium.
  */
 export interface RemoveSessionResult {
   was_last: boolean;
@@ -377,9 +391,27 @@ export async function removeSession(opts: {
     }
     const filtered = current.attached_sessions.filter((s) => s.session_id !== opts.session_id);
     if (filtered.length === 0) {
-      return { updated: null, result: { was_last: true, remaining: 0, sidecar: current } };
+      // Empty the attached_sessions but keep the sidecar on disk. The caller's
+      // finalizeSidecarTeardown unlinks once the browser is confirmed dead.
+      const drained: SidecarInfo = { ...current, attached_sessions: [] };
+      return { updated: drained, result: { was_last: true, remaining: 0, sidecar: drained } };
     }
     const updated: SidecarInfo = { ...current, attached_sessions: filtered };
     return { updated, result: { was_last: false, remaining: filtered.length, sidecar: updated } };
+  });
+}
+
+/**
+ * Unlink the sidecar file after the caller has verified the browser
+ * process is actually dead. Pairs with removeSession's was_last branch
+ * (which now leaves the sidecar on disk instead of unlinking it
+ * eagerly). Safe to call when the sidecar is already gone — returns
+ * without error.
+ */
+export async function finalizeSidecarTeardown(opts: {
+  userDataDirWsl: string;
+}): Promise<void> {
+  await withSidecarLock<void>(opts.userDataDirWsl, async () => {
+    return { updated: null, result: undefined };
   });
 }

@@ -620,7 +620,7 @@ class SessionManager {
   async browserStatus(session_id: string): Promise<{
     session_id: string;
     is_attach_cdp: boolean;
-    attached_via: "spawn" | "existing" | null;
+    attached_via: "spawn" | "existing" | "adopted" | null;
     user_data_dir: string | null;
     sidecar: {
       cdp_port: number;

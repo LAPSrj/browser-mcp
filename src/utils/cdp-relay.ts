@@ -22,6 +22,7 @@ import { sanitizeProcessName } from "./browser-products.js";
 import { isWsl, readWslGatewayIp } from "./wsl.js";
 import {
   aliveWindowsPids,
+  finalizeSidecarTeardown,
   removeSession,
   withSidecarLock,
 } from "./browser-sidecar.js";
@@ -71,8 +72,14 @@ export interface AttachCdpHandle {
    *    profile; we attached to its CDP port instead of spawning a competitor.
    *    Our cleanup must NOT kill the browser unless we're the last attached
    *    session (refcount via the sidecar file).
+   *  - "adopted": no live sidecar was found, but a browser-mcp-signature
+   *    Chromium was discovered running on the requested user_data_dir
+   *    (orphan from a prior Node-side crash). We spawned a fresh PS relay
+   *    pointing at the orphan's CDP port and wrote a new sidecar so future
+   *    open_session calls take the normal attach path. Lifecycle is treated
+   *    the same as "spawn" — we now own the browser and kill it on was_last.
    */
-  attachedVia: "spawn" | "existing";
+  attachedVia: "spawn" | "existing" | "adopted";
   /** Tear down: kill relay, kill our browser profile procs, remove temp files. Idempotent. Refcount-aware. */
   cleanup: () => Promise<void>;
 }
@@ -334,6 +341,166 @@ async function killProcessByPid(pid: number): Promise<void> {
   }
 }
 
+/**
+ * Poll Windows-side until the given PID is no longer alive, or until
+ * timeout. Used by cleanup paths to verify that a taskkill actually took
+ * effect before unlinking the sidecar file. Returns true if confirmed
+ * dead, false on timeout.
+ */
+async function waitForWindowsPidDead(pid: number, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!aliveWindowsPids([pid]).has(pid)) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+/**
+ * Scan Windows for an orphaned Chromium that matches the browser-mcp launch
+ * signature on the requested user_data_dir. Returned only when EXACTLY one
+ * root process is found; multiple matches surface as `{ ambiguous: N }`.
+ *
+ * Used by the orphan-adoption path in spawnAttachCdpRelay when the sidecar
+ * file is absent or has a stale root_pid but a Chromium is still alive on
+ * the profile (typical cause: prior browser-mcp Node process died before
+ * running its cleanup — terminal closed, conversation killed, OS reboot).
+ *
+ * Match criteria (all required):
+ *   - process Name == processName (e.g. "msedge.exe")
+ *   - CommandLine contains `--user-data-dir=<exact path>` at a word boundary
+ *   - CommandLine contains `--remote-debugging-port=<digits>` (only root has this)
+ *   - CommandLine contains `--remote-allow-origins=*` (browser-mcp signature)
+ *
+ * Chromium's OS-level profile file lock guarantees at most one root process
+ * per user_data_dir, so multi-match is unexpected in practice — but we
+ * still defend against it rather than picking arbitrarily.
+ */
+async function findOrphanedBrowser(
+  userDataDirWin: string,
+  processName: string,
+): Promise<{ rootPid: number; cdpPort: number } | { ambiguous: number } | null> {
+  const safe = sanitizeProcessName(processName);
+  // [regex]::Escape on the JS side — PS -match uses .NET regex syntax.
+  const escapedPath = userDataDirWin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Word-boundary after the path so `C:\edge-cdp-profile` doesn't match
+  // a longer `C:\edge-cdp-profile-other`.
+  const pathPattern = `--user-data-dir=${escapedPath}(\\s|"|$)`;
+  // \* is a literal asterisk in .NET regex.
+  const signaturePattern = "--remote-allow-origins=\\*";
+  const portPattern = "--remote-debugging-port=(\\d+)";
+  // Emit one PID:PORT line per match, terminated newline. Avoids ConvertTo-Json
+  // -AsArray (PS 6+ only) and ConvertTo-Json single-item-collapses on PS 5.1.
+  const cmd = String.raw`$ErrorActionPreference='SilentlyContinue';
+$found = Get-CimInstance Win32_Process -Filter "Name='${safe}'" | Where-Object {
+  $_.CommandLine -match '${pathPattern}' -and
+  $_.CommandLine -match '${signaturePattern}' -and
+  $_.CommandLine -match '${portPattern}'
+};
+foreach ($p in $found) {
+  $m = [regex]::Match($p.CommandLine, '${portPattern}');
+  if ($m.Success) {
+    Write-Output ("{0}:{1}" -f $p.ProcessId, $m.Groups[1].Value)
+  }
+}`;
+  let raw: string;
+  try {
+    raw = runPS(cmd, 8000);
+  } catch (e) {
+    dbg("findOrphanedBrowser: PS query failed:", (e as Error).message);
+    return null;
+  }
+  const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    dbg("findOrphanedBrowser: no orphan match for", { userDataDirWin, processName });
+    return null;
+  }
+  if (lines.length > 1) {
+    dbg("findOrphanedBrowser: ambiguous match", { lines });
+    return { ambiguous: lines.length };
+  }
+  const parts = lines[0].split(":");
+  const rootPid = parseInt(parts[0] ?? "", 10);
+  const cdpPort = parseInt(parts[1] ?? "", 10);
+  if (!Number.isFinite(rootPid) || rootPid <= 0 || !Number.isFinite(cdpPort) || cdpPort <= 0) {
+    dbg("findOrphanedBrowser: malformed PS output:", lines[0]);
+    return null;
+  }
+  dbg("findOrphanedBrowser: found", { rootPid, cdpPort });
+  return { rootPid, cdpPort };
+}
+
+/**
+ * Spawn a PS relay process pointing at an existing Chromium CDP port and
+ * watching a given root PID. Used by both the spawn path and the orphan-
+ * adoption path. Writes/refreshes relay.ps1 in the session dir, kicks off
+ * powershell.exe detached, and waits for the .pid file to appear.
+ *
+ * Throws if the relay fails to bind within 5s. Returns the relay PID + the
+ * WSL paths to the pid/log files (for diagnostics + later teardown).
+ */
+async function spawnRelayProcess(opts: {
+  sessionDirWin: string;
+  sessionDirWsl: string;
+  cdpPort: number;
+  relayPort: number;
+  watchPid: number;
+  idleSeconds: number;
+}): Promise<{ relayPid: number; relayPidFileWsl: string; relayLogFileWsl: string }> {
+  const psPath = `${opts.sessionDirWin}\\relay.ps1`;
+  const pidFile = `${opts.sessionDirWin}\\relay.pid`;
+  const logFile = `${opts.sessionDirWin}\\relay.log`;
+  const psPathWsl = winToWslPath(psPath);
+  const relayPidFileWsl = winToWslPath(pidFile);
+  const relayLogFileWsl = winToWslPath(logFile);
+
+  if (!existsSync(psPathWsl)) {
+    writeFileSync(psPathWsl, RELAY_PS, "utf8");
+  }
+  try { if (existsSync(relayPidFileWsl)) rmSync(relayPidFileWsl); } catch {}
+
+  spawnDetachedWindows([
+    "/c",
+    "start",
+    '""',
+    "/B",
+    "/MIN",
+    "powershell.exe",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    psPath,
+    "-ListenPort",
+    String(opts.relayPort),
+    "-UpstreamPort",
+    String(opts.cdpPort),
+    "-PidFile",
+    pidFile,
+    "-LogFile",
+    logFile,
+    "-WatchPid",
+    String(opts.watchPid),
+    "-IdleSeconds",
+    String(opts.idleSeconds),
+  ]);
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (existsSync(relayPidFileWsl)) {
+      const raw = readFileSync(relayPidFileWsl, "utf8").trim();
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > 0) {
+        return { relayPid: n, relayPidFileWsl, relayLogFileWsl };
+      }
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    `attach_cdp: relay failed to bind on port ${opts.relayPort} within 5s. See log: ${relayLogFileWsl}`,
+  );
+}
+
 function spawnDetachedWindows(args: string[]): number {
   // Use cmd.exe /c start /B so the spawned Windows process is fully decoupled from the WSL Node parent.
   const child = spawn("/mnt/c/Windows/System32/cmd.exe", args, {
@@ -442,10 +609,20 @@ export async function spawnAttachCdpRelay(
             dbg("cleanup (attach-via=existing): was_last → killing browser tree + relay");
             if (current.relay_pid != null) await killProcessByPid(current.relay_pid);
             await killBrowserTreeByPid(current.root_pid);
-            if (wsl) {
-              try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
-            } else if (!opts.userDataDirOverride) {
-              try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+            const dead = await waitForWindowsPidDead(current.root_pid);
+            if (dead) {
+              await finalizeSidecarTeardown({ userDataDirWsl });
+              if (wsl) {
+                try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
+              } else if (!opts.userDataDirOverride) {
+                try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+              }
+            } else {
+              dbg(
+                "cleanup (attach-via=existing): browser failed to die within timeout — " +
+                "leaving sidecar in place so the next open_session can re-attach " +
+                "instead of falling into the spawn path and lock-conflicting.",
+              );
             }
           } else {
             dbg(`cleanup (attach-via=existing): ${removal.remaining} sibling session(s) still attached → leaving browser up`);
@@ -466,7 +643,131 @@ export async function spawnAttachCdpRelay(
           },
         };
       }
-      dbg("sidecar present but root_pid is dead; falling through to spawn", { stale_root_pid: current.root_pid });
+      dbg("sidecar present but root_pid is dead; falling through to orphan-scan / spawn", { stale_root_pid: current.root_pid });
+    }
+
+    // ---- ORPHAN-ADOPTION path ----
+    // No live sidecar, or sidecar's recorded root_pid is dead. But there
+    // may still be a browser-mcp-signature Chromium running on this
+    // user_data_dir from a prior Node-side crash (terminal closed,
+    // conversation killed, OS reboot — anywhere cleanup didn't run).
+    // Scan for it; if found, spawn a fresh relay pointing at its CDP port
+    // and write a new sidecar instead of falling into spawn (which would
+    // hit Chromium's OS-level profile file lock).
+    if (wsl) {
+      let orphan: Awaited<ReturnType<typeof findOrphanedBrowser>> = null;
+      try {
+        orphan = await findOrphanedBrowser(userDataDirWin, processName);
+      } catch (e) {
+        dbg("orphan scan failed (non-fatal, falling through to spawn):", (e as Error).message);
+      }
+      if (orphan && "ambiguous" in orphan) {
+        throw new Error(
+          `attach_cdp: found ${orphan.ambiguous} ${processName} processes matching ` +
+            `--user-data-dir=${userDataDirWin} + browser-mcp signature. ` +
+            `Chromium's profile lock should make this impossible — refusing to adopt. ` +
+            `Manually inspect: Get-CimInstance Win32_Process -Filter "Name='${processName}'" | ` +
+            `Where-Object { $_.CommandLine -match '--user-data-dir=' } | Select ProcessId,CommandLine`,
+        );
+      }
+      if (orphan && "rootPid" in orphan) {
+        dbg("orphan-scan: found browser-mcp-signature Chromium; adopting", {
+          root_pid: orphan.rootPid,
+          cdp_port: orphan.cdpPort,
+        });
+        // Reuse the new caller's session-scoped dir for the adoption relay.
+        // Each adopter spawns its own relay process; on was_last cleanup we
+        // kill both the relay and the adopted browser.
+        const adoptRelayPort = relayPortReq!;
+        const relayInfo = await spawnRelayProcess({
+          sessionDirWin,
+          sessionDirWsl,
+          cdpPort: orphan.cdpPort,
+          relayPort: adoptRelayPort,
+          watchPid: orphan.rootPid,
+          idleSeconds: opts.relayIdleSeconds ?? 600,
+        });
+        const gateway = readWslGatewayIp();
+        if (gateway == null) {
+          await killProcessByPid(relayInfo.relayPid);
+          throw new Error(
+            "attach_cdp: orphan adoption requires WSL gateway IP but readWslGatewayIp() returned null.",
+          );
+        }
+        // E2E probe via the new relay to confirm the orphan's CDP port is reachable.
+        const e2eDeadline = Date.now() + 5000;
+        let e2eUp = false;
+        while (Date.now() < e2eDeadline) {
+          e2eUp = await probeCdp(gateway, adoptRelayPort, 1500);
+          if (e2eUp) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        if (!e2eUp) {
+          await killProcessByPid(relayInfo.relayPid);
+          throw new Error(
+            `attach_cdp: adopted browser pid ${orphan.rootPid} on port ${orphan.cdpPort} ` +
+              `but end-to-end probe via relay ${adoptRelayPort} failed. ` +
+              `Relay log: ${relayInfo.relayLogFileWsl}. ` +
+              `Browser may be deadlocked; manual recovery: Stop-Process -Id ${orphan.rootPid} -Force.`,
+          );
+        }
+
+        const adoptedSidecar = {
+          schema_version: 1 as const,
+          cdp_port: orphan.cdpPort,
+          relay_port: adoptRelayPort,
+          relay_pid: relayInfo.relayPid,
+          root_pid: orphan.rootPid,
+          process_name: processName,
+          user_data_dir: userDataDirWin,
+          spawned_at: new Date().toISOString(),
+          attached_sessions: [
+            { session_id: opts.sessionId, browser_mcp_pid: process.pid, attached_at: new Date().toISOString() },
+          ],
+        };
+
+        const adoptedRelayPid = relayInfo.relayPid;
+        const adoptedRootPid = orphan.rootPid;
+        let cleanedAdopted = false;
+        const cleanupAdopted = async () => {
+          if (cleanedAdopted) return;
+          cleanedAdopted = true;
+          const removal = await removeSession({ userDataDirWsl, session_id: opts.sessionId });
+          if (removal.was_last) {
+            dbg("cleanup (attach-via=adopted): was_last → killing browser tree + relay");
+            await killProcessByPid(adoptedRelayPid);
+            await killBrowserTreeByPid(adoptedRootPid);
+            const dead = await waitForWindowsPidDead(adoptedRootPid);
+            if (dead) {
+              await finalizeSidecarTeardown({ userDataDirWsl });
+              try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
+            } else {
+              dbg(
+                "cleanup (attach-via=adopted): browser failed to die within timeout — " +
+                "leaving sidecar in place for re-adoption.",
+              );
+            }
+          } else {
+            dbg(`cleanup (attach-via=adopted): ${removal.remaining} sibling session(s) still attached → leaving browser up`);
+          }
+        };
+
+        return {
+          updated: adoptedSidecar,
+          result: {
+            endpoint: `http://${gateway}:${adoptRelayPort}`,
+            userDataDir: userDataDirWin,
+            browserPid: orphan.rootPid,
+            relayPid: relayInfo.relayPid,
+            relayPort: adoptRelayPort,
+            cdpPort: orphan.cdpPort,
+            gateway,
+            attachedVia: "adopted",
+            cleanup: cleanupAdopted,
+          },
+        };
+      }
+      // No orphan found → fall through to spawn.
     }
 
     // ---- SPAWN path: no live browser, launch fresh ----
@@ -761,10 +1062,25 @@ export async function spawnAttachCdpRelay(
         // inherit --user-data-dir on the CommandLine.
         if (browserPid != null) await killBrowserTreeByPid(browserPid);
         else await killBrowserByUserDataDir(userDataDirWin, processName);
-        if (wsl) {
-          try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
-        } else if (!opts.userDataDirOverride) {
-          try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+        // Verify the browser actually died before unlinking the sidecar.
+        // If kill silently partial-fails (Edge tray respawn, watchdog,
+        // swallowed PS error), keep the sidecar so the next open_session
+        // attaches instead of falling into spawn + lock conflict.
+        const dead = browserPid != null
+          ? await waitForWindowsPidDead(browserPid)
+          : true;
+        if (dead) {
+          await finalizeSidecarTeardown({ userDataDirWsl });
+          if (wsl) {
+            try { rmSync(sessionDirWsl, { recursive: true, force: true }); } catch {}
+          } else if (!opts.userDataDirOverride) {
+            try { rmSync(userDataDirWin, { recursive: true, force: true }); } catch {}
+          }
+        } else {
+          dbg(
+            "cleanup (attach-via=spawn): browser failed to die within timeout — " +
+            "leaving sidecar in place so the next open_session can re-attach.",
+          );
         }
       } else {
         dbg(`cleanup (attach-via=spawn): ${removal.remaining} other session(s) attached to OUR spawned browser → leaving browser up`);
