@@ -849,6 +849,18 @@ export async function spawnAttachCdpRelay(
     //   which catches the case where Edge honors the per-profile pref over
     //   the feature flag (observed on current Edge 147+ — flag alone isn't enough).
     "--disable-features=Translate,TranslateUI",
+    // Crash-restore-bubble suppression: when Edge closes uncleanly (crash,
+    // taskkill, OOM, host reboot), the next launch shows "Restore tabs from
+    // your last session?". On a user-supplied user_data_dir (CDP attach to
+    // the credentialed profile at C:\edge-cdp-profile), that bubble
+    // intercepts the agent's first navigate/click. --hide-crash-restore-bubble
+    // is the Chromium switch that suppresses the bubble specifically; flag-only
+    // (no Preferences mutation) per Leandro's call to keep the
+    // user-supplied-profile-immutability rule intact (see memory
+    // edge-translate-suppression-needs-both-th). If the bubble ever resurfaces
+    // on a newer Edge version, revisit — the Preferences fix (set
+    // profile.exit_type="Normal") is the backup.
+    "--hide-crash-restore-bubble",
     "about:blank",
   ];
 
