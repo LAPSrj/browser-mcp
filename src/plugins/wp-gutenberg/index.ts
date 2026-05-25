@@ -102,7 +102,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         "Use inner_blocks to seed nested children (parent + items) in a single call. " +
         "By default the insert is in-memory only — the change is discarded when the call returns. " +
         "Pass save: true to persist via wp.data.dispatch('core/editor').savePost(). " +
-        "Optionally takes a screenshot of the editor after insertion.",
+        "Optionally takes a screenshot of the editor after insertion. " +
+        "On template-locked FSE posts (WP 6.5+ block themes) the editor's top level is the locked " +
+        "template canvas — inserting there is silently rejected — so the block is inserted into the " +
+        "editable post body (the core/post-content inner-block list) instead; pass root_client_id to override.",
       schema: {
         post_id: z.number().describe("WordPress post ID to edit"),
         block_name: z.string().describe('Block name (e.g. "core/paragraph", "my-plugin/my-block")'),
@@ -112,7 +115,11 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
           "Required for InnerBlocks parents whose items carry meaningful attributes (e.g. social-links).",
         ),
         index: z.number().optional().describe("Position to insert at within the parent (default: append to end)"),
-        root_client_id: z.string().optional().describe("Parent block's clientId for nested insertion"),
+        root_client_id: z.string().optional().describe(
+          "Parent block's clientId for nested insertion. When omitted on a template-locked FSE post, " +
+          "defaults to the core/post-content block so the insert lands in the editable post body rather " +
+          "than the locked template canvas root.",
+        ),
         save: z.boolean().optional().describe("Persist the insert via savePost() before returning (default: false)"),
         screenshot: z.boolean().optional().describe("Take a screenshot of the editor after insertion (default: true)"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
@@ -221,7 +228,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         "Comprehensive block validation. Inserts a block (optionally with inner_blocks), " +
         "checks registration and validity, captures console errors, takes editor + frontend screenshots, " +
         "extracts frontend HTML, and runs an accessibility check. Saves the post before reading the frontend. " +
-        "Returns all results in one call.",
+        "Returns all results in one call. On template-locked FSE posts the block is inserted into the editable " +
+        "post body (core/post-content), not the locked template canvas root, so the validity verdict reflects " +
+        "the real block instead of a false negative.",
       schema: {
         post_id: z.number().describe("WordPress post ID to use for testing"),
         block_name: z.string().describe('Block name (e.g. "my-plugin/my-block")'),
@@ -306,7 +315,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       name: "clear_blocks",
       description:
         "Reset a WordPress post's block list to empty and save. " +
-        "Useful for deterministic flows that wipe and rebuild the page each run.",
+        "Useful for deterministic flows that wipe and rebuild the page each run. " +
+        "On template-locked FSE posts it empties only the core/post-content inner blocks, leaving the " +
+        "surrounding template intact; on classic / post-only posts it resets the whole list.",
       schema: {
         post_id: z.number().describe("WordPress post ID to clear"),
         skip_save: z.boolean().optional().describe("Clear in memory but don't save (default: false)"),

@@ -292,16 +292,16 @@ BROWSER_MCP_PLUGINS=wp WP_URL=https://mysite.com WP_USERNAME=admin \
 Depends on `wp`. Enable with `BROWSER_MCP_PLUGINS=wp,wp-gutenberg`.
 Provides block-level tools for WordPress block editor workflows:
 
-- `wp-gutenberg_insert_block` — insert a block via `wp.data`; accepts `inner_blocks` for InnerBlocks parents (recursive tree seeding) and `save: true` to persist (default is in-memory only, ephemeral)
+- `wp-gutenberg_insert_block` — insert a block via `wp.data`; accepts `inner_blocks` for InnerBlocks parents (recursive tree seeding) and `save: true` to persist (default is in-memory only, ephemeral). On `template-locked` FSE posts (WP 6.5+ block themes) the outer store top level is the locked template canvas — inserting there is silently rejected — so insertion auto-targets the editable post body (the `core/post-content` controlled inner-block list); pass an explicit `root_client_id` to override, and classic / `post-only` posts are unaffected
 - `wp-gutenberg_get_blocks` — list blocks in a post
 - `wp-gutenberg_screenshot_block` — editor / frontend screenshots
 - `wp-gutenberg_inspect_toolbar` — structured block toolbar listing
 - `wp-gutenberg_compare_block` — resolve + screenshot + diff in one call
 - `wp-gutenberg_evaluate` — run JS in an authenticated editor page
-- `wp-gutenberg_check_block` — insert + validate + a11y + screenshots
+- `wp-gutenberg_check_block` — insert + validate + a11y + screenshots; on `template-locked` FSE posts it inserts into the post body (not the locked canvas root), so the validity verdict reflects the real block instead of a false negative
 - `wp-gutenberg_publish` — save / publish a post
 - `wp-gutenberg_block_html` — normalized editor + frontend HTML for structural diffing. Strips Gutenberg-universal noise (RichText UX, useBlockProps decoration, components-* / appender chrome, default classes for `supports.className: false` blocks, auto-generated wrapper IDs, semantic no-ops). Accepts `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts (intersection observers, scroll listeners, hydration markers). On block-theme posts the editor wraps the post body in a canvas template tree (`core/template-part → main → core/post-content → footer`) where `core/post-content` is a renderer leaf and the post body blocks live in a nested `useEntityBlockEditor("postType","post")` provider invisible to `core/block-editor.getBlocks()`. The default `source: "auto"` detects this case (presence of a `core/post-content` leaf in the canvas tree) and resolves the target against the parsed post body instead — strictly a no-op on classic-theme posts (no leaf, behaviorally identical to `source: "template"`). Pass `source: "template"` to force the canvas-tree resolution (legacy behavior) or `source: "post_content"` to force parsing `getEditedPostContent()` regardless of the canvas state. In `post_content` mode `client_id` is rejected (parsed blocks have synthetic clientIds); use `block_name`, `block_path`, or `block_index`. The reported `client_id` in `post_content` mode is the inner-store clientId read off the located `[data-block]` element.
-- `wp-gutenberg_clear_blocks` — wipe all blocks in a post
+- `wp-gutenberg_clear_blocks` — wipe the post body's blocks; on `template-locked` FSE posts it empties only the `core/post-content` inner blocks and leaves the surrounding template intact (returns the count removed)
 
 Plus custom actions usable in any tool's `actions[]`: `gutenberg_insert`,
 `gutenberg_set_attribute`, `gutenberg_select_block`, `gutenberg_remove`,

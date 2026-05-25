@@ -285,12 +285,39 @@ export async function removeBlock(
 }
 
 /**
- * Reset the editor's block list to empty.
+ * Clear the editable post body and return how many top-level blocks were
+ * removed.
+ *
+ * In `template-locked` (FSE block-theme) editing the editable body is the
+ * controlled inner-block list of the `core/post-content` block; resetting the
+ * OUTER store would wipe the surrounding template. So when a post-content block
+ * is present we empty only its inner blocks (verified live: template parts stay
+ * intact and `getEditedPostContent()` empties). Otherwise (classic theme /
+ * `post-only` mode) the outer store IS the post body — reset it.
  */
-export async function clearBlocks(page: Page): Promise<void> {
-  await page.evaluate(() => {
+export async function clearBlocks(page: Page): Promise<number> {
+  return page.evaluate(() => {
     const wp = (window as any).wp;
-    wp.data.dispatch("core/block-editor").resetBlocks([]);
+    const select = wp.data.select("core/block-editor");
+    const dispatch = wp.data.dispatch("core/block-editor");
+    const blocks = select.getBlocks();
+    let pcId: string | null = null;
+    const walk = (arr: any[]): void => {
+      for (const b of arr) {
+        if (pcId) return;
+        if (b?.name === "core/post-content") { pcId = b.clientId as string; return; }
+        if (Array.isArray(b?.innerBlocks) && b.innerBlocks.length > 0) walk(b.innerBlocks);
+      }
+    };
+    walk(blocks);
+    if (pcId) {
+      const count = select.getBlockOrder(pcId).length;
+      dispatch.replaceInnerBlocks(pcId, [], false);
+      return count;
+    }
+    const count = select.getBlockOrder().length;
+    dispatch.resetBlocks([]);
+    return count;
   });
 }
 
@@ -315,25 +342,67 @@ export interface ParsedPostContentBlock {
 }
 
 /**
+ * Find the clientId of the `core/post-content` block in the canvas tree, or
+ * null when there is none (classic-theme posts / `post-only` rendering mode).
+ *
+ * In WP 6.5+ block-theme editing the post editor mounts in `template-locked`
+ * rendering mode: the OUTER `core/block-editor` store holds the template tree
+ * (`core/template-part[header] → … → core/post-content → core/template-part`)
+ * and the locked canvas root REJECTS insertions. The editable post body is the
+ * controlled inner-block list of the `core/post-content` block — reachable in
+ * the SAME store via that block's clientId (verified live: `getBlockOrder(pc)`
+ * / `insertBlock(block, idx, pc)` operate on the body and sync to
+ * `getEditedPostContent()`; no nested entity-store dispatch is required).
+ */
+export async function getPostContentClientId(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const wp = (window as any).wp;
+    const blocks = wp.data.select("core/block-editor").getBlocks();
+    let found: string | null = null;
+    const walk = (arr: any[]): void => {
+      for (const b of arr) {
+        if (found) return;
+        if (b?.name === "core/post-content") { found = b.clientId as string; return; }
+        if (Array.isArray(b?.innerBlocks) && b.innerBlocks.length > 0) walk(b.innerBlocks);
+      }
+    };
+    walk(blocks);
+    return found;
+  });
+}
+
+/**
  * Detect whether the canvas tree contains a `core/post-content` leaf at any
  * depth. This is the WP-defined signal that post body lives in a nested store
  * — a deterministic invariant, not a heuristic.
  */
 export async function canvasHasPostContentLeaf(page: Page): Promise<boolean> {
-  return page.evaluate(() => {
+  return (await getPostContentClientId(page)) !== null;
+}
+
+/**
+ * Look up a single block's info by clientId via `getBlock`. Unlike
+ * `getBlocks()` (which only walks the serialized outer/template tree and omits
+ * controlled inner blocks such as a post body under `core/post-content`), this
+ * resolves a block at ANY nesting depth — so it correctly reports validity for
+ * blocks inserted into the post body in `template-locked` editing.
+ */
+export async function getBlockInfoById(
+  page: Page,
+  clientId: string,
+): Promise<BlockInfo | null> {
+  return page.evaluate((cid) => {
     const wp = (window as any).wp;
-    const blocks = wp.data.select("core/block-editor").getBlocks();
-    const walk = (arr: any[]): boolean => {
-      for (const b of arr) {
-        if (b?.name === "core/post-content") return true;
-        if (Array.isArray(b?.innerBlocks) && b.innerBlocks.length > 0) {
-          if (walk(b.innerBlocks)) return true;
-        }
-      }
-      return false;
+    const b = wp.data.select("core/block-editor").getBlock(cid);
+    if (!b) return null;
+    return {
+      clientId: b.clientId,
+      name: b.name,
+      attributes: b.attributes,
+      isValid: b.isValid,
+      innerBlockCount: b.innerBlocks ? b.innerBlocks.length : 0,
     };
-    return walk(blocks);
-  });
+  }, clientId);
 }
 
 /**

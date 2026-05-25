@@ -1,7 +1,7 @@
 import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
-import { clearBlocks, getBlocks, savePost } from "../utils/wp-data.js";
+import { clearBlocks, savePost } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createClearBlocksHandler(
@@ -34,11 +34,10 @@ export function createClearBlocksHandler(
         };
       }
 
-      const before = await getBlocks(resolved.page);
-      await clearBlocks(resolved.page);
+      const cleared = await clearBlocks(resolved.page);
 
       const lines = [
-        `Post ${post_id}: cleared ${before.length} block(s).`,
+        `Post ${post_id}: cleared ${cleared} block(s).`,
       ];
 
       if (!skip_save) {

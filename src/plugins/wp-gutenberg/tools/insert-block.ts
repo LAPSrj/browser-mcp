@@ -2,7 +2,7 @@ import path from "node:path";
 import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, waitForBlockType, getEditorFrame, checkEditorError } from "../utils/editor.js";
-import { insertBlock, getBlocks, isBlockRegistered, savePost } from "../utils/wp-data.js";
+import { insertBlock, getBlocks, getBlockInfoById, getPostContentClientId, isBlockRegistered, savePost } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createInsertBlockHandler(
@@ -87,13 +87,24 @@ export function createInsertBlockHandler(
         }
       }
 
+      // Resolve where to insert. In template-locked FSE editing the outer
+      // store top level is the locked template canvas — inserting there is
+      // silently rejected (the block lands nowhere and never reaches the saved
+      // post body). Redirect to the editable post body (the core/post-content
+      // controlled inner-block list) unless the caller named an explicit root.
+      let effectiveRoot = root_client_id;
+      if (!effectiveRoot) {
+        const postContentClientId = await getPostContentClientId(resolved.page);
+        if (postContentClientId) effectiveRoot = postContentClientId;
+      }
+
       // Insert the block
       const clientId = await insertBlock(
         resolved.page,
         block_name,
         attributes,
         index,
-        root_client_id,
+        effectiveRoot,
         inner_blocks,
       );
 
@@ -106,9 +117,11 @@ export function createInsertBlockHandler(
         savedPost = await savePost(resolved.page);
       }
 
-      // Get block state
-      const blocks = await getBlocks(resolved.page, true);
-      const inserted = blocks.find((b) => b.clientId === clientId);
+      // Get block state. Look the block up by clientId (resolves at any
+      // nesting depth, incl. the post body under core/post-content) rather than
+      // scanning only the serialized top-level tree.
+      const inserted = await getBlockInfoById(resolved.page, clientId);
+      const blocks = await getBlocks(resolved.page);
 
       const content: Array<{ type: string; [key: string]: unknown }> = [];
 

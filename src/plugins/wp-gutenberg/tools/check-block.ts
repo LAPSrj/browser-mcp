@@ -3,8 +3,8 @@ import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from 
 import type { WpAuth } from "../../wp/auth.js";
 import { navigateToEditor, waitForBlockType, checkEditorError } from "../utils/editor.js";
 import {
-  insertBlock, getBlocks, isBlockRegistered, savePost, editPostStatus,
-  getBlockFrontendHints,
+  insertBlock, getBlockInfoById, getPostContentClientId, isBlockRegistered,
+  savePost, editPostStatus, getBlockFrontendHints,
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { walkAccessibilityTree } from "../../../utils/a11y-walker.js";
@@ -96,20 +96,25 @@ export function createCheckBlockHandler(
         return earlyResponse;
       }
 
-      // 3. Insert block
+      // 3. Insert block. In template-locked FSE editing the outer store top
+      // level is the locked template canvas — inserting there is silently
+      // rejected, producing a false "invalid" verdict. Redirect to the editable
+      // post body (the core/post-content controlled inner-block list) when one
+      // is present; otherwise (classic / post-only) insert at the top level.
+      const postContentClientId = await getPostContentClientId(resolved.page);
       const clientId = await insertBlock(
         resolved.page,
         block_name,
         attributes,
         undefined,
-        undefined,
+        postContentClientId ?? undefined,
         inner_blocks,
       );
       await resolved.page.waitForTimeout(500);
 
-      // 4. Check validity
-      const blocks = await getBlocks(resolved.page);
-      const inserted = blocks.find((b) => b.clientId === clientId);
+      // 4. Check validity. Look up by clientId so the block is found at any
+      // nesting depth (incl. inside core/post-content), not just top level.
+      const inserted = await getBlockInfoById(resolved.page, clientId);
       results.is_valid = inserted?.isValid ?? false;
       results.block_attributes = inserted?.attributes;
 

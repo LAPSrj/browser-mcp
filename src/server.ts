@@ -70,7 +70,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
 
   const server = new McpServer({
     name: "browser-mcp",
-    version: "0.1.0",
+    version: "0.1.1",
   });
 
   const wrap = <T extends { use?: UseParam }>(fn: (params: Omit<T, "use">) => Promise<any>) =>

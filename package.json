@@ -1,6 +1,6 @@
 {
   "name": "browser-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server giving agents a real browser — navigate, interact, capture, and inspect via Playwright. Extensible with domain plugins.",
   "type": "module",
   "main": "dist/index.js",
