@@ -6,3 +6,10 @@ dist/
 .claude/
 
 .agent-out/
+
+# Local dev scratch — root-level smoke / spike / diagnostic scripts.
+# Already-tracked tests at the root (test-align-elements.mjs etc.) stay
+# tracked; this only prevents new ad-hoc ones from cluttering `git status`.
+/test-*.mjs
+/spike-*
+/diagnose-*
