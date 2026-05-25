@@ -13,6 +13,11 @@ import { spawn, execSync } from 'node:child_process';
 import { existsSync, promises as fsp } from 'node:fs';
 import { chromium } from 'playwright';
 
+// --- portability guard (auto-applied) ---
+import { requireWindows, requireChromium } from "./_helpers.mjs";
+requireWindows();
+const { processName: BROWSER_PROC, processBaseName: BROWSER_PROC_BASE } = requireChromium();
+
 const EDGE_WSL_PATH = '/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const PORT = 9222;
 const PROFILE_WIN = String.raw`C:\Users\leand\AppData\Local\Temp\edge-cdp-spike-profile`;
@@ -57,7 +62,7 @@ async function findReachableHost(port) {
 
 async function tasklistMsedgeCount() {
   try {
-    const out = execSync('/mnt/c/Windows/System32/tasklist.exe /NH /FI "IMAGENAME eq msedge.exe"', { encoding: 'utf8' });
+    const out = execSync('/mnt/c/Windows/System32/tasklist.exe /NH /FI "IMAGENAME eq ${BROWSER_PROC}"', { encoding: 'utf8' });
     const matches = out.match(/msedge\.exe/gi);
     return matches ? matches.length : 0;
   } catch (e) {

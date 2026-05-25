@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = __dirname;
+const root = path.resolve(__dirname, "..");
 
 const { axeAuditTool } = await import(
   path.join(root, "dist/plugins/dev/tools/axe-audit.js")

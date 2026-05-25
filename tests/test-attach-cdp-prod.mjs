@@ -5,8 +5,13 @@
 // Build with `npx tsc` first, then run:
 //   node test-attach-cdp-prod.mjs
 
-import { sessionManager } from './dist/core/sessions.js';
+import { sessionManager } from '../dist/core/sessions.js';
 import { execFileSync } from 'node:child_process';
+
+// --- portability guard (auto-applied) ---
+import { requireWindows, requireChromium } from "./_helpers.mjs";
+requireWindows();
+const { processName: BROWSER_PROC, processBaseName: BROWSER_PROC_BASE } = requireChromium();
 
 const log = (...a) => console.log('[t]', ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -19,8 +24,8 @@ function tasklistCount(filterContains) {
         '-NoProfile',
         '-Command',
         filterContains
-          ? `(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${filterContains}*' } | Measure-Object).Count`
-          : `(Get-Process msedge -ErrorAction SilentlyContinue | Measure-Object).Count`,
+          ? `(Get-CimInstance Win32_Process -Filter "Name='${BROWSER_PROC}'" | Where-Object { $_.CommandLine -like '*${filterContains}*' } | Measure-Object).Count`
+          : `(Get-Process ${BROWSER_PROC_BASE} -ErrorAction SilentlyContinue | Measure-Object).Count`,
       ],
       { encoding: 'utf8', timeout: 5000 },
     ).trim();

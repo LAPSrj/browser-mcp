@@ -6,6 +6,11 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { execFileSync as efs } from 'node:child_process';
 
+// --- portability guard (auto-applied) ---
+import { requireWindows, requireChromium } from "./_helpers.mjs";
+requireWindows();
+const { processName: BROWSER_PROC, processBaseName: BROWSER_PROC_BASE } = requireChromium();
+
 const SID = `prob-${Date.now()}`;
 const TEMP = efs('/mnt/c/Windows/System32/cmd.exe', ['/c', 'echo %TEMP%'], { encoding: 'utf8' }).trim();
 const PROFILE = `${TEMP}\\browser-mcp\\${SID}\\bm-cdp-${SID}`;
@@ -38,7 +43,7 @@ child.unref();
 await new Promise((r) => setTimeout(r, 2500));
 
 // dump every match to a file so we can read it
-const ps = `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${SID}*' } | ForEach-Object { '{0} :: {1}' -f $_.ProcessId, $_.CommandLine }`;
+const ps = `Get-CimInstance Win32_Process -Filter "Name='${BROWSER_PROC}'" | Where-Object { $_.CommandLine -like '*${SID}*' } | ForEach-Object { '{0} :: {1}' -f $_.ProcessId, $_.CommandLine }`;
 const out = efs('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8' });
 console.log('---PS OUTPUT (', out.split('\n').length, 'lines )---');
 console.log(out);
@@ -50,6 +55,6 @@ console.log('---LISTENING in 9300-9999---');
 console.log(out2);
 
 // kill
-const ps3 = `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${SID}*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }`;
+const ps3 = `Get-CimInstance Win32_Process -Filter "Name='${BROWSER_PROC}'" | Where-Object { $_.CommandLine -like '*${SID}*' } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }`;
 efs('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe', ['-NoProfile', '-Command', ps3], { encoding: 'utf8' });
 console.log('done');

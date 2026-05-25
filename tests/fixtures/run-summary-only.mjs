@@ -23,8 +23,8 @@ const refPath = path.join(tmpDir, "ref.png");
 await page.screenshot({ path: refPath });
 await browser.close();
 
-const { compareScreenshotTool } = await import("../dist/plugins/dev/tools/compare-screenshot.js");
-const { compareElementTool } = await import("../dist/plugins/dev/tools/compare-element.js");
+const { compareScreenshotTool } = await import("../../dist/plugins/dev/tools/compare-screenshot.js");
+const { compareElementTool } = await import("../../dist/plugins/dev/tools/compare-element.js");
 
 function joinText(result) {
   return result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");

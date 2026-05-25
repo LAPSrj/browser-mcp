@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURE = path.join(__dirname, "test-fixtures", "align-elements-fixture.html");
+const FIXTURE = path.join(__dirname, "fixtures", "align-elements-fixture.html");
 const OUT_DIR = path.join(__dirname, ".browser", "align-test");
 
 await fs.mkdir(OUT_DIR, { recursive: true });
@@ -33,7 +33,7 @@ const base = `http://127.0.0.1:${port}`;
 
 try {
   // --- snap reference -----------------------------------------------------
-  const { screenshotTool } = await import("./dist/core/screenshot.js");
+  const { screenshotTool } = await import("../dist/core/screenshot.js");
   const refResult = await screenshotTool({
     url: `${base}/`,
     outputDir: OUT_DIR,
@@ -52,7 +52,7 @@ try {
   console.log("Reference captured:", refPath);
 
   // --- run align_elements --------------------------------------------------
-  const { alignElementsTool } = await import("./dist/plugins/dev/tools/align-elements.js");
+  const { alignElementsTool } = await import("../dist/plugins/dev/tools/align-elements.js");
   const mode = process.env.TEST_MODE || "individual";
   const shiftQuery =
     mode === "uniform"

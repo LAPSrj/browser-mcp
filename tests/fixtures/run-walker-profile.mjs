@@ -23,10 +23,10 @@ const refPath = path.join(tmpDir, "ref.png");
 await page.screenshot({ path: refPath });
 await browser.close();
 
-const { compareScreenshotTool } = await import("../dist/plugins/dev/tools/compare-screenshot.js");
-const { compareElementTool } = await import("../dist/plugins/dev/tools/compare-element.js");
-const { domQueryTool } = await import("../dist/plugins/dev/tools/dom-query.js");
-const { domSnapshotTool } = await import("../dist/plugins/dev/tools/dom-snapshot.js");
+const { compareScreenshotTool } = await import("../../dist/plugins/dev/tools/compare-screenshot.js");
+const { compareElementTool } = await import("../../dist/plugins/dev/tools/compare-element.js");
+const { domQueryTool } = await import("../../dist/plugins/dev/tools/dom-query.js");
+const { domSnapshotTool } = await import("../../dist/plugins/dev/tools/dom-snapshot.js");
 
 let pass = 0, fail = 0;
 function check(cond, name, detail) {

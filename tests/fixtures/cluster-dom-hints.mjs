@@ -5,7 +5,7 @@
 
 import { chromium } from "playwright";
 
-const { annotateClusters } = await import("../dist/utils/cluster-dom-hints.js");
+const { annotateClusters } = await import("../../dist/utils/cluster-dom-hints.js");
 
 let pass = 0;
 let fail = 0;

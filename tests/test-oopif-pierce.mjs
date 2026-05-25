@@ -33,7 +33,7 @@ function check(cond, m) {
 // 1. Unit tests for resolveLocator parsing
 // ---------------------------------------------------------------------------
 log("\n=== Unit: locator parser ===");
-const { hasFramePierce, splitFramePierce } = await import("./dist/utils/locator.js");
+const { hasFramePierce, splitFramePierce } = await import("../dist/utils/locator.js");
 
 check(hasFramePierce("a >>> b") === true, "hasFramePierce: 'a >>> b' is true");
 check(hasFramePierce("#foo") === false, "hasFramePierce: '#foo' is false");
@@ -57,15 +57,15 @@ log("\n=== Integration: OOPIF (cross-origin iframe) ===");
 
 let sessionMgr;
 try {
-  sessionMgr = (await import("./dist/core/sessions.js")).sessionManager;
+  sessionMgr = (await import("../dist/core/sessions.js")).sessionManager;
 } catch (e) {
   log("dist/ missing — run `npm run build` first. Skipping integration leg.");
   log(`\nResult: ${passed} passed, ${failed} failed (integration SKIPPED)`);
   process.exit(failed > 0 ? 1 : 0);
 }
 
-const PARENT_HTML = await fs.readFile(path.join(__dirname, "test-fixtures", "oopif-parent.html"), "utf-8");
-const CHILD_HTML = await fs.readFile(path.join(__dirname, "test-fixtures", "oopif-child.html"), "utf-8");
+const PARENT_HTML = await fs.readFile(path.join(__dirname, "fixtures", "oopif-parent.html"), "utf-8");
+const CHILD_HTML = await fs.readFile(path.join(__dirname, "fixtures", "oopif-child.html"), "utf-8");
 
 const childServer = http.createServer((_req, res) => {
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -86,8 +86,8 @@ const parentUrl = `http://127.0.0.1:${parentPort}/`;
 
 log(`parent ${parentUrl}  →  iframe ${childUrl}  (different ports = OOPIF)`);
 
-const primitives = await import("./dist/core/primitives.ts.js").catch(async () =>
-  await import("./dist/core/primitives.js"),
+const primitives = await import("../dist/core/primitives.ts.js").catch(async () =>
+  await import("../dist/core/primitives.js"),
 );
 const { interactionPrimitives, waitPrimitives, readPrimitives } = primitives;
 

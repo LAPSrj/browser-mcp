@@ -9,12 +9,12 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const testHtml = `file://${path.resolve(__dirname, "design-compare-test.html")}`;
 
-const { domSnapshotTool } = await import("../dist/plugins/dev/tools/dom-snapshot.js");
-const { accessibilitySnapshotTool } = await import("../dist/plugins/dev/tools/accessibility.js");
-const { networkLogTool } = await import("../dist/plugins/dev/tools/network-log.js");
-const { consoleCaptureTool } = await import("../dist/plugins/dev/tools/console-capture.js");
-const { performanceMetricsTool } = await import("../dist/plugins/dev/tools/performance.js");
-const { schemaExtractTool } = await import("../dist/plugins/dev/tools/schema-extract.js");
+const { domSnapshotTool } = await import("../../dist/plugins/dev/tools/dom-snapshot.js");
+const { accessibilitySnapshotTool } = await import("../../dist/plugins/dev/tools/accessibility.js");
+const { networkLogTool } = await import("../../dist/plugins/dev/tools/network-log.js");
+const { consoleCaptureTool } = await import("../../dist/plugins/dev/tools/console-capture.js");
+const { performanceMetricsTool } = await import("../../dist/plugins/dev/tools/performance.js");
+const { schemaExtractTool } = await import("../../dist/plugins/dev/tools/schema-extract.js");
 
 let pass = 0, fail = 0;
 function check(cond, name, detail) {

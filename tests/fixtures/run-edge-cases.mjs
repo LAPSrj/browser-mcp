@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const testHtml = `file://${path.resolve(__dirname, "design-compare-test.html")}`;
 
-const { designCompareTool } = await import("../dist/plugins/design-compare/tools/design-compare.js");
+const { designCompareTool } = await import("../../dist/plugins/design-compare/tools/design-compare.js");
 
 let passed = 0;
 let failed = 0;

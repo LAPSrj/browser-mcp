@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const testHtml = `file://${path.resolve(__dirname, "design-compare-test.html")}`;
 
-const { domQueryTool } = await import("../dist/plugins/dev/tools/dom-query.js");
-const { computedStylesTool } = await import("../dist/plugins/dev/tools/computed-styles.js");
+const { domQueryTool } = await import("../../dist/plugins/dev/tools/dom-query.js");
+const { computedStylesTool } = await import("../../dist/plugins/dev/tools/computed-styles.js");
 
 let pass = 0, fail = 0;
 function check(cond, name, detail) {
@@ -185,7 +185,7 @@ console.log("\n=== Test 6: match:'all' cap + truncated flag ===");
 // ===========================================================================
 console.log("\n=== Test 7: session reuse via session_id ===");
 {
-  const { sessionManager } = await import("../dist/core/sessions.js");
+  const { sessionManager } = await import("../../dist/core/sessions.js");
   const session = await sessionManager.open({
     browser: "chromium",
     viewport: { width: 1280, height: 720 },
