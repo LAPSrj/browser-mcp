@@ -21,6 +21,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { sessionManager } from "../dist/core/sessions.js";
 import { setTimeout as wait } from "node:timers/promises";
 
@@ -28,6 +30,9 @@ import { setTimeout as wait } from "node:timers/promises";
 import { requireWindows, requireChromium } from "./_helpers.mjs";
 requireWindows();
 const { processName: BROWSER_PROC, processBaseName: BROWSER_PROC_BASE } = requireChromium();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
 
 const log = (...a) => console.log("[t]", ...a);
 const fail = (msg) => {
@@ -41,13 +46,13 @@ const scratchWsl = `/mnt/c/temp/bm-bubble-test-${ts}`;
 
 // ---- 0. Static source check: confirm the flag is wired into cdp-relay.ts ----
 log("--- (0) source check: --hide-crash-restore-bubble in cdp-relay browserArgs ---");
-const relaySrc = readFileSync("../src/utils/cdp-relay.ts", "utf8");
+const relaySrc = readFileSync(path.join(repoRoot, "src/utils/cdp-relay.ts"), "utf8");
 if (!relaySrc.includes("--hide-crash-restore-bubble")) {
   fail("--hide-crash-restore-bubble not present in src/utils/cdp-relay.ts");
 }
 log("(0) PASS — flag present in source");
 
-const compiledRelay = readFileSync("../dist/utils/cdp-relay.js", "utf8");
+const compiledRelay = readFileSync(path.join(repoRoot, "dist/utils/cdp-relay.js"), "utf8");
 if (!compiledRelay.includes("--hide-crash-restore-bubble")) {
   fail("--hide-crash-restore-bubble not present in dist/utils/cdp-relay.js (rebuild needed?)");
 }

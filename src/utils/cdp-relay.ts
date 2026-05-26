@@ -48,6 +48,16 @@ export interface SpawnAttachCdpOptions {
   startupTimeoutMs?: number;
   /** Idle-timeout safety net for the PS relay (sec). Browser-PID-watch is the primary teardown trigger; this only fires if the watch fails. Default 600 (10 min). */
   relayIdleSeconds?: number;
+  /**
+   * When true, omit the `--hide-crash-restore-bubble` flag so Edge/Chromium
+   * actually restores the previous session's tabs. The flag is required by
+   * default to keep the "Restore tabs?" yellow bubble from intercepting the
+   * agent's first click on a credentialed profile, but it ALSO disables
+   * silent auto-restoration — so when the caller has explicitly asked to
+   * resume the prior session (`sessionManager.open({ restore_previous_tabs:
+   * true })`), the flag has to be left off. Default false.
+   */
+  restorePreviousTabs?: boolean;
 }
 
 export interface AttachCdpHandle {
@@ -821,6 +831,15 @@ export async function spawnAttachCdpRelay(
       const stubPrefs = JSON.stringify({
         translate: { enabled: false },
         translate_blocked_languages: ["*"],
+        // Suppress the OS-account auto-sign-in modal that Edge surfaces on
+        // a fresh isolated profile (it inherits the Windows account identity
+        // via SSO and pops a "Use Windows credentials to sign in" prompt
+        // that intercepts the agent's first interaction). Mirrors the
+        // BrowserSignin=0 group policy at the per-profile level; --disable-
+        // sync alone is not enough (it kills sync but the sign-in prompt
+        // still appears). Skipped when the caller supplies their own
+        // user_data_dir — that's their profile, we don't mutate it.
+        signin: { allowed: false },
       });
       writeFileSync(`${defaultDirNode}/Preferences`, stubPrefs, "utf8");
     } catch (e) {
@@ -857,10 +876,14 @@ export async function spawnAttachCdpRelay(
     // is the Chromium switch that suppresses the bubble specifically; flag-only
     // (no Preferences mutation) per Leandro's call to keep the
     // user-supplied-profile-immutability rule intact (see memory
-    // edge-translate-suppression-needs-both-th). If the bubble ever resurfaces
-    // on a newer Edge version, revisit — the Preferences fix (set
-    // profile.exit_type="Normal") is the backup.
-    "--hide-crash-restore-bubble",
+    // edge-translate-suppression-needs-both-th). Omitted when the caller
+    // explicitly asked to restore the previous session — the flag also
+    // disables Edge's silent auto-restore path, so leaving it set would
+    // make `restore_previous_tabs: true` a no-op. If the bubble ever
+    // resurfaces on a newer Edge version where it can't be suppressed any
+    // other way, revisit — the Preferences fix (set profile.exit_type=
+    // "Normal" + exited_cleanly=true) is the backup.
+    ...(opts.restorePreviousTabs ? [] : ["--hide-crash-restore-bubble"]),
     "about:blank",
   ];
 

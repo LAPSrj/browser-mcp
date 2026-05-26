@@ -264,6 +264,7 @@ class SessionManager {
           executablePath: exe,
           processName: BROWSER_PRODUCT_SPECS[product].processName,
           userDataDirOverride: opts.user_data_dir,
+          restorePreviousTabs: opts.restore_previous_tabs === true,
         });
         browser = await chromium.connectOverCDP(attachCdp.endpoint);
       }
