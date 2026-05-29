@@ -591,15 +591,103 @@ export async function spawnAttachCdpRelay(
   return withSidecarLock<AttachCdpHandle>(userDataDirWsl, async (current) => {
     // ---- ATTACH path: existing browser is alive ----
     if (current) {
-      const stillAlive = aliveWindowsPids([current.root_pid]).has(current.root_pid);
-      if (stillAlive) {
+      const rootAlive = aliveWindowsPids([current.root_pid]).has(current.root_pid);
+      if (rootAlive) {
+        const gateway = wsl ? readWslGatewayIp() : null;
+        // root_pid being alive is necessary but NOT sufficient to attach. On
+        // WSL the relay is a SEPARATE process with its own PID and can die
+        // independently of the browser (host sleep, PowerShell crash, relay
+        // idle-timeout) while Chromium keeps running. The old attach path
+        // returned the sidecar's relay endpoint without ever probing it, so a
+        // dead relay made the caller's connectOverCDP hang the full 30s. Health-
+        // check the EXACT endpoint we would hand back, with a short timeout,
+        // before committing to attach.
+        let endpointLive = false;
+        if (wsl) {
+          endpointLive =
+            current.relay_port != null &&
+            gateway != null &&
+            (await probeCdp(gateway, current.relay_port, 2000));
+        } else {
+          endpointLive = await probeCdp("localhost", current.cdp_port, 2000);
+        }
+
+        // Stale-relay recovery (WSL): browser alive, relay dead. If the browser
+        // is still serving CDP on its Windows-side localhost port, respawn ONLY
+        // the relay pointing at the existing cdp_port. Cheapest possible
+        // recovery — the live browser and its loaded (often credentialed)
+        // session are preserved; nothing is killed.
+        if (!endpointLive && wsl && gateway != null) {
+          const cdpAlive = await probeWindowsLocalhostCdp(current.cdp_port);
+          if (cdpAlive) {
+            dbg("sidecar: root + CDP alive but relay dead — respawning relay", {
+              root_pid: current.root_pid,
+              cdp_port: current.cdp_port,
+              dead_relay_pid: current.relay_pid,
+              dead_relay_port: current.relay_port,
+            });
+            // Deliberately do NOT kill the old relay_pid: it's already dead
+            // (that's why we're here) or wedged, and a relay that died long ago
+            // may have had its PID reused by an unrelated Windows process —
+            // killing a reused PID is the worse failure. A wedged old relay on
+            // the old port can't conflict with a fresh relay on a new port; it
+            // idle-times-out on its own.
+            const newRelayPort = relayPortReq!;
+            const relayInfo = await spawnRelayProcess({
+              sessionDirWin,
+              sessionDirWsl,
+              cdpPort: current.cdp_port,
+              relayPort: newRelayPort,
+              watchPid: current.root_pid,
+              idleSeconds: opts.relayIdleSeconds ?? 600,
+            });
+            const e2eDeadline = Date.now() + 5000;
+            let e2eUp = false;
+            while (Date.now() < e2eDeadline) {
+              e2eUp = await probeCdp(gateway, newRelayPort, 1500);
+              if (e2eUp) break;
+              await new Promise((r) => setTimeout(r, 200));
+            }
+            if (!e2eUp) {
+              await killProcessByPid(relayInfo.relayPid);
+              throw new Error(
+                `attach_cdp: browser pid ${current.root_pid} is alive and serving CDP on ` +
+                  `port ${current.cdp_port}, but its relay had died and a respawned relay on ` +
+                  `${newRelayPort} failed its end-to-end probe. Relay log: ${relayInfo.relayLogFileWsl}.`,
+              );
+            }
+            // Point the (mutable) sidecar view at the fresh relay so the attach
+            // return + cleanup below use the new port/pid, and the updated
+            // sidecar persists them for the next open_session.
+            current = { ...current, relay_pid: relayInfo.relayPid, relay_port: newRelayPort };
+            endpointLive = true;
+          }
+        }
+
+        if (!endpointLive) {
+          // Browser root is alive but its CDP endpoint is unreachable and not
+          // recoverable by a relay respawn (browser wedged, or the CDP port
+          // itself is dead). Don't hang, and don't silently fall through to
+          // spawn — spawning a competitor would deadlock on Chromium's profile
+          // file-lock. Surface an actionable error instead.
+          throw new Error(
+            `attach_cdp: sidecar at ${userDataDirWin} records a live browser ` +
+              `(root_pid ${current.root_pid}) but its CDP endpoint is unreachable` +
+              (wsl
+                ? ` (relay port ${current.relay_port} dead AND Windows-localhost CDP ` +
+                  `port ${current.cdp_port} not responding)`
+                : ` (localhost:${current.cdp_port} not responding)`) +
+              `. The browser appears wedged. Recover with close_browser({ force: true }) ` +
+              `on this profile, or manually: Stop-Process -Id ${current.root_pid} -Force.`,
+          );
+        }
+
         dbg("sidecar: attaching to existing browser", {
           root_pid: current.root_pid,
           cdp_port: current.cdp_port,
           relay_port: current.relay_port,
           existing_sessions: current.attached_sessions.length,
         });
-        const gateway = wsl ? readWslGatewayIp() : null;
         const endpoint = wsl
           ? `http://${gateway}:${current.relay_port}`
           : `http://localhost:${current.cdp_port}`;
@@ -610,6 +698,10 @@ export async function spawnAttachCdpRelay(
             { session_id: opts.sessionId, browser_mcp_pid: process.pid, attached_at: new Date().toISOString() },
           ],
         };
+        // Snapshot for the cleanup closure: `current` is a reassignable param,
+        // so TS widens it back to `SidecarInfo | null` inside the async closure.
+        // A const captures the confirmed-non-null (possibly relay-respawned) view.
+        const attached = current;
         let cleaned = false;
         const cleanup = async () => {
           if (cleaned) return;
@@ -617,9 +709,9 @@ export async function spawnAttachCdpRelay(
           const removal = await removeSession({ userDataDirWsl, session_id: opts.sessionId });
           if (removal.was_last) {
             dbg("cleanup (attach-via=existing): was_last → killing browser tree + relay");
-            if (current.relay_pid != null) await killProcessByPid(current.relay_pid);
-            await killBrowserTreeByPid(current.root_pid);
-            const dead = await waitForWindowsPidDead(current.root_pid);
+            if (attached.relay_pid != null) await killProcessByPid(attached.relay_pid);
+            await killBrowserTreeByPid(attached.root_pid);
+            const dead = await waitForWindowsPidDead(attached.root_pid);
             if (dead) {
               await finalizeSidecarTeardown({ userDataDirWsl });
               if (wsl) {
