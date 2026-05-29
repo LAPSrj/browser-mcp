@@ -235,46 +235,6 @@ export async function withSidecarLock<T>(
 }
 
 /**
- * Attach to an existing browser if its root PID is alive AND its sidecar's
- * cdp_port still responds; or signal that the caller must spawn a fresh
- * browser. Returns a discriminated union:
- *   - { kind: "attach", info } → reuse the existing browser; caller appends
- *     itself to attached_sessions via appendSession() after CDP connect.
- *   - { kind: "spawn" } → no live browser; caller spawns then calls
- *     recordSpawn().
- *
- * Stale-PID detection (Chromium killed externally): we batch-check the
- * recorded root_pid + relay_pid against Windows Get-Process. If root is
- * dead, the sidecar is removed and { kind: "spawn" } is returned.
- */
-export type SpawnOrAttachResult =
-  | { kind: "attach"; info: SidecarInfo }
-  | { kind: "spawn" };
-
-export async function spawnOrAttachDecision(opts: {
-  userDataDirWsl: string;
-}): Promise<SpawnOrAttachResult> {
-  return withSidecarLock<SpawnOrAttachResult>(opts.userDataDirWsl, async (current) => {
-    if (!current) {
-      return { updated: null, result: { kind: "spawn" } };
-    }
-    // Verify the recorded browser root PID is alive Windows-side.
-    const pidsToCheck = [current.root_pid];
-    if (current.relay_pid != null) pidsToCheck.push(current.relay_pid);
-    const aliveWin = aliveWindowsPids(pidsToCheck);
-    if (!aliveWin.has(current.root_pid)) {
-      // Sidecar's recorded root is dead. DON'T wipe — that destroys
-      // information the orphan-scan in cdp-relay.ts wants to consult.
-      // The caller proceeds to its spawn/adopt branch; if it ultimately
-      // does spawn, it will overwrite this sidecar with its own at
-      // the end of the same withSidecarLock callback.
-      return { updated: current, result: { kind: "spawn" } };
-    }
-    return { updated: current, result: { kind: "attach", info: current } };
-  });
-}
-
-/**
  * Record a fresh browser spawn — called after the caller successfully
  * launched Chromium + relay and is about to connect over CDP. Creates the
  * sidecar with the spawning session already in attached_sessions.

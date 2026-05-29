@@ -241,9 +241,43 @@ function wslToWinPath(wslPath: string): string {
   }).trim();
 }
 
-function pickFreePort(low: number, high: number): number {
-  // We can't easily test bind from WSL for a Windows port. Pick random — collisions are caught downstream.
-  return low + Math.floor(Math.random() * (high - low + 1));
+async function pickFreePort(low: number, high: number): Promise<number> {
+  const span = high - low + 1;
+  const randomPick = () => low + Math.floor(Math.random() * span);
+  // The CDP port (Chromium) and relay port both bind Windows-side, so on
+  // WSL/Windows we can ask the OS which ports in the range are already
+  // listening and avoid them. This kills the common collision where a
+  // long-lived relay or CDP port sits in the same random range (observed:
+  // an orphaned relay on 9455 making a fresh session's random pick fail to
+  // bind). It is best-effort, not a guarantee — a TOCTOU race remains and is
+  // still caught downstream by the relay bind / e2e probe. On native
+  // macOS/Linux (no PowerShell, and no long-lived-relay collision to worry
+  // about) we keep a plain random pick.
+  if (!isWsl() && process.platform !== "win32") return randomPick();
+  let inUse: Set<number>;
+  try {
+    const out = runPS(
+      `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ` +
+        `Where-Object { $_.LocalPort -ge ${low} -and $_.LocalPort -le ${high} } | ` +
+        `Select-Object -ExpandProperty LocalPort`,
+      5000,
+    );
+    inUse = new Set(
+      out
+        .split(/\r?\n/)
+        .map((l) => parseInt(l.trim(), 10))
+        .filter((n) => Number.isFinite(n)),
+    );
+  } catch {
+    return randomPick(); // query failed — fall back; downstream bind still guards
+  }
+  if (inUse.size >= span) return randomPick(); // whole range busy (improbable for 100 ports)
+  for (let i = 0; i < 20; i++) {
+    const p = randomPick();
+    if (!inUse.has(p)) return p;
+  }
+  for (let p = low; p <= high; p++) if (!inUse.has(p)) return p;
+  return randomPick();
 }
 
 async function probeCdp(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
@@ -568,8 +602,8 @@ export async function spawnAttachCdpRelay(
         return dir;
       })());
 
-  const cdpPortReq = opts.cdpPort ?? pickFreePort(9300, 9399);
-  const relayPortReq = wsl ? (opts.relayPort ?? pickFreePort(9400, 9499)) : null;
+  const cdpPortReq = opts.cdpPort ?? (await pickFreePort(9300, 9399));
+  const relayPortReq = wsl ? (opts.relayPort ?? (await pickFreePort(9400, 9499))) : null;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 15_000;
   // Sanitize once up front — any per-spec typo blows up before we spawn.
   const processName = sanitizeProcessName(opts.processName);
