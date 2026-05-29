@@ -23,12 +23,20 @@ export interface ToolContext {
    * capabilities (e.g. WP auth) without changing their own signatures.
    */
   sessionHooks: SessionHook[];
+  /**
+   * Set true once a code path has actually RUN the resolved sessionHooks
+   * (launchSession). The server wrapper uses this to fail-loud: if `use:`
+   * resolved hooks but nothing consumed them — e.g. a mode passed to a
+   * persistent / attach_cdp session, which doesn't apply session hooks — it
+   * appends a warning instead of silently no-op'ing a recognized param.
+   */
+  hooksConsumed: boolean;
 }
 
 export const toolContextStorage = new AsyncLocalStorage<ToolContext>();
 
 export function createToolContext(sessionHooks: SessionHook[] = []): ToolContext {
-  return { activeServers: new Set<BrowserServer>(), aborted: false, sessionHooks };
+  return { activeServers: new Set<BrowserServer>(), aborted: false, sessionHooks, hooksConsumed: false };
 }
 
 /**
@@ -205,6 +213,9 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     for (const hook of allHooks) {
       await hook(context, page, toolName);
     }
+    // Mark the caller's `use:`-resolved hooks as actually applied, so the
+    // server wrapper doesn't warn that they were silently dropped.
+    if (ctx && ctxHooks.length > 0) ctx.hooksConsumed = true;
 
     return { server, browser, context, page };
   } catch (error) {

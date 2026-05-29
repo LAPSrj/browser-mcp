@@ -16,6 +16,28 @@ import { actionSchema, useSchemaField } from "./utils/schemas.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
 
+/**
+ * Append a non-fatal warning to a tool result when a `use:` mode was resolved
+ * but never applied. Mutating the result's content array (rather than throwing)
+ * keeps the tool's output intact while making the dropped-mode visible to the
+ * agent. Returns the result unchanged if it isn't the standard MCP content shape.
+ */
+function appendModeWarning(result: any, use: UseParam): any {
+  const names = Array.isArray(use) ? use : use ? [use] : [];
+  const list = names.map((n) => `"${n}"`).join(", ");
+  const warning =
+    `⚠️ use: ${list} had no effect on this call. Session modes are applied only ` +
+    `to per-call tools (e.g. screenshot/capture without a session_id, and plugin ` +
+    `tools like wp-gutenberg) — NOT to open_session, session_id tools ` +
+    `(navigate/evaluate_script/click/…), or attach_cdp sessions. Any auth/cookie ` +
+    `the mode would inject was NOT applied. For a credentialed attach_cdp profile, ` +
+    `authenticate the profile directly instead of passing use:.`;
+  if (result && Array.isArray(result.content)) {
+    return { ...result, content: [...result.content, { type: "text" as const, text: warning }] };
+  }
+  return result;
+}
+
 function withTimeout<T extends { use?: UseParam }>(
   timeoutMs: number,
   fn: (params: Omit<T, "use">) => Promise<any>,
@@ -47,7 +69,15 @@ function withTimeout<T extends { use?: UseParam }>(
           }, timeoutMs);
         });
 
-        return await Promise.race([fn(toolParams), timeoutPromise]);
+        const result = await Promise.race([fn(toolParams), timeoutPromise]);
+        // Fail-loud on a dropped mode: `use:` resolved hooks but no code path
+        // consumed them (e.g. a mode passed to open_session / a session_id
+        // tool / an attach_cdp session — those don't apply session hooks).
+        // Surface a warning rather than silently no-op'ing a recognized param.
+        if (sessionHooks.length > 0 && !ctx.hooksConsumed) {
+          return appendModeWarning(result, params.use);
+        }
+        return result;
       } catch (error) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(error as Error).message}` }],
