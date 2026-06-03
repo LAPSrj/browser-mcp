@@ -1,12 +1,12 @@
 import path from "node:path";
 import type { AnyAction } from "../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions, type ActionStopResult, type AssertionResult } from "../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../utils/browser.js";
 import { navigateTo } from "../utils/navigate.js";
 import { saveFile, generateFilename } from "../utils/file.js";
 import { createPreviewBuffer } from "../utils/resize.js";
 
-export interface ScreenshotParams {
+export interface ScreenshotParams extends BrowserStackTarget {
   url: string;
   browsers?: string[];
   viewports?: { width: number; height: number; label?: string }[];
@@ -66,6 +66,7 @@ export async function screenshotTool(params: ScreenshotParams) {
             browser: browserName as BrowserName,
             viewport: { width: vp.width, height: vp.height },
             useBrowserStack,
+            ...pickBrowserStack(params),
           });
 
           try {

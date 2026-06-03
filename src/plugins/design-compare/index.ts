@@ -4,7 +4,7 @@ import type {
   PluginContext,
   PluginConfigSchema,
 } from "../types.js";
-import { actionSchema, useSchemaField } from "../../utils/schemas.js";
+import { actionSchema, useSchemaField, browserStackFields } from "../../utils/schemas.js";
 import { designCompareTool } from "./tools/design-compare.js";
 import { designAuditTool } from "./tools/design-audit.js";
 
@@ -116,6 +116,7 @@ const designComparePlugin: ScreenshotPlugin = {
           .boolean()
           .optional()
           .describe("Use BrowserStack (default: false)"),
+        ...browserStackFields,
         ...useSchemaField,
       },
       handler: async (params) =>
@@ -187,6 +188,7 @@ const designComparePlugin: ScreenshotPlugin = {
           .boolean()
           .optional()
           .describe("Use BrowserStack (default: false)"),
+        ...browserStackFields,
         coverageManifest: z
           .object({
             nodeNames: z.array(z.string()).describe("All named nodes from the design file (_meta.nodeNames from resolve_styles)"),

@@ -1,6 +1,6 @@
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ export interface LayoutChecks {
   containment?: ContainmentCheck[];
 }
 
-export interface DesignCompareParams {
+export interface DesignCompareParams extends BrowserStackTarget {
   url: string;
   viewport?: { width: number; height: number };
   elements: DesignCompareElement[];
@@ -255,6 +255,7 @@ export async function designCompareTool(params: DesignCompareParams) {
     browser: "chromium" as BrowserName,
     viewport,
     useBrowserStack,
+    ...pickBrowserStack(params),
   });
 
   try {

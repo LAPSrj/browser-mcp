@@ -5,10 +5,11 @@ import fs from "node:fs/promises";
 import {
   launchSession,
   closeSession,
+  pickBrowserStack,
   type BrowserName,
 } from "../utils/browser.js";
 import { sessionManager } from "./sessions.js";
-import { useSchemaField } from "../utils/schemas.js";
+import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator } from "../utils/locator.js";
 
 // All the user-replicable browser primitives — the things a human can do
@@ -24,6 +25,9 @@ interface CommonTarget {
   browser?: BrowserName;
   viewport?: Viewport;
   useBrowserStack?: boolean;
+  browserStackOs?: string;
+  browserStackOsVersion?: string;
+  browserStackDevice?: string;
 }
 
 async function withPage<T>(
@@ -39,6 +43,7 @@ async function withPage<T>(
     browser: params.browser ?? "chromium",
     viewport: params.viewport ?? { width: 1280, height: 720 },
     useBrowserStack: params.useBrowserStack,
+    ...pickBrowserStack(params),
   });
   try {
     return await fn(session.page, session.context);
@@ -72,6 +77,7 @@ const targetField = {
     .describe('Browser to use for ephemeral calls (ignored when session_id is set). Default: "chromium"'),
   viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (ignored when session_id is set)"),
   useBrowserStack: z.boolean().optional().describe("Use BrowserStack for ephemeral calls (default: false)"),
+  ...browserStackFields,
 };
 
 const selectorField = {

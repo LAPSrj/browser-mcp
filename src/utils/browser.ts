@@ -83,12 +83,37 @@ export interface LaunchOptions {
   browser: BrowserName;
   viewport?: { width: number; height: number };
   useBrowserStack?: boolean;
+  /** BrowserStack desktop OS to target (e.g. "Windows", "OS X"). Only used when useBrowserStack is true and no device. Defaults to Windows. */
+  browserStackOs?: string;
+  /** BrowserStack OS/device version (e.g. "11", "Sequoia", or iOS "17"). Only used when useBrowserStack is true. */
+  browserStackOsVersion?: string;
+  /** Real BrowserStack device name (e.g. "iPhone 15 Pro Max"). When set, runs on a real device (real iOS Safari). */
+  browserStackDevice?: string;
   /** Playwright storageState to inject auth cookies/localStorage into the context. */
   storageState?: object;
   /** Session hooks to run after context creation (e.g. plugin auth). */
   sessionHooks?: SessionHook[];
   /** Name of the tool launching this session (passed to session hooks). */
   toolName?: string;
+}
+
+/**
+ * The per-call BrowserStack targeting fields a tool receives (from
+ * `browserStackFields` in its schema). Tool param interfaces can mix this in,
+ * and `pickBrowserStack` forwards them into `launchSession` in one shot.
+ */
+export interface BrowserStackTarget {
+  browserStackOs?: string;
+  browserStackOsVersion?: string;
+  browserStackDevice?: string;
+}
+
+export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
+  return {
+    browserStackOs: p.browserStackOs,
+    browserStackOsVersion: p.browserStackOsVersion,
+    browserStackDevice: p.browserStackDevice,
+  };
 }
 
 export interface BrowserSession {
@@ -119,16 +144,23 @@ interface LaunchResult {
   browser: Browser;
 }
 
-async function launchBrowserWithRetry(browserName: BrowserName, useBrowserStack: boolean): Promise<LaunchResult> {
+async function launchBrowserWithRetry(
+  browserName: BrowserName,
+  useBrowserStack: boolean,
+  browserStack?: { os?: string; osVersion?: string; device?: string },
+): Promise<LaunchResult> {
   let lastError: Error | undefined;
 
   for (let attempt = 1; attempt <= LAUNCH_RETRIES; attempt++) {
     try {
       if (useBrowserStack) {
+        // os/osVersion/device left undefined → connectBrowserStack defaults to
+        // desktop Windows 11; a device routes to a real mobile device.
         const caps: BrowserStackCaps = {
           browser: browserName,
-          os: "Windows",
-          osVersion: "11",
+          os: browserStack?.os,
+          osVersion: browserStack?.osVersion,
+          device: browserStack?.device,
         };
         const browser = await connectBrowserStack(caps);
         return { browser };
@@ -172,12 +204,19 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       browser: browserName,
       viewport,
       useBrowserStack = false,
+      browserStackOs,
+      browserStackOsVersion,
+      browserStackDevice,
       storageState,
       sessionHooks,
       toolName = "",
     } = options;
 
-    const launchResult = await launchBrowserWithRetry(browserName, useBrowserStack);
+    const launchResult = await launchBrowserWithRetry(browserName, useBrowserStack, {
+      os: browserStackOs,
+      osVersion: browserStackOsVersion,
+      device: browserStackDevice,
+    });
     server = launchResult.server;
     browser = launchResult.browser;
 
@@ -201,7 +240,9 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     }
 
     const context = await browser.newContext(contextOptions);
-    context.setDefaultTimeout(30000);
+    // Real BrowserStack devices boot slowly — the first navigation can take
+    // far longer than a local browser, so give the context a generous default.
+    context.setDefaultTimeout(browserStackDevice ? 120000 : 30000);
     const page = await context.newPage();
 
     // Run plugin session hooks (e.g. auth) after context is ready.

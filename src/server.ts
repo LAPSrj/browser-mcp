@@ -12,7 +12,7 @@ import {
 } from "./utils/browser.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
-import { actionSchema, useSchemaField } from "./utils/schemas.js";
+import { actionSchema, useSchemaField, browserStackFields } from "./utils/schemas.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
 
@@ -154,6 +154,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       consoleToFile: z.boolean().optional().describe("Write console logs to file (default: false)"),
       waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
       useBrowserStack: z.boolean().optional().describe("Use BrowserStack instead of local browsers (default: false)"),
+      ...browserStackFields,
       delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
       startY: z.number().optional().describe("Y coordinate to start the screenshot clip from (pixels from top)"),
       endY: z.number().optional().describe("Y coordinate to end the screenshot clip at (pixels from top)"),
@@ -179,6 +180,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       ),
       outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
       useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+      ...browserStackFields,
       ...useSchemaField,
     },
     wrap(async (params) => elementScreenshotTool(resolveParams(params)) as any),

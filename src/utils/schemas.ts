@@ -115,6 +115,32 @@ export const useSchemaField = {
     ),
 };
 
+// BrowserStack targeting fields, shared across every tool that exposes
+// `useBrowserStack`. They select which BrowserStack platform the remote browser
+// runs on. Only meaningful when `useBrowserStack: true` on an ephemeral call
+// (no session_id); ignored for local browsers and for existing sessions.
+// Desktop default (no device) is Windows 11.
+export const browserStackFields = {
+  browserStackOs: z
+    .string()
+    .optional()
+    .describe(
+      'BrowserStack desktop OS when useBrowserStack is true and no browserStackDevice is set (e.g. "Windows", "OS X"). Default: "Windows". Ignored for local browsers and when targeting a real device. NOTE: even "OS X" runs Playwright-WebKit on a Mac host, NOT Apple Safari — for real Safari use browserStackDevice.',
+    ),
+  browserStackOsVersion: z
+    .string()
+    .optional()
+    .describe(
+      'BrowserStack OS/device version when useBrowserStack is true. Desktop: "11" (Windows) or "Sequoia"/"Sonoma"/"Ventura" (OS X). Real device: the iOS version, e.g. "17". Default desktop: "11". Ignored for local browsers.',
+    ),
+  browserStackDevice: z
+    .string()
+    .optional()
+    .describe(
+      'Target a REAL BrowserStack mobile device by name (e.g. "iPhone 15 Pro Max", "iPhone 14"). Requires useBrowserStack:true. When set, the session runs on a real device — real iOS Safari — and browserStackOsVersion is the iOS version (default "17"). Real devices boot slowly (allow ~60-90s). NOTE: only real iOS (Apple Safari) is supported today; real Android is not yet wired.',
+    ),
+};
+
 export const sessionIdField = {
   session_id: z
     .string()

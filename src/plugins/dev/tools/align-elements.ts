@@ -5,7 +5,7 @@ import { PNG } from "pngjs";
 import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
@@ -14,7 +14,7 @@ import { findDiffClusters } from "../../../utils/diff-clusters.js";
 import { clusterShiftRadius, findBestShift, groupSimilarShifts, type BBox } from "../../../utils/diff-shift.js";
 import type { CompareMode } from "./visual-diff.js";
 
-export interface AlignElementsParams {
+export interface AlignElementsParams extends BrowserStackTarget {
   url: string;
   referenceImage: string;
   scope?: string;
@@ -126,6 +126,7 @@ export async function alignElementsTool(rawParams: AlignElementsParams) {
     browser: browser as BrowserName,
     viewport,
     useBrowserStack,
+    ...pickBrowserStack(params),
   });
 
   try {

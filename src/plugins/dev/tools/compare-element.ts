@@ -4,7 +4,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
@@ -14,7 +14,7 @@ import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import { cropPng } from "../../../utils/png-crop.js";
 import type { CompareMode } from "./visual-diff.js";
 
-export interface CompareElementParams {
+export interface CompareElementParams extends BrowserStackTarget {
   url: string;
   referenceImage: string;
   selector: string;
@@ -102,6 +102,7 @@ export async function compareElementTool(rawParams: CompareElementParams) {
     browser: browser as BrowserName,
     viewport,
     useBrowserStack,
+    ...pickBrowserStack(params),
   });
 
   try {

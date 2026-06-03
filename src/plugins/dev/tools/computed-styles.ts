@@ -1,11 +1,11 @@
 import type { BrowserContext, Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { sessionManager } from "../../../core/sessions.js";
 
-export interface ComputedStylesParams {
+export interface ComputedStylesParams extends BrowserStackTarget {
   url?: string;
   session_id?: string;
   tab_id?: string;
@@ -77,6 +77,7 @@ export async function computedStylesTool(params: ComputedStylesParams) {
       browser: "chromium" as BrowserName,
       viewport,
       useBrowserStack,
+      ...pickBrowserStack(params),
     });
     page = session.page;
     context = session.context;

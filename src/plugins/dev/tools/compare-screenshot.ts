@@ -4,7 +4,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { createPreviewBuffer } from "../../../utils/resize.js";
@@ -13,7 +13,7 @@ import { findDiffClusters, formatClusters, formatClustersCompact } from "../../.
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import type { CompareMode } from "./visual-diff.js";
 
-export interface CompareScreenshotParams {
+export interface CompareScreenshotParams extends BrowserStackTarget {
   url: string;
   referenceImage: string;
   browser?: string;
@@ -86,6 +86,7 @@ export async function compareScreenshotTool(rawParams: CompareScreenshotParams) 
     browser: browser as BrowserName,
     viewport: { width: viewportWidth, height: viewportHeight },
     useBrowserStack,
+    ...pickBrowserStack(params),
   });
 
   try {

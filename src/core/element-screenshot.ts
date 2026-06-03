@@ -1,11 +1,11 @@
 import path from "node:path";
 import type { AnyAction } from "../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../utils/browser.js";
 import { navigateTo } from "../utils/navigate.js";
 import { saveFile, generateFilename } from "../utils/file.js";
 
-export interface ElementScreenshotParams {
+export interface ElementScreenshotParams extends BrowserStackTarget {
   url: string;
   selector: string;
   browser?: string;
@@ -30,6 +30,7 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
     browser: browser as BrowserName,
     viewport,
     useBrowserStack,
+    ...pickBrowserStack(params),
   });
 
   try {

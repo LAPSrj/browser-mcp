@@ -1,11 +1,11 @@
 import type { BrowserContext, Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { sessionManager } from "../../../core/sessions.js";
 
-export interface PerformanceMetricsParams {
+export interface PerformanceMetricsParams extends BrowserStackTarget {
   url?: string;
   session_id?: string;
   tab_id?: string;
@@ -46,6 +46,7 @@ export async function performanceMetricsTool(params: PerformanceMetricsParams) {
       browser: browser as BrowserName,
       viewport: { width: 1280, height: 720 },
       useBrowserStack,
+      ...pickBrowserStack(params),
     });
     page = session.page;
     context = session.context;

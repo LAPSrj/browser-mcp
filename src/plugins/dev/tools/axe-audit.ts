@@ -2,7 +2,7 @@ import type { Page } from "playwright";
 import { AxeBuilder } from "@axe-core/playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { sessionManager } from "../../../core/sessions.js";
 
@@ -18,7 +18,7 @@ export type AxeTag =
   | "section508"
   | "experimental";
 
-export interface AxeAuditParams {
+export interface AxeAuditParams extends BrowserStackTarget {
   url?: string;
   session_id?: string;
   tab_id?: string;
@@ -73,6 +73,7 @@ export async function axeAuditTool(params: AxeAuditParams) {
       browser: browser as BrowserName,
       viewport,
       useBrowserStack,
+      ...pickBrowserStack(params),
     });
     page = session.page;
     cleanup = () => closeSession(session);

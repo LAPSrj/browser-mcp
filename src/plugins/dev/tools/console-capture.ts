@@ -2,12 +2,12 @@ import path from "node:path";
 import type { Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
-import { launchSession, closeSession, type BrowserName } from "../../../utils/browser.js";
+import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { sessionManager } from "../../../core/sessions.js";
 
-export interface ConsoleCaptureParams {
+export interface ConsoleCaptureParams extends BrowserStackTarget {
   url?: string;
   session_id?: string;
   tab_id?: string;
@@ -56,6 +56,7 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
       browser: browser as BrowserName,
       viewport: { width: 1280, height: 720 },
       useBrowserStack,
+      ...pickBrowserStack(params),
     });
     page = session.page;
     cleanup = () => closeSession(session);
