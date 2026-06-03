@@ -85,7 +85,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -179,6 +179,30 @@ prompts may surface that aren't documented yet.
 **Limits.** Chromium-channel only (no Firefox / WebKit). Cannot combine
 with `record_video`.
 
+#### Sessions + BrowserStack
+
+`open_session({ useBrowserStack: true })` runs the persistent session on
+BrowserStack's cloud grid instead of a local browser — the `session_id` is
+reused across calls exactly like a local one. Add `browserStackDevice` (e.g.
+`"iPhone 15 Pro Max"`) to run on a **real iOS device (Apple Safari)**;
+otherwise it's a desktop OS host (`browserStackOs` / `browserStackOsVersion`).
+Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY`.
+
+- **Idle ceiling.** BrowserStack force-closes the remote session after 300s
+  (5 min) of inactivity — its server-side maximum. Keep the session active
+  (any tool call within ~5 min) or the next call surfaces a disconnect.
+- **No `record_video`.** Rejected — Playwright's video API needs a
+  locally-launched context, not a remote connect. BrowserStack records every
+  session server-side regardless; fetch the video from its dashboard / REST API.
+- **Mutually exclusive with `attach_cdp`.**
+- **Real-device uploads.** `upload_file` (setInputFiles) injects a file into an
+  `<input>` on a real device, but `click_to_upload` cannot — real iOS Safari
+  surfaces no file-chooser event to automation (the picker is native OS UI), so
+  it fast-fails with a clear message. To verify a genuine tap would land on the
+  upload control (the z-index / overlay class of bug), use the `dev` plugin's
+  `hit_test`; to actually pick a file through the native sheet, use BrowserStack
+  Live (manual).
+
 #### Safeguards
 
 - **Idle TTL** — default 5 min. Reset on every tool call.
@@ -196,7 +220,8 @@ probe. The session-bound variants require `session_id`.
 ### Interaction
 
 `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag`,
-`select_option`, `check`, `uncheck`, `upload_file`.
+`select_option`, `check`, `uncheck`, `upload_file`, `click_to_upload`,
+`drop_to_upload`.
 
 ```json
 { "tool": "click", "params": { "session_id": "...", "selector": "#submit", "button": "left" } }
@@ -204,6 +229,22 @@ probe. The session-bound variants require `session_id`.
 { "tool": "press_key", "params": { "session_id": "...", "key": "Control+A" } }
 { "tool": "scroll", "params": { "session_id": "...", "to": "bottom" } }
 ```
+
+**Three ways to upload**, pick by how the page is built:
+
+- `upload_file` — inject files straight into an `<input>` (Playwright
+  `setInputFiles`). Works everywhere, including real iOS devices, but never
+  clicks / triggers user activation.
+- `click_to_upload` — perform a genuine click on a trigger that opens the
+  browser's file chooser, then supply the files. For buttons/labels that open a
+  hidden or synthetic input. **Desktop only** — real iOS Safari surfaces no
+  chooser event, so it fast-fails there (use `upload_file`).
+- `drop_to_upload` — simulate a drag-and-drop onto a dropzone that has no usable
+  `<input>` (dropzone.js / react-dropzone). **Desktop pattern.**
+
+To check whether a genuine tap would actually reach the upload control (vs being
+covered by an overlay or a mispositioned input — the iOS picker-tap bug), use
+the `dev` plugin's `hit_test`.
 
 ### Waits
 
@@ -270,6 +311,7 @@ Tools that only DevTools can deliver — stuff a real user can't see.
 | `align_elements` | Find the (dx, dy) translation that aligns each element to a reference image. Pixel-grounded — bypasses DOM-coordinate trust. |
 | `schema_extract` | Parse JSON-LD structured data blocks; flag common issues. |
 | `page_metadata` | Title, OG tags, meta tags, favicon, lang. |
+| `hit_test` | Geometric reachability probe: at a point (selector center or x/y) report the z-ordered hit stack (`elementFromPoint` / `elementsFromPoint`) and whether a genuine tap would land on / forward to a file input. Detects overlays / mispositioned inputs (the iOS file-picker tap bug). Works on real iOS. |
 | `trace_start` / `trace_stop` | Playwright tracing bound to a session. |
 
 Dev tools are registered without the `dev_` prefix so agents still call
@@ -338,7 +380,10 @@ Plugins can register custom action types (e.g. `gutenberg_insert`,
 Any tool that opens an ephemeral context (no `session_id`) — `screenshot`,
 `element_screenshot`, and the `dev` / `design-compare` plugin tools — accepts
 `useBrowserStack: true` to run the call on BrowserStack instead of a local
-browser. Set `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` first.
+browser. `open_session` accepts the same flags to open a **persistent**
+BrowserStack session whose `session_id` is reused across calls (see
+[§ Sessions + BrowserStack](#sessions--browserstack)). Set
+`BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` first.
 
 Per-call targeting:
 
@@ -366,6 +411,10 @@ Notes:
   automatically with a longer timeout).
 - The BrowserStack-side idle timeout is set to its 5-minute max so sessions
   survive gaps between calls.
+- **Video:** Playwright's `record_video` does not work over the BrowserStack
+  connection (no local webm is produced). BrowserStack records every session
+  server-side automatically — retrieve the video from its dashboard or REST API
+  (`builds.json` → build sessions → `video_url`).
 - **Real Android is not supported yet.** The device allocates, but BrowserStack
   serves a Playwright connection that neither `connect()` nor `connectOverCDP()`
   can consume (reproduced with BrowserStack's own SDK); tracked as a
