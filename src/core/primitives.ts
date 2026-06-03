@@ -591,23 +591,94 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...targetField,
       ...useSchemaField,
     },
+    handler: async (p) => {
+      // Fast-fail on real BrowserStack devices: real iOS Safari never surfaces
+      // a file-chooser event to automation (the iOS picker is native OS UI),
+      // so this would just time out after `timeout` ms. Tell the caller now.
+      if (p.session_id && sessionManager.isBrowserStackRealDevice(p.session_id)) {
+        return err(
+          "click_to_upload can't open a file chooser on a real BrowserStack device (real iOS Safari surfaces no file-chooser event to automation — the picker is native OS UI). " +
+            "Use upload_file to inject the file directly, hit_test to verify the control is tappable, or perform a manual tap in BrowserStack Live.",
+        );
+      }
+      return withPage(p, async (page) => {
+        const timeout = p.timeout ?? 30000;
+        // Arm the chooser listener and click in one shot — the Playwright-
+        // recommended idiom that avoids the race where the chooser opens
+        // before the listener is attached.
+        const [chooser] = await Promise.all([
+          page.waitForEvent("filechooser", { timeout }),
+          resolveLocator(page, p.trigger_selector).click({ timeout }),
+        ]);
+        await chooser.setFiles(p.paths, { timeout });
+        return ok(
+          `Opened file chooser via ${p.trigger_selector} and set ${p.paths.length} file(s)` +
+            (chooser.isMultiple() ? " (chooser accepts multiple)" : ""),
+        );
+      });
+    },
+  },
+
+  drop_to_upload: {
+    description:
+      "Upload file(s) by simulating a drag-and-drop onto a dropzone — for uploaders that accept dropped files and have no usable <input> to target (dropzone.js, react-dropzone, and similar). " +
+      "Reads each file locally, constructs real File objects inside the page, attaches them to a DataTransfer, and dispatches the dragenter→dragover→drop sequence on `target_selector`. " +
+      "Use this when upload_file has no input to set and click_to_upload has no button that opens a chooser. " +
+      "Desktop pattern (chromium/firefox/webkit) — drag-and-drop file upload is not how mobile Safari/Chrome upload; on real mobile devices use upload_file.",
+    schema: {
+      target_selector: z.string().describe("Selector for the dropzone element that accepts dropped files."),
+      paths: z.array(z.string()).describe("Absolute paths to the files to drop."),
+      ...timeoutField,
+      ...targetField,
+      ...useSchemaField,
+    },
     handler: async (p) => withPage(p, async (page) => {
       const timeout = p.timeout ?? 30000;
-      // Arm the chooser listener and click in one shot — the Playwright-
-      // recommended idiom that avoids the race where the chooser opens before
-      // the listener is attached.
-      const [chooser] = await Promise.all([
-        page.waitForEvent("filechooser", { timeout }),
-        resolveLocator(page, p.trigger_selector).click({ timeout }),
-      ]);
-      await chooser.setFiles(p.paths, { timeout });
-      return ok(
-        `Opened file chooser via ${p.trigger_selector} and set ${p.paths.length} file(s)` +
-          (chooser.isMultiple() ? " (chooser accepts multiple)" : ""),
+      // Read files host-side and pass name+mime+base64 into the page, where we
+      // reconstruct File objects (the page can't read the local filesystem).
+      const files = await Promise.all(
+        (p.paths as string[]).map(async (pth) => ({
+          name: path.basename(pth),
+          mime: guessMimeType(pth),
+          b64: (await fs.readFile(pth)).toString("base64"),
+        })),
       );
+      await resolveLocator(page, p.target_selector).evaluate(
+        (el: Element, payload: Array<{ name: string; mime: string; b64: string }>) => {
+          const dt = new DataTransfer();
+          for (const f of payload) {
+            const bin = atob(f.b64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            dt.items.add(new File([arr], f.name, { type: f.mime }));
+          }
+          const opts = { bubbles: true, cancelable: true, composed: true, dataTransfer: dt } as DragEventInit;
+          el.dispatchEvent(new DragEvent("dragenter", opts));
+          el.dispatchEvent(new DragEvent("dragover", opts));
+          el.dispatchEvent(new DragEvent("drop", opts));
+        },
+        files,
+        { timeout },
+      );
+      return ok(`Dropped ${files.length} file(s) onto ${p.target_selector}`);
     }),
   },
 };
+
+// Minimal extension→MIME map for drop_to_upload. Dropzones usually only read
+// file.name/.size, but a correct type avoids accept-filter rejections.
+function guessMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, string> = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".svg": "image/svg+xml", ".pdf": "application/pdf",
+    ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+    ".zip": "application/zip", ".mp4": "video/mp4", ".webm": "video/webm",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
 
 // ---------------------------------------------------------------------------
 // Wait primitives

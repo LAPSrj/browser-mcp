@@ -24,6 +24,7 @@ import { evaluateScriptTool } from "./tools/evaluate-script.js";
 import { schemaExtractTool } from "./tools/schema-extract.js";
 import { listInteractiveElementsTool } from "./tools/list-interactive-elements.js";
 import { domQueryTool } from "./tools/dom-query.js";
+import { hitTestTool } from "./tools/hit-test.js";
 
 // Dev plugin: developer-inspection tools that a regular user can't perform
 // in a browser without DevTools. Enable via BROWSER_MCP_PLUGINS=dev.
@@ -508,6 +509,42 @@ const devPlugin: ScreenshotPlugin = {
         ...useSchemaField,
       },
       handler: async (params) => (await domQueryTool({
+        ...params,
+        url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
+      })) as any,
+    });
+
+    // ---------- hit_test ----------
+    ctx.registerTool({
+      name: "hit_test",
+      description:
+        "Geometric reachability probe: if a user tapped/clicked at a point, what element actually receives it? " +
+        "Computes a viewport point (an element's center via `selector`, or explicit `x`/`y`) and reads " +
+        "document.elementFromPoint + elementsFromPoint (the full z-ordered stack) there. " +
+        "Primary use: the iOS-Safari file-picker class of bug — a transparent <input type=file> sitting BELOW its trigger button (lower z-index) or mispositioned, so a genuine tap never lands on it and the picker never opens. " +
+        "Pass `selector` (the upload control) + `expect_selector` (e.g. `input[type=file]`): the result's `verdict.tapWouldHitFileInput` tells you whether a real tap there would reach the input. " +
+        "This is the ONE part of that bug verifiable on a REAL iOS device — it's pure DOM hit-testing, needs no file chooser, so it works where click_to_upload cannot. " +
+        "Also general-purpose: detect overlays covering a control (`verdict.coveredBy`), confirm a button is actually clickable, etc. Session-aware: pass `session_id` to test the session's current page (e.g. a persistent real-iOS BrowserStack session) without re-navigating." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
+        selector: z.string().optional().describe("Element whose CENTER is tested — and the intended hit target when expect_selector is omitted. Provide this or both x/y."),
+        x: z.number().optional().describe("Explicit viewport X coordinate (alternative to selector's center). Requires y."),
+        y: z.number().optional().describe("Explicit viewport Y coordinate (alternative to selector's center). Requires x."),
+        expect_selector: z.string().optional().describe("Selector the tap is expected to resolve to (e.g. `input[type=file]`). Defaults to `selector`. Drives verdict.tapWouldHitFileInput / reachesExpected."),
+        stack_depth: z.number().optional().describe("Max elements to report from the z-ordered hit stack (default: 8)"),
+        actions: z.array(actionSchema).optional().describe("Actions to run before probing (e.g. open the upload widget). Selector-based actions support optional and timeout params"),
+        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle when navigating (default: true)"),
+        delay: z.number().optional().describe("Extra delay in ms before probing (default: 0)"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack for ephemeral calls (default: false)"),
+        ...browserStackFields,
+        ...useSchemaField,
+      },
+      handler: async (params) => (await hitTestTool({
         ...params,
         url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
       })) as any,

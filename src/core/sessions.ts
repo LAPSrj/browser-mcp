@@ -170,6 +170,8 @@ interface Session {
   closing: boolean;
   /** True for any attach_cdp session (auto_launch or explicit endpoint). Skips browser.close() in close path — that would kill the attached browser process. */
   isAttachCdp: boolean;
+  /** True when this session runs on a real BrowserStack device (useBrowserStack + browserStackDevice). Real iOS Safari does not surface a file-chooser event to automation, so click_to_upload fast-fails on these. */
+  isBrowserStackRealDevice: boolean;
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
   /** Launch-time options captured for pause_session — replayed verbatim into resume_session's open(). */
@@ -434,6 +436,7 @@ class SessionManager {
       tracing: false,
       closing: false,
       isAttachCdp: !!opts.attach_cdp,
+      isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
       pauseFields: {
         viewport,
@@ -988,6 +991,11 @@ class SessionManager {
 
   getContext(session_id: string): BrowserContext {
     return this.get(session_id).context;
+  }
+
+  /** True when the session runs on a real BrowserStack device (real iOS Safari). */
+  isBrowserStackRealDevice(session_id: string): boolean {
+    return this.get(session_id).isBrowserStackRealDevice;
   }
 
   isTracing(session_id: string): boolean {
