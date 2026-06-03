@@ -21,7 +21,8 @@ Features:
 - **Plugin system.** Dev-only inspection, WordPress auth, and Gutenberg
   workflows live in separate plugins you opt into via an env var.
 - **Multi-browser.** Chromium, Firefox, and WebKit for ephemeral calls and
-  persistent sessions alike. Optional BrowserStack for remote browsers.
+  persistent sessions alike. Optional BrowserStack for remote desktop browsers
+  (any OS) and real iOS Safari devices.
 
 ## Install
 
@@ -332,6 +333,44 @@ return a summary alongside the tool's main result.
 Plugins can register custom action types (e.g. `gutenberg_insert`,
 `gutenberg_set_attribute`).
 
+## BrowserStack
+
+Any tool that opens an ephemeral context (no `session_id`) — `screenshot`,
+`element_screenshot`, and the `dev` / `design-compare` plugin tools — accepts
+`useBrowserStack: true` to run the call on BrowserStack instead of a local
+browser. Set `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` first.
+
+Per-call targeting:
+
+| Param | Applies to | Notes |
+|---|---|---|
+| `browserStackOs` | desktop | OS host, e.g. `"Windows"`, `"OS X"`. Default `"Windows"`. Ignored when `browserStackDevice` is set. |
+| `browserStackOsVersion` | desktop + device | `"11"` / `"Sequoia"` for desktop, or the iOS version (e.g. `"17"`) for a device. Desktop default `"11"`. |
+| `browserStackDevice` | real device | Real device name, e.g. `"iPhone 15 Pro Max"`. Routes the call to a **real iOS device running Apple Safari**. |
+
+```bash
+# Desktop WebKit on macOS Sonoma (NOT Safari — Playwright-WebKit on a Mac host)
+screenshot --url=https://example.com --useBrowserStack=true \
+  --browser=webkit --browserStackOs="OS X" --browserStackOsVersion=Sonoma
+
+# Real iOS Safari on a physical iPhone
+screenshot --url=https://example.com --useBrowserStack=true \
+  --browserStackDevice="iPhone 15 Pro Max" --browserStackOsVersion=17
+```
+
+Notes:
+- Desktop `browser: webkit` maps to BrowserStack's `playwright-webkit` — that is
+  WebKit on a host OS, **not** Apple Safari. Real Safari requires
+  `browserStackDevice` (a real iOS device).
+- Real devices boot slowly; the first navigation can take 60–90s (handled
+  automatically with a longer timeout).
+- The BrowserStack-side idle timeout is set to its 5-minute max so sessions
+  survive gaps between calls.
+- **Real Android is not supported yet.** The device allocates, but BrowserStack
+  serves a Playwright connection that neither `connect()` nor `connectOverCDP()`
+  can consume (reproduced with BrowserStack's own SDK); tracked as a
+  BrowserStack-side issue. Use a desktop OS or a real iOS device.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -351,7 +390,7 @@ Plugins can register custom action types (e.g. `gutenberg_insert`,
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
 | `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. |
-| `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. |
+| `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. See [BrowserStack](#browserstack). |
 
 ## Writing a plugin
 

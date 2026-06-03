@@ -285,6 +285,23 @@ Three primitives layer on top of the shared-profile architecture:
 
 > **`attach_cdp` mode on `open_session`** (chromium-only). `attach_cdp: true` auto-launches an isolated real Edge instance on a session-scoped temp profile and connects over CDP; `attach_cdp: "http://host:port"` attaches to a user-managed browser already running with CDP exposed. Use when the real browser engine, real cookies, or installed extensions/policies matter — not when Playwright's bundled Chromium suffices. Cannot combine with `record_video`. Per-call knobs: `executable_path` (overrides `BROWSER_MCP_EDGE_EXE`), `user_data_dir` (reuse a persistent profile dir), `auto_launch` (explicit override), `headless` (default true; pass false for visible window), `restore_previous_tabs` (default false — closes any session-restore tabs Chromium reopens on attach; pass true to opt into Chromium's native restore behavior). **Per-product validation status (Windows/WSL):** Edge ✓ (validated 2026-05-07 + lifecycle fix 2026-05-12), Chrome ✓ (validated 2026-05-12). Brave / Vivaldi / Opera are code-supported but not live-validated — the same spawn + relay + teardown path executes, but per-product FRE dialogs or default-browser prompts may surface that we haven't documented. **Footgun:** never OS-kill the attached browser (Task Manager, `taskkill /IM msedge.exe`) — Edge shares its process group with the user's real Edge, so OS-kill takes both down. `close_session` is the only safe teardown; it kills the spawned browser tree via the root PID captured at spawn (taskkill /F /T). On WSL, a transparent Windows-side PowerShell TCP relay bridges WSL2 NAT to Windows-host loopback CDP (relay torn down with the browser; `BROWSER_MCP_CDP_DEBUG=1` logs to `%TEMP%\browser-mcp\<session>\relay.log`).
 
+### BrowserStack contract {#browserstack-contract}
+
+`useBrowserStack: true` routes an **ephemeral** call (no `session_id`) to BrowserStack instead of a local browser. It is per-call, accepted by `screenshot`, `element_screenshot`, and every `dev` / `design-compare` tool — **not** by `open_session` (no persistent BrowserStack sessions). Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` in the server env; a fresh server process must be running for the env to be present.
+
+Per-call targeting:
+- `browserStackOs` — desktop OS host, e.g. `"Windows"`, `"OS X"`. Default `"Windows"`. Ignored when `browserStackDevice` is set.
+- `browserStackOsVersion` — `"11"` / `"Sequoia"` for desktop; the iOS version (e.g. `"17"`) for a device. Desktop default `"11"`.
+- `browserStackDevice` — real device name, e.g. `"iPhone 15 Pro Max"`. Routes to a **real iOS device running Apple Safari**.
+
+Engine mapping: the local `browser` enum maps to BrowserStack's identifiers — `chromium`→`playwright-chromium`, `firefox`→`playwright-firefox`, `webkit`→`playwright-webkit`, `chrome`/`edge` pass through. **`webkit` on a desktop host is Playwright-WebKit on that OS, NOT Apple Safari** — real Safari requires `browserStackDevice` (a real iOS device).
+
+> **Hazard — UA cannot prove the engine.** Playwright-WebKit on a Mac host reports a Safari-flavoured UA (`Version/x Safari/605.1.15`, vendor `Apple Computer, Inc.`). To distinguish a real iOS device from desktop WebKit, check `navigator.platform === "iPhone"`, `navigator.maxTouchPoints > 0`, and `navigator.standalone`, not the UA string.
+
+Behavior notes: real devices boot slowly (first navigation can take 60–90s — handled with a longer connect + nav timeout automatically); the BrowserStack-side `idleTimeout` is set to its 300s max so a session survives gaps between calls.
+
+> **Hazard — real Android is NOT supported.** A real Android device (`browserStackDevice` of a non-iOS device) allocates on BrowserStack but the Playwright endpoint it serves cannot be consumed: `connect()` → "Malformed endpoint", `connectOverCDP()` → "Browser.getVersion: undefined". This reproduces with BrowserStack's OWN `browserstack-node-sdk`, so it is a BrowserStack-side issue, not a browser-mcp bug (real iOS and desktop both work fine on the same path). Use a desktop OS or a real iOS device; do not attempt real Android until BrowserStack resolves it.
+
 ## Surfaces {#surfaces}
 
 Surface granularity is **per contract**, not per tool. Tools that share a contract (e.g. all four compare tools share the mask contract) point to one section. Tools without a contract entry are routine — see § Command index.
