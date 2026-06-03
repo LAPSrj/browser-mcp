@@ -48,6 +48,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `dom_query` | Batched DOM read by selector with typed schema (text/rect/computed/attributes per query) | preferred over raw `evaluate_script` for element discovery |
 | `accessibility_snapshot` | a11y tree + 6 hand-rolled rule asserts | (surface) accessibility_snapshot — NOT a full WCAG audit; also the cheapest discovery tool for clickables-by-role+name |
 | `list_interactive_elements` | Every clickable / typable on the page with role + name + rect + click-ready `selector_hint` | preferred entry point for "what can I click here?" — bundled discovery, one call |
+| `hit_test` | Geometric reachability at a point (selector center or x/y): z-ordered hit stack + whether a real tap would land on / forward to a file input | detects overlays / mispositioned inputs (iOS file-picker tap bug); the one such check that works on real iOS |
 | `axe_audit` | Full axe-core WCAG audit (violations + passes + incomplete) | (surface) axe_audit; session-aware |
 | `network_log` | HAR-style network requests over a script run | |
 | `page_metadata` | Title, URL, meta tags | |
@@ -101,7 +102,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `open_tab`, `switch_tab`, `list_tabs`, `close_tab` | tab control inside a session |
 | `navigate`, `go_back`, `go_forward`, `reload` | URL navigation |
 | `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input |
-| `select_option`, `check`, `uncheck`, `upload_file` | form control |
+| `select_option`, `check`, `uncheck`, `upload_file`, `click_to_upload`, `drop_to_upload` | form control (upload: `upload_file` injects into an `<input>`; `click_to_upload` clicks → file chooser, desktop only; `drop_to_upload` drag-drops onto a dropzone, desktop) |
 | `wait`, `wait_for_selector`, `wait_for_url`, `wait_for_load_state` | sync |
 | `get_text`, `get_attribute`, `get_html`, `get_url` | read |
 | `get_cookies`, `set_cookies`, `clear_cookies` | cookies |
@@ -218,13 +219,13 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 ### Session contract {#session-contract}
 
-- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir` for non-default browser modes (see hazard below for `attach_cdp`).
+- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir` for non-default browser modes (see hazard below for `attach_cdp`); `useBrowserStack` + `browserStackOs` / `browserStackOsVersion` / `browserStackDevice` for a persistent BrowserStack session (see BrowserStack contract).
 - **Session-aware surfaces** accept optional `session_id` + `tab_id`. Without `session_id`, those tools spin an ephemeral context per call.
 - `close_session({ session_id })` releases the context; `list_sessions()` enumerates active ones.
 
 **Which surfaces accept `session_id`:**
 - **Core primitives** (input/read/cookies/storage/screenshot/wait/navigate, etc.) — all session-aware via the shared `targetField` fragment.
-- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`, `accessibility_snapshot`, `computed_styles`, `console_capture`, `dom_snapshot`, `list_interactive_elements`, `network_log`, `page_metadata`, `performance_metrics`, `schema_extract`. Compare/align/visual-diff family remain ephemeral-only (single-screenshot tools — session reuse doesn't unlock value).
+- **`dev` plugin:** `dom_query`, `evaluate_script`, `axe_audit`, `trace_start`, `trace_stop`, `accessibility_snapshot`, `computed_styles`, `console_capture`, `dom_snapshot`, `list_interactive_elements`, `hit_test`, `network_log`, `page_metadata`, `performance_metrics`, `schema_extract`. Compare/align/visual-diff family remain ephemeral-only (single-screenshot tools — session reuse doesn't unlock value).
 - **`wp-gutenberg` plugin:** all post-editing tools accept `session_id` (routes through `resolveGutenbergSession`).
 - **`design-compare` plugin:** ephemeral-only.
 
@@ -287,7 +288,12 @@ Three primitives layer on top of the shared-profile architecture:
 
 ### BrowserStack contract {#browserstack-contract}
 
-`useBrowserStack: true` routes an **ephemeral** call (no `session_id`) to BrowserStack instead of a local browser. It is per-call, accepted by `screenshot`, `element_screenshot`, and every `dev` / `design-compare` tool — **not** by `open_session` (no persistent BrowserStack sessions). Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` in the server env; a fresh server process must be running for the env to be present.
+`useBrowserStack: true` routes a call to BrowserStack instead of a local browser. On an **ephemeral** call (no `session_id`) it is per-call, accepted by `screenshot`, `element_screenshot`, and every `dev` / `design-compare` tool. `open_session` also accepts it to open a **persistent** BrowserStack session whose `session_id` is reused across calls exactly like a local one (with `browserStackDevice` → a real iOS device). Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` in the server env; a fresh server process must be running for the env to be present.
+
+Persistent BrowserStack sessions (`open_session({ useBrowserStack: true })`):
+- **Idle ceiling.** BrowserStack force-closes the remote session after 300s of inactivity (its server-side max). Keep it active (a tool call within ~5 min) or the next call surfaces a disconnect.
+- **No `record_video`** (rejected — Playwright's video API needs a locally-launched context, not a remote connect). BrowserStack records every session server-side anyway; fetch the video via its dashboard / REST API (`builds.json` → build sessions → `video_url`).
+- **Mutually exclusive with `attach_cdp`.**
 
 Per-call targeting:
 - `browserStackOs` — desktop OS host, e.g. `"Windows"`, `"OS X"`. Default `"Windows"`. Ignored when `browserStackDevice` is set.
@@ -301,6 +307,10 @@ Engine mapping: the local `browser` enum maps to BrowserStack's identifiers — 
 Behavior notes: real devices boot slowly (first navigation can take 60–90s — handled with a longer connect + nav timeout automatically); the BrowserStack-side `idleTimeout` is set to its 300s max so a session survives gaps between calls.
 
 > **Hazard — real Android is NOT supported.** A real Android device (`browserStackDevice` of a non-iOS device) allocates on BrowserStack but the Playwright endpoint it serves cannot be consumed: `connect()` → "Malformed endpoint", `connectOverCDP()` → "Browser.getVersion: undefined". This reproduces with BrowserStack's OWN `browserstack-node-sdk`, so it is a BrowserStack-side issue, not a browser-mcp bug (real iOS and desktop both work fine on the same path). Use a desktop OS or a real iOS device; do not attempt real Android until BrowserStack resolves it.
+
+> **Hazard — file uploads on a real iOS device.** `upload_file` (Playwright `setInputFiles`) injects a file into an `<input>` and works on a real device, but it bypasses the tap / user activation entirely. `click_to_upload` does NOT work on real iOS — Apple Safari surfaces no file-chooser event to automation (the picker is a native OS action sheet), so it fast-fails with a clear message. To verify a genuine tap would land on the upload control (the z-index / overlay / mispositioned-input class of bug), use `hit_test` (`verdict.tapWouldHitFileInput`). To actually select a file through the native sheet, use BrowserStack Live (manual) — it is not automatable via this stack.
+
+> **Hazard — `page.evaluate` on a real device.** BrowserStack real devices run a Selenium/WebDriver bridge, not true Playwright protocol, so `page.evaluate` marshalling differs from local: a **named** function receives no argument (use an arrow), an **object** arg arrives mangled (pass a JSON string, parse in-page), and a **non-string** return mangles (return a JSON string, parse host-side). `hit_test` is built this way and works on real iOS; other `dev` tools that evaluate a named function with an object arg + object return (`dom_query`, `dom_snapshot`, `accessibility_snapshot`, `list_interactive_elements`, `schema_extract`) may return empty/garbled data on real devices — prefer them on desktop/local until hardened.
 
 ## Surfaces {#surfaces}
 
