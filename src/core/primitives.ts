@@ -574,6 +574,39 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       return ok(`Uploaded ${p.paths.length} file(s) to ${p.selector}`);
     }),
   },
+
+  click_to_upload: {
+    description:
+      "Upload file(s) the way a human does: perform a GENUINE click that opens the browser's native file chooser, then hand the files to that chooser — instead of injecting them straight into an <input> like upload_file. " +
+      "Use this when the page wires uploads through a button or label that programmatically opens the picker (a hidden or synthetic <input type=file>, e.g. plupload/dropzone widgets), or when the site only accepts the user-activated click path. " +
+      "Clicks `trigger_selector`, waits for the file-chooser event, and sets `paths` on it. " +
+      "Unlike upload_file (Playwright setInputFiles, which never clicks and never triggers user activation), this exercises the real click→chooser flow. " +
+      "PLATFORM: works on desktop browsers (chromium/firefox/webkit). Does NOT work on real iOS Safari via BrowserStack — that platform does not surface a file-chooser event to automation (the iOS picker is native OS UI the bridge can't intercept); the click resolves but no chooser arrives. On real iOS use upload_file to inject the file, or a human tap in BrowserStack Live.",
+    schema: {
+      trigger_selector: z.string().describe(
+        "Selector for the element to CLICK to open the file chooser — usually the visible \"Upload\"/\"Choose files\" button or label, not necessarily the <input> itself.",
+      ),
+      paths: z.array(z.string()).describe("Absolute paths to the files to set on the chooser."),
+      ...timeoutField,
+      ...targetField,
+      ...useSchemaField,
+    },
+    handler: async (p) => withPage(p, async (page) => {
+      const timeout = p.timeout ?? 30000;
+      // Arm the chooser listener and click in one shot — the Playwright-
+      // recommended idiom that avoids the race where the chooser opens before
+      // the listener is attached.
+      const [chooser] = await Promise.all([
+        page.waitForEvent("filechooser", { timeout }),
+        resolveLocator(page, p.trigger_selector).click({ timeout }),
+      ]);
+      await chooser.setFiles(p.paths, { timeout });
+      return ok(
+        `Opened file chooser via ${p.trigger_selector} and set ${p.paths.length} file(s)` +
+          (chooser.isMultiple() ? " (chooser accepts multiple)" : ""),
+      );
+    }),
+  },
 };
 
 // ---------------------------------------------------------------------------
