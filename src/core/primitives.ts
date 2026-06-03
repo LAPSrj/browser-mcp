@@ -180,6 +180,19 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
           "closes every restored tab on attach and keeps one clean page (about:blank when no `url` is " +
           "given). Pass `true` to opt into Chromium's default restore-tabs behavior. attach_cdp only.",
       ),
+      useBrowserStack: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "Run this persistent session on BrowserStack's cloud grid instead of a locally-launched browser. " +
+          "The returned session_id is reusable across calls exactly like a local one. Set browserStackDevice " +
+          "to run on a REAL mobile device (real iOS Safari). Mutually exclusive with attach_cdp; cannot record " +
+          "video. CEILING: BrowserStack force-closes the remote session after 300s (5 min) of inactivity (its " +
+          "max server-side idle timeout) — keep the session active with a tool call within ~5 min or it is torn " +
+          "down BrowserStack-side and the next call surfaces a disconnect. Requires BROWSERSTACK_USERNAME / " +
+          "BROWSERSTACK_ACCESS_KEY env vars.",
+      ),
+      ...browserStackFields,
     },
     handler: async (p) => json(await sessionManager.open(p)),
   },

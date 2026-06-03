@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
 import { getBrowserType, type BrowserName } from "../utils/browser.js";
+import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
 import { execFileSync } from "node:child_process";
@@ -67,6 +68,26 @@ export interface OpenSessionOptions {
    * when no `url` is given). attach_cdp only.
    */
   restore_previous_tabs?: boolean;
+  /**
+   * Run this session on BrowserStack's cloud grid instead of a locally-launched
+   * Playwright browser. The session is persistent and its session_id is reusable
+   * across calls exactly like a local one. Mutually exclusive with attach_cdp.
+   *
+   * CEILING: BrowserStack tears the remote session down after 300s (5 min) of
+   * inactivity — its server-side idle timeout, the maximum the platform allows
+   * (set in connectBrowserStack). A session left untouched past that is killed
+   * BrowserStack-side regardless of this session's idle_ttl_ms; the next tool
+   * call then surfaces a disconnect. Keep the session active (any tool call
+   * within ~5 min) to hold it open. record_video is not supported (Playwright's
+   * video API needs a locally-launched context, not a remote connect()).
+   */
+  useBrowserStack?: boolean;
+  /** BrowserStack desktop OS (e.g. "Windows", "OS X"). useBrowserStack only, no device. Default Windows 11. */
+  browserStackOs?: string;
+  /** BrowserStack OS/device version (desktop "11"/"Sequoia"…, or the iOS version e.g. "17" for a real device). useBrowserStack only. */
+  browserStackOsVersion?: string;
+  /** Real BrowserStack device name (e.g. "iPhone 15 Pro Max"). When set, the session runs on a real device — real iOS Safari. useBrowserStack only. */
+  browserStackDevice?: string;
 }
 
 export interface TabInfo {
@@ -205,9 +226,21 @@ class SessionManager {
       );
     }
 
+    if (opts.useBrowserStack && opts.attach_cdp) {
+      throw new Error(
+        "useBrowserStack and attach_cdp are mutually exclusive — BrowserStack runs a remote cloud browser, attach_cdp attaches to a local Chromium-channel browser. Pick one.",
+      );
+    }
+
     const browserName = opts.browser ?? "chromium";
     const outputDir = opts.output_dir ?? ".browser";
     const recordVideo = opts.record_video === true;
+
+    if (opts.useBrowserStack && recordVideo) {
+      throw new Error(
+        "record_video is not supported on BrowserStack sessions — Playwright's video API requires a locally-launched context, not a remote connect(). Use BrowserStack's own session video in its dashboard.",
+      );
+    }
     const id = randomUUID();
     const viewport = opts.viewport ?? DEFAULT_VIEWPORT;
 
@@ -268,6 +301,17 @@ class SessionManager {
         });
         browser = await chromium.connectOverCDP(attachCdp.endpoint);
       }
+    } else if (opts.useBrowserStack) {
+      // BrowserStack cloud grid. connectBrowserStack returns a connect()'d
+      // Browser (no BrowserServer). A device name routes to a real mobile
+      // device (real iOS Safari); otherwise a desktop OS host. The remote
+      // session ends when we browser.close() in the non-attach close path.
+      browser = await connectBrowserStack({
+        browser: browserName,
+        os: opts.browserStackOs,
+        osVersion: opts.browserStackOsVersion,
+        device: opts.browserStackDevice,
+      });
     } else {
       const bt = getBrowserType(browserName);
       const headless = opts.headless ?? true;
@@ -332,6 +376,19 @@ class SessionManager {
           }
         }
       }
+    } else if (opts.useBrowserStack) {
+      // BrowserStack: mirror the proven ephemeral path (utils/browser.ts).
+      // Pass ONLY viewport + storageState — deliberately NOT user_agent /
+      // locale / timezone, so a real device keeps its genuine platform UA
+      // (the whole point of a real-iOS session is the real iOS Safari UA).
+      const contextOpts: Record<string, unknown> = {};
+      if (viewport) contextOpts.viewport = viewport;
+      if (opts.storageState) contextOpts.storageState = opts.storageState;
+      context = await browser.newContext(contextOpts as any);
+      // Real devices boot slowly — first navigation can far exceed a local
+      // browser, so give the context a generous default (matches ephemeral).
+      context.setDefaultTimeout(opts.browserStackDevice ? 120000 : 30000);
+      page = await context.newPage();
     } else {
       const contextOpts: Record<string, unknown> = {
         viewport,
