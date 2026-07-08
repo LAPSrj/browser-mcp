@@ -22,7 +22,8 @@ Features:
   workflows live in separate plugins you opt into via an env var.
 - **Multi-browser.** Chromium, Firefox, and WebKit for ephemeral calls and
   persistent sessions alike. Optional BrowserStack for remote desktop browsers
-  (any OS) and real iOS Safari devices.
+  (any OS) and real iOS Safari devices, with Local tunneling to test
+  private / localhost URLs.
 
 ## Install
 
@@ -85,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -195,6 +196,14 @@ Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY`.
   locally-launched context, not a remote connect. BrowserStack records every
   session server-side regardless; fetch the video from its dashboard / REST API.
 - **Mutually exclusive with `attach_cdp`.**
+- **Local URLs (`browserStackLocal`).** `browserStackLocal: true` opens a
+  BrowserStack Local tunnel so the remote browser / device can reach private
+  URLs served from the machine running the MCP (localhost, a dev vhost, an
+  internal host). The tunnel is shared and ref-counted — it starts on the first
+  tunneled session and stops when the last one closes. Needs
+  `BROWSERSTACK_ACCESS_KEY`. See [§ BrowserStack](#browserstack) for the
+  host-resolution caveats (notably: `.localhost` is not tunnel-routable on real
+  iOS).
 - **Real-device uploads.** `upload_file` (setInputFiles) injects a file into an
   `<input>` on a real device, but `click_to_upload` cannot — real iOS Safari
   surfaces no file-chooser event to automation (the picker is native OS UI), so
@@ -392,6 +401,7 @@ Per-call targeting:
 | `browserStackOs` | desktop | OS host, e.g. `"Windows"`, `"OS X"`. Default `"Windows"`. Ignored when `browserStackDevice` is set. |
 | `browserStackOsVersion` | desktop + device | `"11"` / `"Sequoia"` for desktop, or the iOS version (e.g. `"17"`) for a device. Desktop default `"11"`. |
 | `browserStackDevice` | real device | Real device name, e.g. `"iPhone 15 Pro Max"`. Routes the call to a **real iOS device running Apple Safari**. |
+| `browserStackLocal` | any | `true` opens a BrowserStack Local tunnel so the session can reach private / localhost URLs served from the MCP host. Needs `BROWSERSTACK_ACCESS_KEY`. See [Local URLs](#local-urls-browserstack-local) below. |
 
 ```bash
 # Desktop WebKit on macOS Sonoma (NOT Safari — Playwright-WebKit on a Mac host)
@@ -420,6 +430,30 @@ Notes:
   can consume (reproduced with BrowserStack's own SDK); tracked as a
   BrowserStack-side issue. Use a desktop OS or a real iOS device.
 
+### Local URLs (BrowserStack Local)
+
+`browserStackLocal: true` starts a [BrowserStack Local](https://www.browserstack.com/local-testing)
+tunnel (via the `browserstack-local` daemon) so the remote browser / device can
+reach URLs served from the machine running the MCP — `localhost`, a dev vhost,
+an internal-only host. The tunnel is a shared, ref-counted singleton: it comes
+up on the first tunneled session and tears down when the last one closes. Only
+`BROWSERSTACK_ACCESS_KEY` is required.
+
+The URL you navigate to is not constrained by the MCP — you pass any host in
+`url` / `navigate`. Two things determine whether it actually resolves:
+
+- **The host must resolve from the MCP machine.** The tunnel daemon runs where
+  the MCP runs (e.g. inside WSL, not Windows), so the hostname has to resolve
+  there — add it to that box's `/etc/hosts` / resolver if it's a custom name.
+- **On real iOS, `.localhost` is not tunnel-routable.** Safari treats the
+  `.localhost` TLD as loopback (RFC 6761) and never sends it through the tunnel.
+  Use a public host that resolves to loopback instead — BrowserStack's own
+  `bs-local.com` (apex only, no subdomains), or a wildcard dev domain you
+  control (`*.dev.example.com → 127.0.0.1`), which also preserves per-subdomain
+  vhosts. Host-sensitive apps (e.g. WordPress, whose `siteurl`/`home` pin a
+  canonical host and would otherwise 301-redirect the device away) must be told
+  to accept the alternate `Host`.
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -439,7 +473,7 @@ Notes:
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
 | `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. |
-| `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. See [BrowserStack](#browserstack). |
+| `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. The access key also authenticates the `browserStackLocal` tunnel. See [BrowserStack](#browserstack). |
 
 ## Writing a plugin
 

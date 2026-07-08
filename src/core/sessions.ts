@@ -88,6 +88,14 @@ export interface OpenSessionOptions {
   browserStackOsVersion?: string;
   /** Real BrowserStack device name (e.g. "iPhone 15 Pro Max"). When set, the session runs on a real device — real iOS Safari. useBrowserStack only. */
   browserStackDevice?: string;
+  /**
+   * Route this BrowserStack session through a BrowserStack Local tunnel so the
+   * remote browser/device can reach localhost + private URLs served from this
+   * machine (e.g. http://clw.localhost/). useBrowserStack only. The tunnel is a
+   * shared, ref-counted daemon started on demand and stopped when the last
+   * tunneled session closes. Requires BROWSERSTACK_ACCESS_KEY.
+   */
+  browserStackLocal?: boolean;
 }
 
 export interface TabInfo {
@@ -313,6 +321,7 @@ class SessionManager {
         os: opts.browserStackOs,
         osVersion: opts.browserStackOsVersion,
         device: opts.browserStackDevice,
+        local: opts.browserStackLocal,
       });
     } else {
       const bt = getBrowserType(browserName);

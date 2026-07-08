@@ -89,6 +89,8 @@ export interface LaunchOptions {
   browserStackOsVersion?: string;
   /** Real BrowserStack device name (e.g. "iPhone 15 Pro Max"). When set, runs on a real device (real iOS Safari). */
   browserStackDevice?: string;
+  /** Route the BrowserStack session through a Local tunnel to reach localhost/private URLs served from this machine. */
+  browserStackLocal?: boolean;
   /** Playwright storageState to inject auth cookies/localStorage into the context. */
   storageState?: object;
   /** Session hooks to run after context creation (e.g. plugin auth). */
@@ -106,6 +108,7 @@ export interface BrowserStackTarget {
   browserStackOs?: string;
   browserStackOsVersion?: string;
   browserStackDevice?: string;
+  browserStackLocal?: boolean;
 }
 
 export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
@@ -113,6 +116,7 @@ export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
     browserStackOs: p.browserStackOs,
     browserStackOsVersion: p.browserStackOsVersion,
     browserStackDevice: p.browserStackDevice,
+    browserStackLocal: p.browserStackLocal,
   };
 }
 
@@ -147,7 +151,7 @@ interface LaunchResult {
 async function launchBrowserWithRetry(
   browserName: BrowserName,
   useBrowserStack: boolean,
-  browserStack?: { os?: string; osVersion?: string; device?: string },
+  browserStack?: { os?: string; osVersion?: string; device?: string; local?: boolean },
 ): Promise<LaunchResult> {
   let lastError: Error | undefined;
 
@@ -161,6 +165,7 @@ async function launchBrowserWithRetry(
           os: browserStack?.os,
           osVersion: browserStack?.osVersion,
           device: browserStack?.device,
+          local: browserStack?.local,
         };
         const browser = await connectBrowserStack(caps);
         return { browser };
@@ -207,6 +212,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       browserStackOs,
       browserStackOsVersion,
       browserStackDevice,
+      browserStackLocal,
       storageState,
       sessionHooks,
       toolName = "",
@@ -216,6 +222,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       os: browserStackOs,
       osVersion: browserStackOsVersion,
       device: browserStackDevice,
+      local: browserStackLocal,
     });
     server = launchResult.server;
     browser = launchResult.browser;

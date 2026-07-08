@@ -28,6 +28,7 @@ interface CommonTarget {
   browserStackOs?: string;
   browserStackOsVersion?: string;
   browserStackDevice?: string;
+  browserStackLocal?: boolean;
 }
 
 async function withPage<T>(

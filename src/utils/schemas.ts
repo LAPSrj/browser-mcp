@@ -139,6 +139,16 @@ export const browserStackFields = {
     .describe(
       'Target a REAL BrowserStack mobile device by name (e.g. "iPhone 15 Pro Max", "iPhone 14"). Requires useBrowserStack:true. When set, the session runs on a real device — real iOS Safari — and browserStackOsVersion is the iOS version (default "17"). Real devices boot slowly (allow ~60-90s). NOTE: only real iOS (Apple Safari) is supported today; real Android is not yet wired.',
     ),
+  browserStackLocal: z
+    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
+    .optional()
+    .describe(
+      'Route a BrowserStack session through a BrowserStack Local tunnel so the remote browser or REAL device can ' +
+        'reach localhost and private URLs served from THIS machine (e.g. "http://clw.localhost/"). Requires ' +
+        'useBrowserStack:true. The tunnel auto-starts on the first tunneled session and stops when the last closes. ' +
+        'Ignored when useBrowserStack is false. NOTE: the URL must resolve from the host running this MCP server — ' +
+        'on WSL that is the WSL box, not Windows.',
+    ),
 };
 
 export const sessionIdField = {

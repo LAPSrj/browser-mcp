@@ -294,17 +294,24 @@ Persistent BrowserStack sessions (`open_session({ useBrowserStack: true })`):
 - **Idle ceiling.** BrowserStack force-closes the remote session after 300s of inactivity (its server-side max). Keep it active (a tool call within ~5 min) or the next call surfaces a disconnect.
 - **No `record_video`** (rejected — Playwright's video API needs a locally-launched context, not a remote connect). BrowserStack records every session server-side anyway; fetch the video via its dashboard / REST API (`builds.json` → build sessions → `video_url`).
 - **Mutually exclusive with `attach_cdp`.**
+- **Local Testing** (`browserStackLocal: true`). Opens a BrowserStack Local tunnel (the `browserstack-local` daemon) so the remote browser / device can reach private URLs served from the machine running the MCP — `localhost`, a dev vhost, an internal host. The tunnel is a shared, ref-counted singleton: it starts on the first tunneled session and stops when the last one closes. Only `BROWSERSTACK_ACCESS_KEY` is needed (the tunnel authenticates with the access key). See **Local URLs** below for host-resolution caveats.
 
 Per-call targeting:
 - `browserStackOs` — desktop OS host, e.g. `"Windows"`, `"OS X"`. Default `"Windows"`. Ignored when `browserStackDevice` is set.
 - `browserStackOsVersion` — `"11"` / `"Sequoia"` for desktop; the iOS version (e.g. `"17"`) for a device. Desktop default `"11"`.
 - `browserStackDevice` — real device name, e.g. `"iPhone 15 Pro Max"`. Routes to a **real iOS device running Apple Safari**.
+- `browserStackLocal` — `true` routes the session through a BrowserStack Local tunnel so it can reach private / localhost URLs served from the MCP host (see **Local URLs** below). Needs `BROWSERSTACK_ACCESS_KEY`.
 
 Engine mapping: the local `browser` enum maps to BrowserStack's identifiers — `chromium`→`playwright-chromium`, `firefox`→`playwright-firefox`, `webkit`→`playwright-webkit`, `chrome`/`edge` pass through. **`webkit` on a desktop host is Playwright-WebKit on that OS, NOT Apple Safari** — real Safari requires `browserStackDevice` (a real iOS device).
 
 > **Hazard — UA cannot prove the engine.** Playwright-WebKit on a Mac host reports a Safari-flavoured UA (`Version/x Safari/605.1.15`, vendor `Apple Computer, Inc.`). To distinguish a real iOS device from desktop WebKit, check `navigator.platform === "iPhone"`, `navigator.maxTouchPoints > 0`, and `navigator.standalone`, not the UA string.
 
 Behavior notes: real devices boot slowly (first navigation can take 60–90s — handled with a longer connect + nav timeout automatically); the BrowserStack-side `idleTimeout` is set to its 300s max so a session survives gaps between calls.
+
+**Local URLs (`browserStackLocal`).** The MCP never constrains the host you navigate to — you pass any URL in `url` / `navigate`, so switching between `bs-local.com`, a wildcard dev domain, etc. is purely the URL string, no code or config change. What decides whether a private URL actually resolves is two things outside the tool:
+- **The host must resolve from the MCP machine.** The `browserstack-local` daemon runs where the MCP process runs (e.g. inside WSL, not the Windows host), and it resolves the hostname locally before connecting. A custom name must resolve there — add it to that box's `/etc/hosts` / resolver.
+- **On real iOS, the `.localhost` TLD is not tunnel-routable.** iOS Safari treats `*.localhost` as loopback (RFC 6761) and never sends it through the tunnel, so a real-device session cannot reach `foo.localhost`. Use a public host that resolves to loopback instead: BrowserStack's `bs-local.com` (apex only — no subdomains, no wildcard; `*.bs-local.com` does not resolve), or a wildcard dev domain you control (`*.dev.example.com → 127.0.0.1`, which preserves per-subdomain vhosts). Prefer a domain you own over third-party convenience domains (`lvh.me`, `nip.io`): whoever controls that domain controls its resolution, and with the tunnel that can silently redirect "local" traffic.
+- **Host-sensitive apps need to accept the alternate `Host`.** WordPress, for example, pins a canonical host in `siteurl`/`home` and will 301-redirect the device back to it (and emit absolute asset URLs against it) unless the install is told to adopt the incoming `Host` (dev-only `WP_HOME`/`WP_SITEURL` derived from `$_SERVER['HTTP_HOST']`).
 
 > **Hazard — real Android is NOT supported.** A real Android device (`browserStackDevice` of a non-iOS device) allocates on BrowserStack but the Playwright endpoint it serves cannot be consumed: `connect()` → "Malformed endpoint", `connectOverCDP()` → "Browser.getVersion: undefined". This reproduces with BrowserStack's OWN `browserstack-node-sdk`, so it is a BrowserStack-side issue, not a browser-mcp bug (real iOS and desktop both work fine on the same path). Use a desktop OS or a real iOS device; do not attempt real Android until BrowserStack resolves it.
 

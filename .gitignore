@@ -1,5 +1,8 @@
 node_modules/
 dist/
+
+# This project uses bun — bun.lock is the lockfile. Keep npm's out.
+package-lock.json
 .browser/
 *.tgz
 .env

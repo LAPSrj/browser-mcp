@@ -1,5 +1,6 @@
 import { chromium, type Browser } from "playwright";
 import { createRequire } from "node:module";
+import { browserStackLocalTunnel } from "./browserstack-local.js";
 
 export interface BrowserStackCaps {
   browser: string;
@@ -8,6 +9,11 @@ export interface BrowserStackCaps {
   /** Real BrowserStack device name (e.g. "iPhone 15 Pro Max"). When set, the
    *  session runs on a real device instead of a desktop OS host. */
   device?: string;
+  /** Route this session through a BrowserStack Local tunnel so the remote
+   *  browser/device can reach localhost + private URLs served from this
+   *  machine (e.g. http://clw.localhost/). Starts a shared tunnel daemon on
+   *  demand and injects the `browserstack.local` caps. */
+  local?: boolean;
 }
 
 /**
@@ -110,8 +116,31 @@ export async function connectBrowserStack(caps: BrowserStackCaps): Promise<Brows
     };
   }
 
+  // Local Testing: bring up the shared tunnel and tag this session's caps so
+  // BrowserStack routes it through the tunnel. The tunnel ref is released when
+  // this session's browser disconnects (close_session, idle-reap, or crash).
+  let localAcquired = false;
+  if (caps.local) {
+    const localIdentifier = await browserStackLocalTunnel.acquire();
+    localAcquired = true;
+    // String values throughout the caps payload, matching realMobile/idleTimeout.
+    capsPayload["browserstack.local"] = "true";
+    capsPayload["browserstack.localIdentifier"] = localIdentifier;
+  }
+
   const wsEndpoint = `wss://cdp.browserstack.com/playwright?caps=${encodeURIComponent(JSON.stringify(capsPayload))}`;
 
-  const browser = await chromium.connect(wsEndpoint, connectTimeout ? { timeout: connectTimeout } : undefined);
+  let browser: Browser;
+  try {
+    browser = await chromium.connect(wsEndpoint, connectTimeout ? { timeout: connectTimeout } : undefined);
+  } catch (err) {
+    if (localAcquired) await browserStackLocalTunnel.release().catch(() => {});
+    throw err;
+  }
+  if (localAcquired) {
+    // Fires on browser.close() (both close paths) and on remote-side teardown.
+    // `once` guards against a double release.
+    browser.once("disconnected", () => { void browserStackLocalTunnel.release().catch(() => {}); });
+  }
   return browser;
 }
