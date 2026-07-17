@@ -466,6 +466,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_LAUNCH_TIMEOUT` | `30000` | Per-launch timeout in ms. |
 | `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
 | `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |
+| `BROWSER_MCP_GPU` | `1` | Hardware-accelerated (GPU) rendering for local browsers. **Chromium**: routes ANGLE→D3D12 so WebGL/canvas rasterization runs on the GPU instead of CPU SwiftShader (much lower CPU on shader-heavy pages). **Firefox**: enables WebGL (off by default in Playwright's headless Firefox) — it is GPU-accelerated automatically. **WebKit**: already GPU by default, unchanged. Set `0` to fall back to CPU SwiftShader for Chromium and stock WebGL-off Firefox — do this if screenshot baselines must match a SwiftShader/CI environment (GPU and SwiftShader produce different pixels). |
 | `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
 | `BROWSER_MCP_PRODUCT` | `edge` (WSL/Win) / `chrome` (macOS/Linux) | Which Chromium-channel browser auto-launch uses. One of `edge`, `chrome`, `brave`, `vivaldi`, `opera`. Throws on typo. |
 | `BROWSER_MCP_EXECUTABLE_PATH` | per-product default | Path to the browser executable for `open_session({ attach_cdp: true })` auto-launch. Overrides the product's canonical default; required for Opera on Windows (no machine-wide path). Per-call `executable_path` overrides this. |

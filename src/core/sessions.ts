@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
-import { getBrowserType, type BrowserName } from "../utils/browser.js";
+import { getBrowserType, gpuLaunchOverrides, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
@@ -326,7 +326,8 @@ class SessionManager {
     } else {
       const bt = getBrowserType(browserName);
       const headless = opts.headless ?? true;
-      server = await bt.launchServer({ headless });
+      const gpu = gpuLaunchOverrides(browserName);
+      server = await bt.launchServer({ headless, args: gpu.args, env: gpu.env, firefoxUserPrefs: gpu.firefoxUserPrefs });
       browser = await bt.connect(server.wsEndpoint());
     }
 

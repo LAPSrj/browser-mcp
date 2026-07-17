@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserServer, type BrowserContext, type Page } from "playwright";
 import { connectBrowserStack, type BrowserStackCaps } from "./browserstack.js";
 import { Semaphore } from "./semaphore.js";
+import { isWsl } from "./wsl.js";
 import type { SessionHook } from "../plugins/types.js";
 
 export type BrowserName = "chromium" | "firefox" | "webkit";
@@ -77,6 +78,85 @@ let LAUNCH_RETRIES = parseInt(process.env.BROWSER_MCP_LAUNCH_RETRIES || "2", 10)
 export function setLaunchConfig(opts: { launchTimeout?: number; launchRetries?: number }): void {
   if (opts.launchTimeout !== undefined) LAUNCH_TIMEOUT = opts.launchTimeout;
   if (opts.launchRetries !== undefined) LAUNCH_RETRIES = opts.launchRetries;
+}
+
+/**
+ * Hardware-accelerated (GPU) rendering for local browsers.
+ *
+ * Behaviour differs per engine (all measured live on this WSL box with a
+ * fragment-heavy WebGL benchmark; fast+low-CPU = GPU, slow+high-CPU = software):
+ *
+ * - Chromium: defaults to SwiftShader, a pure-CPU rasterizer. On shader-heavy
+ *   pages that pegs a CPU core (8.3s / 80% CPU for the 60-frame bench) and
+ *   spins the fan. Pointing ANGLE at the D3D12 GL driver moves it onto the GPU
+ *   (~1.0s / 3% CPU — ~8x faster). Output is byte-identical across separate
+ *   launches on a machine, so it is safe for screenshot/visual-diff baselines
+ *   *once the baseline is regenerated* (GPU pixels differ from SwiftShader).
+ * - Firefox: Playwright ships it with WebGL disabled entirely — no software
+ *   burn, but WebGL simply does not render. Enabling it via firefoxUserPrefs
+ *   makes WebGL work AND it is GPU-accelerated automatically (~0.84s / 5% CPU),
+ *   no ANGLE flags or Mesa env needed.
+ * - WebKit: already renders WebGL on the GPU by default (~0.9s / 4% CPU) — no
+ *   override required.
+ *
+ * Enabled by default. Disable with BROWSER_MCP_GPU=0 — e.g. if goldens must
+ * match a SwiftShader/CI environment, the GPU path proves flaky on some host,
+ * or you want Firefox back to its stock WebGL-off default. Only affects
+ * locally-launched browsers; BrowserStack is untouched.
+ */
+export function gpuEnabled(): boolean {
+  const v = (process.env.BROWSER_MCP_GPU ?? "1").toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+}
+
+/**
+ * Firefox prefs that (a) turn WebGL on — it is off by default in Playwright's
+ * headless Firefox — and (b) allow hardware acceleration. With these, Firefox
+ * renders WebGL on the GPU with no extra flags or env. Verified live.
+ */
+const FIREFOX_GPU_PREFS: Record<string, boolean | number | string> = {
+  "webgl.force-enabled": true,
+  "webgl.disabled": false,
+  "webgl.forbid-hardware": false,
+  "gfx.webrender.all": true,
+  "gfx.webrender.force-enabled": true,
+  "gfx.canvas.accelerated": true,
+  "layers.acceleration.force-enabled": true,
+  "gfx.x11-egl.force-enabled": true,
+};
+
+export interface GpuLaunchOverrides {
+  args: string[];
+  env?: Record<string, string>;
+  firefoxUserPrefs?: Record<string, boolean | number | string>;
+}
+
+/**
+ * GPU launch overrides for a local browser, keyed by engine (see gpuEnabled's
+ * doc for the per-engine rationale). Empty when GPU is disabled. Chromium gets
+ * ANGLE flags + a WSL-only MESA d3d12 env; Firefox gets WebGL-enabling prefs;
+ * WebKit needs nothing (already GPU).
+ */
+export function gpuLaunchOverrides(browserName: BrowserName): GpuLaunchOverrides {
+  if (!gpuEnabled()) return { args: [] };
+
+  if (browserName === "chromium") {
+    const args = [
+      "--use-gl=angle",
+      "--use-angle=gl",
+      "--ignore-gpu-blocklist",
+      "--enable-gpu-rasterization",
+    ];
+    const env = isWsl() ? { ...process.env, MESA_LOADER_DRIVER_OVERRIDE: "d3d12" } as Record<string, string> : undefined;
+    return { args, env };
+  }
+
+  if (browserName === "firefox") {
+    return { args: [], firefoxUserPrefs: { ...FIREFOX_GPU_PREFS } };
+  }
+
+  // webkit: already GPU-accelerated by default.
+  return { args: [] };
 }
 
 export interface LaunchOptions {
@@ -172,7 +252,8 @@ async function launchBrowserWithRetry(
       }
 
       const bt = getBrowserType(browserName);
-      const server = await bt.launchServer({ headless: true, timeout: LAUNCH_TIMEOUT });
+      const gpu = gpuLaunchOverrides(browserName);
+      const server = await bt.launchServer({ headless: true, timeout: LAUNCH_TIMEOUT, args: gpu.args, env: gpu.env, firefoxUserPrefs: gpu.firefoxUserPrefs });
       const browser = await bt.connect(server.wsEndpoint());
       return { server, browser };
     } catch (error) {
