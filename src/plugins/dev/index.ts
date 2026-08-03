@@ -25,6 +25,7 @@ import { schemaExtractTool } from "./tools/schema-extract.js";
 import { listInteractiveElementsTool } from "./tools/list-interactive-elements.js";
 import { domQueryTool } from "./tools/dom-query.js";
 import { hitTestTool } from "./tools/hit-test.js";
+import { styleCheckTool } from "./tools/style-check.js";
 
 // Dev plugin: developer-inspection tools that a regular user can't perform
 // in a browser without DevTools. Enable via BROWSER_MCP_PLUGINS=dev.
@@ -548,6 +549,41 @@ const devPlugin: ScreenshotPlugin = {
         ...params,
         url: params.url ? resolveUrl(params.url, config.baseUrl) : undefined,
       })) as any,
+    });
+
+    // ---------- style_check ----------
+    ctx.registerTool({
+      name: "style_check",
+      description:
+        "Assert that an element's computed CSS properties match expected values. Pass a selector and a map of " +
+        "property names to their expected computed values. Returns pass/fail with the actual value for each mismatch. " +
+        "Use for verifying CSS implementation against design specs or a style guide: extract the expected values " +
+        "(font-size, font-weight, line-height, padding, border-radius, color, etc.) and check them in one call. " +
+        "Expected values must be in computed-style format (e.g. `rgb(0, 0, 0)` not `#000`, `16px` not `1rem`). " +
+        "Tip: use computed_styles({selector, properties:[...]}) first to discover the format the browser reports, " +
+        "then use those as your expected values. Session-aware: pass `session_id` to check the session's current page." +
+        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+      schema: {
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        selector: z.string().describe("CSS selector of the element to check"),
+        expected: z.record(z.string(), z.string()).describe(
+          "Map of CSS property names to their expected computed values. " +
+          'Example: {"font-size":"24px","font-weight":"400","border-radius":"4px 4px 4px 64px"}',
+        ),
+        tolerance_px: z.number().optional().describe(
+          "Tolerance for numeric CSS values in pixels (default: 0). When set, e.g. to 1, " +
+          '"24px" matches "25px" but not "26px". Units must still match (px≠rem). ' +
+          "Non-numeric values (colors, keywords) are always compared exactly.",
+        ),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
+        actions: z.array(actionSchema).optional().describe("Actions to run before checking. Selector-based actions support optional and timeout params"),
+        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        ...browserStackFields,
+        ...useSchemaField,
+      },
+      handler: async (params) => (await styleCheckTool(withOptionalUrl(params))) as any,
     });
 
     // ---------- trace_start / trace_stop (session-scoped) ----------

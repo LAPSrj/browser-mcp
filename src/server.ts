@@ -124,10 +124,13 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
     };
   }
 
-  // ---------- screenshot ----------
+  // ---------- multi_screenshot ----------
   server.tool(
-    "screenshot",
-    "Take screenshots of a URL across multiple browsers and viewports. Returns images and file paths. Supports pre-screenshot actions, console capture, and full-page capture." +
+    "multi_screenshot",
+    "Take screenshots of a URL across multiple browsers and viewports in one call. Launches ephemeral browsers with fresh, independent sessions (no cookies, no auth, no prior state). " +
+      "For a single screenshot of a page in an existing session (with its auth, cookies, and scroll position intact), use screenshot({session_id}) instead. " +
+      "Returns an error if the page cannot be loaded (certificate errors, DNS failures, connection refused, HTTP 5xx). " +
+      "Supports pre-screenshot actions, console capture, and full-page capture." +
       (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
     {
       url: z.string().describe(urlDescription),
@@ -168,7 +171,8 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- element_screenshot ----------
   server.tool(
     "element_screenshot",
-    "Take a screenshot of a specific element on a page identified by CSS selector." +
+    "Take a screenshot of a specific element on a page identified by CSS selector. Launches an ephemeral browser with a fresh session (no cookies, no auth). " +
+      "Returns an error if the page cannot be loaded (certificate errors, DNS failures, connection refused)." +
       (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
     {
       url: z.string().describe(urlVisitDescription),

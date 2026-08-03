@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
-import { getBrowserType, gpuLaunchOverrides, type BrowserName } from "../utils/browser.js";
+import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
@@ -96,6 +96,12 @@ export interface OpenSessionOptions {
    * tunneled session closes. Requires BROWSERSTACK_ACCESS_KEY.
    */
   browserStackLocal?: boolean;
+  /**
+   * Accept self-signed, expired, or otherwise invalid TLS certificates without
+   * error. Set true for local dev servers with self-signed certs. Without this,
+   * HTTPS pages with invalid certificates show a browser error screen.
+   */
+  ignore_https_errors?: boolean;
 }
 
 export interface TabInfo {
@@ -396,6 +402,7 @@ class SessionManager {
       const contextOpts: Record<string, unknown> = {};
       if (viewport) contextOpts.viewport = viewport;
       if (opts.storageState) contextOpts.storageState = opts.storageState;
+      if (opts.ignore_https_errors) contextOpts.ignoreHTTPSErrors = true;
       context = await browser.newContext(contextOpts as any);
       // Real devices boot slowly — first navigation can far exceed a local
       // browser, so give the context a generous default (matches ephemeral).
@@ -404,10 +411,11 @@ class SessionManager {
     } else {
       const contextOpts: Record<string, unknown> = {
         viewport,
-        userAgent: opts.user_agent,
+        userAgent: opts.user_agent ?? realisticUserAgent(browserName, browser),
         locale: opts.locale,
         timezoneId: opts.timezone,
         storageState: opts.storageState,
+        ...(opts.ignore_https_errors ? { ignoreHTTPSErrors: true } : {}),
       };
       if (recordVideo && videoDir) {
         contextOpts.recordVideo = { dir: videoDir, size: viewport };

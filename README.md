@@ -65,7 +65,7 @@ Every core primitive is runnable directly:
 # Ephemeral (spins up a browser, runs one action, shuts down)
 node dist/index.js navigate --url=https://example.com
 node dist/index.js get_text --url=https://example.com --selector=h1
-node dist/index.js screenshot --url=https://example.com --fullPage=true
+node dist/index.js multi_screenshot --url=https://example.com --fullPage=true
 
 # With a plugin
 BROWSER_MCP_PLUGINS=dev node dist/index.js evaluate_script \
@@ -86,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -226,11 +226,20 @@ Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY`.
 ephemeral `navigate` is useful as a "load this page, return status/title"
 probe. The session-bound variants require `session_id`.
 
+`navigate` returns actionable diagnostics on page load failures: certificate
+errors suggest using `ignore_https_errors` or switching to HTTP; DNS failures,
+connection refused, and HTTP 5xx are reported with clear error messages.
+
 ### Interaction
 
 `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag`,
 `select_option`, `check`, `uncheck`, `upload_file`, `click_to_upload`,
 `drop_to_upload`.
+
+`click` returns rich context about what happened: the element's metadata
+(tag, type, role, href, form action/method, disabled state), whether
+navigation occurred (new URL + title), page errors after navigation, and
+warnings when `force:true` is used on a disabled element.
 
 ```json
 { "tool": "click", "params": { "session_id": "...", "selector": "#submit", "button": "left" } }
@@ -283,9 +292,9 @@ pass an explicit `tab_id`.
 
 | Tool | Scope | Notes |
 |---|---|---|
-| `screenshot` | Ephemeral multi-browser / multi-viewport | Keeps the existing multi-browser / multi-viewport flow. Returns each result as text + preview image. |
-| `element_screenshot` | Ephemeral | Screenshot one CSS-selected element. |
-| `capture` | Session-bound | Screenshot a session's active (or named) tab. Optional `selector`, `full_page`. |
+| `screenshot` | Session-bound | Screenshot a session's active (or named) tab. Optional `selector` (crop to element), `full_page`. Returns the page URL and title alongside the file path. |
+| `multi_screenshot` | Ephemeral multi-browser / multi-viewport | Launches fresh browsers per call. Returns each result as text + preview image. Returns an error if the page cannot be loaded (certificate errors, DNS, connection refused). |
+| `element_screenshot` | Ephemeral | Screenshot one CSS-selected element. Returns an error on page load failure. |
 | `save_pdf` | Any | Chromium-only PDF export. |
 | `save_html` | Any | Writes `page.content()` to disk. |
 
@@ -313,6 +322,7 @@ Tools that only DevTools can deliver — stuff a real user can't see.
 | `accessibility_snapshot` | Accessibility tree + 6 hand-rolled structural checks. **Not** a full WCAG audit — use `axe_audit` for that. |
 | `axe_audit` | Full axe-core WCAG 2.x audit. Session-aware. Returns structured violations / passes / incomplete / inapplicable with rule IDs and CSS selectors. |
 | `computed_styles` | Effective CSS for an element; optional CSS source tracing. |
+| `style_check` | Assert computed CSS properties match expected values. Pass a selector + expected map; returns pass/fail per property with mismatches. Optional `tolerance_px` for fuzzy numeric comparison. |
 | `performance_metrics` | Core Web Vitals + load timing. |
 | `visual_diff` | Pixel-diff two PNGs. |
 | `compare_screenshot` | Screenshot + diff against a reference. |
@@ -386,7 +396,7 @@ Plugins can register custom action types (e.g. `gutenberg_insert`,
 
 ## BrowserStack
 
-Any tool that opens an ephemeral context (no `session_id`) — `screenshot`,
+Any tool that opens an ephemeral context (no `session_id`) — `multi_screenshot`,
 `element_screenshot`, and the `dev` / `design-compare` plugin tools — accepts
 `useBrowserStack: true` to run the call on BrowserStack instead of a local
 browser. `open_session` accepts the same flags to open a **persistent**
@@ -405,11 +415,11 @@ Per-call targeting:
 
 ```bash
 # Desktop WebKit on macOS Sonoma (NOT Safari — Playwright-WebKit on a Mac host)
-screenshot --url=https://example.com --useBrowserStack=true \
+multi_screenshot --url=https://example.com --useBrowserStack=true \
   --browser=webkit --browserStackOs="OS X" --browserStackOsVersion=Sonoma
 
 # Real iOS Safari on a physical iPhone
-screenshot --url=https://example.com --useBrowserStack=true \
+multi_screenshot --url=https://example.com --useBrowserStack=true \
   --browserStackDevice="iPhone 15 Pro Max" --browserStackOsVersion=17
 ```
 
@@ -466,6 +476,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_LAUNCH_TIMEOUT` | `30000` | Per-launch timeout in ms. |
 | `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
 | `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |
+| `BROWSER_MCP_REALISTIC_UA` | `1` | Strip headless markers from the browser's default user-agent string. Chromium headless sends `HeadlessChrome` in the UA which sites commonly detect — this replaces it with a standard Chrome UA using the actual browser version. Firefox and WebKit headless UAs are already realistic. Set `0` to keep the raw headless UA. |
 | `BROWSER_MCP_GPU` | `1` | Hardware-accelerated (GPU) rendering for local browsers. **Chromium**: routes ANGLE→D3D12 so WebGL/canvas rasterization runs on the GPU instead of CPU SwiftShader (much lower CPU on shader-heavy pages). **Firefox**: enables WebGL (off by default in Playwright's headless Firefox) — it is GPU-accelerated automatically. **WebKit**: already GPU by default, unchanged. Set `0` to fall back to CPU SwiftShader for Chromium and stock WebGL-off Firefox — do this if screenshot baselines must match a SwiftShader/CI environment (GPU and SwiftShader produce different pixels). |
 | `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
 | `BROWSER_MCP_PRODUCT` | `edge` (WSL/Win) / `chrome` (macOS/Linux) | Which Chromium-channel browser auto-launch uses. One of `edge`, `chrome`, `brave`, `vivaldi`, `opera`. Throws on typo. |

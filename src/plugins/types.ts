@@ -85,7 +85,7 @@ export interface CoreUtils {
   getSessionPage(session_id: string, tab_id?: string): Page;
   /** List currently-open persistent sessions (sessionManager-owned). */
   listSessions(): SessionInfo[];
-  navigateTo(page: Page, url: string, waitForNetworkIdle?: boolean): Promise<void>;
+  navigateTo(page: Page, url: string, waitForNetworkIdle?: boolean): Promise<void | { url: string; status: number | null; diagnostic: unknown }>;
   runActions(
     page: Page,
     actions: AnyAction[],

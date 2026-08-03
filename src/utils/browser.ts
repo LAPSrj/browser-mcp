@@ -9,6 +9,40 @@ import type { SessionHook } from "../plugins/types.js";
 export type BrowserName = "chromium" | "firefox" | "webkit";
 
 /**
+ * Build a realistic user-agent string that strips Playwright's headless
+ * markers. Chromium's headless UA contains "HeadlessChrome" which sites
+ * commonly detect and block — this replaces it with a standard Chrome UA
+ * using the actual browser version. Firefox and WebKit headless UAs are
+ * already indistinguishable from headed mode; this function returns
+ * undefined for them (= use Playwright's default).
+ *
+ * Controlled by the BROWSER_MCP_REALISTIC_UA env var (default: "1").
+ * Set to "0" to keep the original headless UA — useful for test
+ * environments that rely on the HeadlessChrome marker.
+ */
+export function realisticUserAgent(browserName: BrowserName, browserInstance: Browser): string | undefined {
+  const flag = (process.env.BROWSER_MCP_REALISTIC_UA ?? "1").toLowerCase();
+  if (flag === "0" || flag === "false" || flag === "off" || flag === "no") {
+    return undefined;
+  }
+
+  if (browserName === "chromium") {
+    const version = browserInstance.version();
+    const platform = process.platform === "darwin"
+      ? "(Macintosh; Intel Mac OS X 10_15_7)"
+      : process.platform === "win32"
+        ? "(Windows NT 10.0; Win64; x64)"
+        : "(X11; Linux x86_64)";
+    return `Mozilla/5.0 ${platform} AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+  }
+
+  // Firefox and WebKit headless UAs have no "Headless" marker — Playwright
+  // already uses realistic UA strings for them. Return undefined to keep
+  // Playwright's default.
+  return undefined;
+}
+
+/**
  * Per-tool-invocation context. Tracks the BrowserServers spawned by this
  * invocation so that a tool timeout can forcibly kill them, which unblocks
  * any playwright await still suspended inside the tool handler and lets its
@@ -325,6 +359,10 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     }
     if (storageState) {
       contextOptions.storageState = storageState;
+    }
+    if (!useBrowserStack) {
+      const ua = realisticUserAgent(browserName, browser);
+      if (ua) contextOptions.userAgent = ua;
     }
 
     const context = await browser.newContext(contextOptions);

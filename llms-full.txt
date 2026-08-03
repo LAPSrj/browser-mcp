@@ -6,7 +6,7 @@ This file is the consumer-facing manual for agents that *invoke* browser-mcp too
 
 ## TL;DR {#tldr}
 
-- Browser primitives (navigate, click, screenshot, evaluate, ...) plus four pluggable domains: `dev`, `design-compare`, `wp`, `wp-gutenberg`. Each plugin registers tools.
+- Browser primitives (navigate, click, screenshot, evaluate, ...) plus four pluggable domains: `dev`, `design-compare`, `wp`, `wp-gutenberg`. Each plugin registers tools. `screenshot` is the session-bound screenshot tool; `multi_screenshot` is the ephemeral multi-browser variant.
 - A **mode** is a session-level auth/setup bundle that a plugin can also register (e.g. `wp` registers the `wordpress` mode that injects WordPress admin auth into the BrowserContext). Modes are NOT a gate on which tools are available — they layer hooks onto sessions. `mcp__browser__list_modes` enumerates registered modes.
 - Tools accept an optional `session_id` to attach to a persistent context (from `open_session`); without it each call spins an ephemeral session and discards it on return.
 - Comparison tools (`compare_element`, `compare_screenshot`, `visual_diff`, `design_audit`) report different score conventions and accept different mask APIs — see § Cross-cutting concepts before mixing them.
@@ -37,8 +37,8 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `screenshot` | Full-page or clipped PNG screenshot | core primitive |
-| `element_screenshot` | Element-bbox-cropped screenshot | core primitive |
+| `multi_screenshot` | Multi-browser / multi-viewport ephemeral screenshot | core primitive; returns error on page load failure (cert, DNS, connection refused) |
+| `element_screenshot` | Element-bbox-cropped ephemeral screenshot | core primitive; returns error on page load failure |
 | `visual_diff` | Pixelmatch two PNGs, optional crop | (contract) compare-tool selection |
 | `compare_screenshot` | Live URL ↔ reference PNG, full-page | (contract) compare-tool selection, mask, coverage |
 | `compare_element` | Live URL ↔ reference PNG, element-cropped | (contract) compare-tool selection, mask, alignment, coverage |
@@ -54,6 +54,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `page_metadata` | Title, URL, meta tags | |
 | `performance_metrics` | LCP, FCP, TTFB | |
 | `computed_styles` | `getComputedStyle()` for selector | |
+| `style_check` | Assert computed CSS properties match expected values; pass a selector + expected map, returns pass/fail with mismatches; optional `tolerance_px` for fuzzy numeric comparison | |
 | `evaluate_script` | Run JS in page context, return result | **reach for last** — use dedicated tools for click / type / discovery / wait first |
 | `trace_start` / `trace_stop` | Playwright trace zip | |
 | `schema_extract` | JSON-LD / microdata / OG tags | |
@@ -100,14 +101,15 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `pause_session`, `resume_session` | snapshot/restore storage state across a close (human-in-loop handover) |
 | `close_browser`, `claim_tab`, `browser_status` | multi-server shared-profile primitives (attach_cdp): force-nuke, take ownership of orphan tabs, introspect coordination state |
 | `open_tab`, `switch_tab`, `list_tabs`, `close_tab` | tab control inside a session |
-| `navigate`, `go_back`, `go_forward`, `reload` | URL navigation |
-| `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input |
+| `navigate`, `go_back`, `go_forward`, `reload` | URL navigation; `navigate` returns actionable diagnostics on page load failures (cert errors, DNS, connection refused, HTTP 5xx) |
+| `click`, `type_text`, `press_key`, `hover`, `scroll`, `drag` | input; `click` returns element metadata (tag, role, href, form action) + navigation result + `force:true` warnings |
 | `select_option`, `check`, `uncheck`, `upload_file`, `click_to_upload`, `drop_to_upload` | form control (upload: `upload_file` injects into an `<input>`; `click_to_upload` clicks → file chooser, desktop only; `drop_to_upload` drag-drops onto a dropzone, desktop) |
 | `wait`, `wait_for_selector`, `wait_for_url`, `wait_for_load_state` | sync |
 | `get_text`, `get_attribute`, `get_html`, `get_url` | read |
 | `get_cookies`, `set_cookies`, `clear_cookies` | cookies |
 | `get_storage`, `set_storage`, `clear_storage` | localStorage / sessionStorage |
-| `capture`, `save_pdf`, `save_html` | output capture |
+| `screenshot` | session-bound screenshot (optional `selector` crop, `full_page`); returns page URL + title |
+| `save_pdf`, `save_html` | output capture |
 | `handle_next_dialog` | pre-arm a confirm/alert handler |
 | `list_modes` | enumerate registered modes |
 
@@ -211,7 +213,7 @@ Both metrics are percentages, both 1 decimal. Tool-emitted warnings: `maskCovera
 
 ### Action contract {#action-contract}
 
-`compare_element`, `compare_screenshot`, `design_audit`, and `screenshot` accept `actions: [...]` arrays that run before the capture. Action types:
+`compare_element`, `compare_screenshot`, `design_audit`, and `multi_screenshot` accept `actions: [...]` arrays that run before the capture. Action types:
 
 - `click`, `type`, `hover`, `scroll`, `wait`, `wait_for_selector`, `assert_text`, `assert_count`, `evaluate`, `set_storage`, `set_cookies`, `select_option`, etc.
 
@@ -219,7 +221,7 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 ### Session contract {#session-contract}
 
-- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir` for non-default browser modes (see hazard below for `attach_cdp`); `useBrowserStack` + `browserStackOs` / `browserStackOsVersion` / `browserStackDevice` for a persistent BrowserStack session (see BrowserStack contract).
+- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors` for non-default browser modes (see hazard below for `attach_cdp`); `useBrowserStack` + `browserStackOs` / `browserStackOsVersion` / `browserStackDevice` for a persistent BrowserStack session (see BrowserStack contract). `ignore_https_errors: true` accepts self-signed / expired / invalid TLS certificates without showing a browser error page — use for local dev servers with self-signed certs.
 - **Session-aware surfaces** accept optional `session_id` + `tab_id`. Without `session_id`, those tools spin an ephemeral context per call.
 - `close_session({ session_id })` releases the context; `list_sessions()` enumerates active ones.
 
@@ -288,7 +290,7 @@ Three primitives layer on top of the shared-profile architecture:
 
 ### BrowserStack contract {#browserstack-contract}
 
-`useBrowserStack: true` routes a call to BrowserStack instead of a local browser. On an **ephemeral** call (no `session_id`) it is per-call, accepted by `screenshot`, `element_screenshot`, and every `dev` / `design-compare` tool. `open_session` also accepts it to open a **persistent** BrowserStack session whose `session_id` is reused across calls exactly like a local one (with `browserStackDevice` → a real iOS device). Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` in the server env; a fresh server process must be running for the env to be present.
+`useBrowserStack: true` routes a call to BrowserStack instead of a local browser. On an **ephemeral** call (no `session_id`) it is per-call, accepted by `multi_screenshot`, `element_screenshot`, and every `dev` / `design-compare` tool. `open_session` also accepts it to open a **persistent** BrowserStack session whose `session_id` is reused across calls exactly like a local one (with `browserStackDevice` → a real iOS device). Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` in the server env; a fresh server process must be running for the env to be present.
 
 Persistent BrowserStack sessions (`open_session({ useBrowserStack: true })`):
 - **Idle ceiling.** BrowserStack force-closes the remote session after 300s of inactivity (its server-side max). Keep it active (a tool call within ~5 min) or the next call surfaces a disconnect.

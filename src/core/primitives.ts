@@ -11,6 +11,7 @@ import {
 import { sessionManager } from "./sessions.js";
 import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator } from "../utils/locator.js";
+import { diagnosePageErrors } from "../utils/page-diagnostics.js";
 
 // All the user-replicable browser primitives — the things a human can do
 // in a browser without opening DevTools. Each primitive accepts an
@@ -181,6 +182,14 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
           "closes every restored tab on attach and keeps one clean page (about:blank when no `url` is " +
           "given). Pass `true` to opt into Chromium's default restore-tabs behavior. attach_cdp only.",
       ),
+      ignore_https_errors: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "Accept self-signed, expired, or otherwise invalid TLS certificates without error (default: false). " +
+          "Set true for local dev servers with self-signed certs (e.g. https://localhost, https://*.local). " +
+          "Without this, HTTPS pages with invalid certificates show a browser error screen instead of the page content.",
+      ),
       useBrowserStack: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
@@ -322,7 +331,7 @@ const waitUntilEnum = z
 
 export const navigationPrimitives: Record<string, PrimitiveDef> = {
   navigate: {
-    description: "Navigate to a URL. Uses the session's active tab when session_id is provided, otherwise runs in a one-shot browser context.",
+    description: "Navigate to a URL. Uses the session's active tab when session_id is provided, otherwise runs in a one-shot browser context. Returns an error with actionable diagnostics if the page cannot be loaded (certificate errors, DNS failures, connection refused, HTTP 5xx).",
     schema: {
       url: z.string().describe("Absolute URL to navigate to"),
       wait_until: waitUntilEnum,
@@ -332,15 +341,39 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => {
       return withPage(p, async (page) => {
-        const resp = await page.goto(p.url, {
-          waitUntil: p.wait_until ?? "load",
-          timeout: p.timeout ?? 30000,
-        });
-        return json({
+        let status: number | null = null;
+        let gotoError: string | undefined;
+
+        try {
+          const resp = await page.goto(p.url, {
+            waitUntil: p.wait_until ?? "load",
+            timeout: p.timeout ?? 30000,
+          });
+          status = resp?.status() ?? null;
+        } catch (error) {
+          gotoError = (error as Error).message;
+        }
+
+        const diagnostic = await diagnosePageErrors(page, status);
+        const title = await page.title().catch(() => "");
+        const result: Record<string, unknown> = {
           url: page.url(),
-          status: resp?.status() ?? null,
-          title: await page.title().catch(() => ""),
-        });
+          status,
+          title,
+        };
+
+        if (diagnostic) {
+          result.error = diagnostic.message;
+          if (diagnostic.errorCode) result.error_code = diagnostic.errorCode;
+        } else if (gotoError) {
+          result.error = gotoError;
+        }
+
+        if (diagnostic && diagnostic.type === "browser-error") {
+          return err(JSON.stringify(result, null, 2));
+        }
+
+        return json(result);
       });
     },
   },
@@ -390,26 +423,94 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
 
 export const interactionPrimitives: Record<string, PrimitiveDef> = {
   click: {
-    description: "Click an element. Use button and click_count for right-click, double-click, etc.",
+    description:
+      "Click an element and report what happened. Returns the element's metadata (tag, role, href, form action) and " +
+      "any side effects: navigation (new URL + title), page errors after navigation, or warnings for disabled elements. " +
+      "Use button and click_count for right-click, double-click, etc.",
     schema: {
       ...selectorField,
       button: z.enum(["left", "right", "middle"]).optional().describe('Mouse button (default: "left")'),
       click_count: z.number().optional().describe("Number of consecutive clicks (default: 1; set 2 for double-click)"),
-      force: z.boolean().optional().describe("Skip actionability checks (visible, enabled, stable) and click immediately"),
+      force: z.boolean().optional().describe(
+        "Skip actionability checks (visible, enabled, stable) and click immediately. " +
+          "WARNING: a force:true click does NOT prove the element is reachable by a real user — " +
+          "it bypasses the checks that would fail. Use hit_test to verify reachability.",
+      ),
       position: z.object({ x: z.number(), y: z.number() }).optional().describe("Offset from the element's top-left to click at (pixels)"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).click({
+      const locator = resolveLocator(page, p.selector);
+
+      const elementInfo = await locator.first().evaluate((el) => {
+        const he = el as HTMLElement;
+        const tag = el.tagName.toLowerCase();
+        const result: Record<string, unknown> = { tag };
+
+        if (he.hasAttribute("disabled") || he.getAttribute("aria-disabled") === "true") {
+          result.disabled = true;
+        }
+
+        const type = el.getAttribute("type");
+        if (type) result.type = type;
+
+        const role = el.getAttribute("role");
+        if (role) result.role = role;
+
+        const anchor = el.tagName === "A" ? (el as HTMLAnchorElement) : (el.closest("a") as HTMLAnchorElement | null);
+        if (anchor?.href) result.href = anchor.href;
+
+        const form = el.closest("form") as HTMLFormElement | null;
+        const isSubmit =
+          (tag === "button" && (type ?? "submit") === "submit") ||
+          (tag === "input" && type === "submit");
+        if (isSubmit && form) {
+          result.form_action = form.action;
+          result.form_method = (form.method || "GET").toUpperCase();
+        }
+
+        return result;
+      }).catch(() => null);
+
+      const urlBefore = page.url();
+
+      await locator.click({
         button: p.button,
         clickCount: p.click_count,
         force: p.force,
         position: p.position,
         timeout: p.timeout,
       });
-      return ok(`Clicked ${p.selector}`);
+
+      const urlAfter = page.url();
+      const navigated = urlAfter !== urlBefore;
+
+      const result: Record<string, unknown> = { selector: p.selector };
+
+      if (elementInfo) result.element = elementInfo;
+
+      if (p.force) {
+        result.force_used = true;
+        if (elementInfo?.disabled) {
+          result.warning =
+            "force:true clicked a disabled element — a real user cannot interact with disabled elements. Use hit_test to verify reachability.";
+        }
+      }
+
+      if (navigated) {
+        const title = await page.title().catch(() => "");
+        result.navigated_to = { url: urlAfter, title };
+        const diagnostic = await diagnosePageErrors(page, null);
+        if (diagnostic) {
+          result.page_error = diagnostic.message;
+        }
+      } else {
+        result.page_url = urlAfter;
+      }
+
+      return json(result);
     }),
   },
 
@@ -1021,12 +1122,13 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
 // ---------------------------------------------------------------------------
 
 export const capturePrimitives: Record<string, PrimitiveDef> = {
-  capture: {
+  screenshot: {
     description:
       "Take a PNG screenshot of a session's active (or named) tab. Optionally crop to an element by selector, " +
-      "or capture the full scrollable page with full_page:true. For ephemeral multi-browser / multi-viewport captures use the `screenshot` tool instead.",
+      "or capture the full scrollable page with full_page:true. Returns the current page URL and title alongside " +
+      "the file path. For ephemeral multi-browser / multi-viewport captures use `multi_screenshot` instead.",
     schema: {
-      session_id: z.string().describe("Session id (use open_session to create one, or use the `screenshot` tool for ephemeral captures)"),
+      session_id: z.string().describe("Session id (use open_session to create one, or use `multi_screenshot` for ephemeral captures)"),
       tab_id: z.string().optional(),
       selector: z.string().optional().describe("CSS selector to crop to. Omit for viewport/full-page capture"),
       full_page: z.boolean().optional().describe("Capture the full scrollable page (default: false)"),
@@ -1045,7 +1147,13 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
         ? await resolveLocator(page, p.selector).first().screenshot({ type: "png" })
         : await page.screenshot({ type: "png", fullPage: p.full_page === true });
       await fs.writeFile(filePath, buf);
-      return json({ path: filePath, bytes: buf.byteLength, selector: p.selector ?? null });
+      return json({
+        path: filePath,
+        bytes: buf.byteLength,
+        selector: p.selector ?? null,
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+      });
     },
   },
 };

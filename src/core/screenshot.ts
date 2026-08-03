@@ -3,6 +3,7 @@ import type { AnyAction } from "../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions, type ActionStopResult, type AssertionResult } from "../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../utils/browser.js";
 import { navigateTo } from "../utils/navigate.js";
+import { formatDiagnostic } from "../utils/page-diagnostics.js";
 import { saveFile, generateFilename } from "../utils/file.js";
 import { createPreviewBuffer } from "../utils/resize.js";
 
@@ -55,10 +56,11 @@ export async function screenshotTool(params: ScreenshotParams) {
     endX,
   } = params;
 
-  const tasks: Promise<{ result: ScreenshotResult; consoleLogs: ConsoleEntry[]; actionStop?: ActionStopResult; assertions: AssertionResult[] }>[] = [];
+  const tasks: Promise<{ result: ScreenshotResult; consoleLogs: ConsoleEntry[]; actionStop?: ActionStopResult; assertions: AssertionResult[]; pageError?: string }>[] = [];
 
   for (const browserName of browsers) {
     for (const vp of viewports) {
+      const vpLabel = vp.label || `${vp.width}x${vp.height}`;
       tasks.push(
         (async () => {
           const consoleLogs: ConsoleEntry[] = [];
@@ -76,7 +78,21 @@ export async function screenshotTool(params: ScreenshotParams) {
               });
             }
 
-            await navigateTo(session.page, url, waitForNetworkIdle);
+            const nav = await navigateTo(session.page, url, waitForNetworkIdle);
+
+            if (nav.diagnostic && nav.diagnostic.type === "browser-error") {
+              return {
+                result: {
+                  browser: browserName,
+                  viewport: vpLabel,
+                  filePath: "",
+                  previewPath: "",
+                },
+                consoleLogs,
+                assertions: [],
+                pageError: formatDiagnostic(nav.diagnostic),
+              };
+            }
 
             let actionStop: ActionStopResult | undefined;
             let assertions: AssertionResult[] = [];
@@ -106,7 +122,6 @@ export async function screenshotTool(params: ScreenshotParams) {
 
             const screenshotBuffer = await session.page.screenshot(screenshotOptions);
 
-            const vpLabel = vp.label || `${vp.width}x${vp.height}`;
             const filename = generateFilename({
               prefix: "screenshot",
               browser: browserName,
@@ -143,6 +158,14 @@ export async function screenshotTool(params: ScreenshotParams) {
   }
 
   const results = await Promise.all(tasks);
+
+  const pageErrors = results.filter((r) => r.pageError).map((r) => r.pageError!);
+  if (pageErrors.length > 0 && pageErrors.length === results.length) {
+    return {
+      content: pageErrors.map((e) => ({ type: "text" as const, text: e })),
+      isError: true,
+    };
+  }
 
   const screenshots = results.map((r) => r.result);
   const allConsoleLogs = results.flatMap((r) => r.consoleLogs);

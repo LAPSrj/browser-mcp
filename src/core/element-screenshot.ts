@@ -3,6 +3,7 @@ import type { AnyAction } from "../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../utils/browser.js";
 import { navigateTo } from "../utils/navigate.js";
+import { formatDiagnostic } from "../utils/page-diagnostics.js";
 import { saveFile, generateFilename } from "../utils/file.js";
 
 export interface ElementScreenshotParams extends BrowserStackTarget {
@@ -34,7 +35,14 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
   });
 
   try {
-    await navigateTo(session.page, url);
+    const nav = await navigateTo(session.page, url);
+
+    if (nav.diagnostic && nav.diagnostic.type === "browser-error") {
+      return {
+        content: [{ type: "text" as const, text: formatDiagnostic(nav.diagnostic) }],
+        isError: true,
+      };
+    }
 
     let actionStopMsg: string | undefined;
     let assertionsMsg: string | undefined;
