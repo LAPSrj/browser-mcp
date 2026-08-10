@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { sanitizeProcessName } from "./browser-products.js";
-import { isWsl, readWslGatewayIp } from "./wsl.js";
+import { isWsl, isWslMirrored, readWslGatewayIp } from "./wsl.js";
 import {
   aliveWindowsPids,
   finalizeSidecarTeardown,
@@ -577,6 +577,10 @@ export async function spawnAttachCdpRelay(
   opts: SpawnAttachCdpOptions,
 ): Promise<AttachCdpHandle> {
   const wsl = isWsl();
+  // In WSL2 mirrored networking, localhost reaches Windows directly — no
+  // PowerShell TCP relay needed. needsRelay is the single flag that gates
+  // all relay-specific code (spawn, probe, cleanup, sidecar fields).
+  const needsRelay = wsl && !isWslMirrored();
   const sessionTag = `bm-cdp-${opts.sessionId}`;
 
   // ---- 0. Resolve paths ----
@@ -603,7 +607,7 @@ export async function spawnAttachCdpRelay(
       })());
 
   const cdpPortReq = opts.cdpPort ?? (await pickFreePort(9300, 9399));
-  const relayPortReq = wsl ? (opts.relayPort ?? (await pickFreePort(9400, 9499))) : null;
+  const relayPortReq = needsRelay ? (opts.relayPort ?? (await pickFreePort(9400, 9499))) : null;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 15_000;
   // Sanitize once up front — any per-spec typo blows up before we spawn.
   const processName = sanitizeProcessName(opts.processName);
@@ -627,9 +631,9 @@ export async function spawnAttachCdpRelay(
     if (current) {
       const rootAlive = aliveWindowsPids([current.root_pid]).has(current.root_pid);
       if (rootAlive) {
-        const gateway = wsl ? readWslGatewayIp() : null;
+        const gateway = needsRelay ? readWslGatewayIp() : null;
         // root_pid being alive is necessary but NOT sufficient to attach. On
-        // WSL the relay is a SEPARATE process with its own PID and can die
+        // WSL NAT the relay is a SEPARATE process with its own PID and can die
         // independently of the browser (host sleep, PowerShell crash, relay
         // idle-timeout) while Chromium keeps running. The old attach path
         // returned the sidecar's relay endpoint without ever probing it, so a
@@ -637,7 +641,7 @@ export async function spawnAttachCdpRelay(
         // check the EXACT endpoint we would hand back, with a short timeout,
         // before committing to attach.
         let endpointLive = false;
-        if (wsl) {
+        if (needsRelay) {
           endpointLive =
             current.relay_port != null &&
             gateway != null &&
@@ -646,12 +650,13 @@ export async function spawnAttachCdpRelay(
           endpointLive = await probeCdp("localhost", current.cdp_port, 2000);
         }
 
-        // Stale-relay recovery (WSL): browser alive, relay dead. If the browser
-        // is still serving CDP on its Windows-side localhost port, respawn ONLY
-        // the relay pointing at the existing cdp_port. Cheapest possible
-        // recovery — the live browser and its loaded (often credentialed)
-        // session are preserved; nothing is killed.
-        if (!endpointLive && wsl && gateway != null) {
+        // Stale-relay recovery (WSL NAT only): browser alive, relay dead. If
+        // the browser is still serving CDP on its Windows-side localhost port,
+        // respawn ONLY the relay pointing at the existing cdp_port. Cheapest
+        // possible recovery — the live browser and its loaded (often
+        // credentialed) session are preserved; nothing is killed.
+        // Skipped in mirrored mode: no relay to recover.
+        if (!endpointLive && needsRelay && gateway != null) {
           const cdpAlive = await probeWindowsLocalhostCdp(current.cdp_port);
           if (cdpAlive) {
             dbg("sidecar: root + CDP alive but relay dead — respawning relay", {
@@ -707,7 +712,7 @@ export async function spawnAttachCdpRelay(
           throw new Error(
             `attach_cdp: sidecar at ${userDataDirWin} records a live browser ` +
               `(root_pid ${current.root_pid}) but its CDP endpoint is unreachable` +
-              (wsl
+              (needsRelay
                 ? ` (relay port ${current.relay_port} dead AND Windows-localhost CDP ` +
                   `port ${current.cdp_port} not responding)`
                 : ` (localhost:${current.cdp_port} not responding)`) +
@@ -722,7 +727,7 @@ export async function spawnAttachCdpRelay(
           relay_port: current.relay_port,
           existing_sessions: current.attached_sessions.length,
         });
-        const endpoint = wsl
+        const endpoint = needsRelay
           ? `http://${gateway}:${current.relay_port}`
           : `http://localhost:${current.cdp_port}`;
         const updatedInfo = {
@@ -811,48 +816,72 @@ export async function spawnAttachCdpRelay(
           root_pid: orphan.rootPid,
           cdp_port: orphan.cdpPort,
         });
-        // Reuse the new caller's session-scoped dir for the adoption relay.
-        // Each adopter spawns its own relay process; on was_last cleanup we
-        // kill both the relay and the adopted browser.
-        const adoptRelayPort = relayPortReq!;
-        const relayInfo = await spawnRelayProcess({
-          sessionDirWin,
-          sessionDirWsl,
-          cdpPort: orphan.cdpPort,
-          relayPort: adoptRelayPort,
-          watchPid: orphan.rootPid,
-          idleSeconds: opts.relayIdleSeconds ?? 600,
-        });
-        const gateway = readWslGatewayIp();
-        if (gateway == null) {
-          await killProcessByPid(relayInfo.relayPid);
-          throw new Error(
-            "attach_cdp: orphan adoption requires WSL gateway IP but readWslGatewayIp() returned null.",
-          );
-        }
-        // E2E probe via the new relay to confirm the orphan's CDP port is reachable.
-        const e2eDeadline = Date.now() + 5000;
-        let e2eUp = false;
-        while (Date.now() < e2eDeadline) {
-          e2eUp = await probeCdp(gateway, adoptRelayPort, 1500);
-          if (e2eUp) break;
-          await new Promise((r) => setTimeout(r, 200));
-        }
-        if (!e2eUp) {
-          await killProcessByPid(relayInfo.relayPid);
-          throw new Error(
-            `attach_cdp: adopted browser pid ${orphan.rootPid} on port ${orphan.cdpPort} ` +
-              `but end-to-end probe via relay ${adoptRelayPort} failed. ` +
-              `Relay log: ${relayInfo.relayLogFileWsl}. ` +
-              `Browser may be deadlocked; manual recovery: Stop-Process -Id ${orphan.rootPid} -Force.`,
-          );
+
+        let adoptRelayPort: number | null = null;
+        let adoptRelayPid: number | null = null;
+        let adoptGateway: string | null = null;
+        let adoptEndpoint: string;
+
+        if (needsRelay) {
+          // NAT mode: spawn a relay and connect via gateway
+          adoptRelayPort = relayPortReq!;
+          const relayInfo = await spawnRelayProcess({
+            sessionDirWin,
+            sessionDirWsl,
+            cdpPort: orphan.cdpPort,
+            relayPort: adoptRelayPort,
+            watchPid: orphan.rootPid,
+            idleSeconds: opts.relayIdleSeconds ?? 600,
+          });
+          adoptRelayPid = relayInfo.relayPid;
+          adoptGateway = readWslGatewayIp();
+          if (adoptGateway == null) {
+            await killProcessByPid(adoptRelayPid);
+            throw new Error(
+              "attach_cdp: orphan adoption requires WSL gateway IP but readWslGatewayIp() returned null.",
+            );
+          }
+          const e2eDeadline = Date.now() + 5000;
+          let e2eUp = false;
+          while (Date.now() < e2eDeadline) {
+            e2eUp = await probeCdp(adoptGateway, adoptRelayPort, 1500);
+            if (e2eUp) break;
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          if (!e2eUp) {
+            await killProcessByPid(adoptRelayPid);
+            throw new Error(
+              `attach_cdp: adopted browser pid ${orphan.rootPid} on port ${orphan.cdpPort} ` +
+                `but end-to-end probe via relay ${adoptRelayPort} failed. ` +
+                `Relay log: ${relayInfo.relayLogFileWsl}. ` +
+                `Browser may be deadlocked; manual recovery: Stop-Process -Id ${orphan.rootPid} -Force.`,
+            );
+          }
+          adoptEndpoint = `http://${adoptGateway}:${adoptRelayPort}`;
+        } else {
+          // Mirrored / native: connect directly to localhost
+          const e2eDeadline = Date.now() + 5000;
+          let e2eUp = false;
+          while (Date.now() < e2eDeadline) {
+            e2eUp = await probeCdp("localhost", orphan.cdpPort, 1500);
+            if (e2eUp) break;
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          if (!e2eUp) {
+            throw new Error(
+              `attach_cdp: adopted browser pid ${orphan.rootPid} on port ${orphan.cdpPort} ` +
+                `but end-to-end probe on localhost failed. ` +
+                `Browser may be deadlocked; manual recovery: Stop-Process -Id ${orphan.rootPid} -Force.`,
+            );
+          }
+          adoptEndpoint = `http://localhost:${orphan.cdpPort}`;
         }
 
         const adoptedSidecar = {
           schema_version: 1 as const,
           cdp_port: orphan.cdpPort,
           relay_port: adoptRelayPort,
-          relay_pid: relayInfo.relayPid,
+          relay_pid: adoptRelayPid,
           root_pid: orphan.rootPid,
           process_name: processName,
           user_data_dir: userDataDirWin,
@@ -862,7 +891,6 @@ export async function spawnAttachCdpRelay(
           ],
         };
 
-        const adoptedRelayPid = relayInfo.relayPid;
         const adoptedRootPid = orphan.rootPid;
         let cleanedAdopted = false;
         const cleanupAdopted = async () => {
@@ -871,7 +899,7 @@ export async function spawnAttachCdpRelay(
           const removal = await removeSession({ userDataDirWsl, session_id: opts.sessionId });
           if (removal.was_last) {
             dbg("cleanup (attach-via=adopted): was_last → killing browser tree + relay");
-            await killProcessByPid(adoptedRelayPid);
+            if (adoptRelayPid != null) await killProcessByPid(adoptRelayPid);
             await killBrowserTreeByPid(adoptedRootPid);
             const dead = await waitForWindowsPidDead(adoptedRootPid);
             if (dead) {
@@ -891,13 +919,13 @@ export async function spawnAttachCdpRelay(
         return {
           updated: adoptedSidecar,
           result: {
-            endpoint: `http://${gateway}:${adoptRelayPort}`,
+            endpoint: adoptEndpoint,
             userDataDir: userDataDirWin,
             browserPid: orphan.rootPid,
-            relayPid: relayInfo.relayPid,
+            relayPid: adoptRelayPid,
             relayPort: adoptRelayPort,
             cdpPort: orphan.cdpPort,
-            gateway,
+            gateway: adoptGateway,
             attachedVia: "adopted",
             cleanup: cleanupAdopted,
           },
@@ -1156,19 +1184,18 @@ export async function spawnAttachCdpRelay(
   }
 
   // ---- 5. Probe the relay (or localhost) end-to-end ----
-  const gateway = wsl ? readWslGatewayIp() : null;
-  const endpoint = wsl
+  const gateway = needsRelay ? readWslGatewayIp() : null;
+  const endpoint = needsRelay
     ? `http://${gateway}:${relayPort}`
-    : `http://localhost:${cdpPort}`;
+    : `http://localhost:${actualCdpPort}`;
 
   const e2eDeadline = Date.now() + 5000;
   let e2eUp = false;
   while (Date.now() < e2eDeadline) {
-    if (wsl) {
-      // probe through gateway:relayPort
+    if (needsRelay) {
       e2eUp = await probeCdp(gateway!, relayPort!, 1500);
     } else {
-      e2eUp = await probeCdp("localhost", cdpPort, 1500);
+      e2eUp = await probeCdp("localhost", actualCdpPort, 1500);
     }
     if (e2eUp) break;
     await new Promise((r) => setTimeout(r, 200));
@@ -1180,7 +1207,7 @@ export async function spawnAttachCdpRelay(
     else await killBrowserByUserDataDir(userDataDirWin, processName);
     throw new Error(
       `attach_cdp: end-to-end probe at ${endpoint} failed. ` +
-        (wsl
+        (needsRelay
           ? `Relay log: ${relayLogFileWsl}. Possible causes: Windows Firewall blocking 0.0.0.0:${relayPort}, gateway IP ${gateway} unreachable.`
           : "Browser CDP did not respond on localhost."),
     );

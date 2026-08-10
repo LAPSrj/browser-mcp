@@ -21,6 +21,30 @@ export function isWsl(): boolean {
   return cached;
 }
 
+let mirroredCache: boolean | undefined;
+
+/**
+ * Detect WSL2 mirrored networking mode. In mirrored mode, WSL shares the
+ * host's network stack — `localhost` from WSL reaches Windows directly and
+ * the PowerShell TCP relay is unnecessary. Detection: Hyper-V virtual NICs
+ * (NAT mode) always use the 00:15:5d OUI; mirrored-mode eth0 inherits the
+ * host's physical NIC MAC.
+ */
+export function isWslMirrored(): boolean {
+  if (mirroredCache !== undefined) return mirroredCache;
+  if (!isWsl()) {
+    mirroredCache = false;
+    return false;
+  }
+  try {
+    const mac = readFileSync("/sys/class/net/eth0/address", "utf8").trim().toLowerCase();
+    mirroredCache = !mac.startsWith("00:15:5d");
+  } catch {
+    mirroredCache = false;
+  }
+  return mirroredCache;
+}
+
 export function readWslGatewayIp(): string | null {
   try {
     const v = readFileSync("/proc/net/route", "utf8");
