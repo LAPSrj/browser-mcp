@@ -126,6 +126,9 @@ export function setLaunchConfig(opts: { launchTimeout?: number; launchRetries?: 
  *   (~1.0s / 3% CPU — ~8x faster). Output is byte-identical across separate
  *   launches on a machine, so it is safe for screenshot/visual-diff baselines
  *   *once the baseline is regenerated* (GPU pixels differ from SwiftShader).
+ *   On WSL, page rasterization stays on the CPU (see gpuLaunchOverrides):
+ *   Mesa's d3d12 driver mis-paints rounded borders and SVG arcs when
+ *   Chromium rasterizes on the GPU.
  * - Firefox: Playwright ships it with WebGL disabled entirely — no software
  *   burn, but WebGL simply does not render. Enabling it via firefoxUserPrefs
  *   makes WebGL work AND it is GPU-accelerated automatically (~0.84s / 5% CPU),
@@ -172,14 +175,26 @@ export interface GpuLaunchOverrides {
  * WebKit needs nothing (already GPU).
  */
 export function gpuLaunchOverrides(browserName: BrowserName): GpuLaunchOverrides {
-  if (!gpuEnabled()) return { args: [] };
+  // Mesa's d3d12 driver (the WSLg GPU path) mis-paints Skia's GPU path fills:
+  // a box with border-radius + a semi-transparent border + a background comes
+  // out as an X / "bowtie", and concave SVG paths made of arcs lose their
+  // curves. Verified live (Chromium 145.0.7632.6, Mesa 23.2.1, Intel Iris Xe):
+  // with GPU rasterization forced on, d3d12 is broken while llvmpipe and
+  // SwiftShader render correctly; adding --disable-gpu-rasterization alone
+  // makes d3d12 captures pixel-identical to SwiftShader. Compositing and WebGL
+  // stay on the GPU; only page content is rasterized on the CPU. Headed
+  // Chromium picks d3d12 + GPU raster on its own, so this applies even with
+  // BROWSER_MCP_GPU=0. Regression test: tests/test-gpu-raster-bowtie.mjs.
+  const wslRasterFix = browserName === "chromium" && isWsl() ? ["--disable-gpu-rasterization"] : [];
+
+  if (!gpuEnabled()) return { args: wslRasterFix };
 
   if (browserName === "chromium") {
     const args = [
       "--use-gl=angle",
       "--use-angle=gl",
       "--ignore-gpu-blocklist",
-      "--enable-gpu-rasterization",
+      ...(wslRasterFix.length ? wslRasterFix : ["--enable-gpu-rasterization"]),
     ];
     const env = isWsl() ? { ...process.env, MESA_LOADER_DRIVER_OVERRIDE: "d3d12" } as Record<string, string> : undefined;
     return { args, env };
@@ -191,6 +206,24 @@ export function gpuLaunchOverrides(browserName: BrowserName): GpuLaunchOverrides
 
   // webkit: already GPU-accelerated by default.
   return { args: [] };
+}
+
+/**
+ * On the headless GPU path (local Chromium with GPU mode on), the browser's
+ * first Page.captureScreenshot fails with "Unable to capture screenshot"
+ * until a frame has been drawn. Measured live on WSL/Mesa d3d12: the first
+ * capture failed in 3 of 4 fresh browsers and every later capture in the same
+ * browser succeeded, even on a new page. Waiting two animation frames on the
+ * initial about:blank page, before any navigation, avoided it in 6 of 6.
+ * Call once on the first page of a freshly launched browser.
+ */
+export async function warmUpFirstFrame(page: Page, browserName: BrowserName): Promise<void> {
+  if (browserName !== "chromium" || !gpuEnabled()) return;
+  try {
+    await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+  } catch {
+    // best-effort: a failed warm-up only means the old first-capture behavior
+  }
 }
 
 export interface LaunchOptions {
@@ -370,6 +403,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     // far longer than a local browser, so give the context a generous default.
     context.setDefaultTimeout(browserStackDevice ? 120000 : 30000);
     const page = await context.newPage();
+    if (!useBrowserStack) await warmUpFirstFrame(page, browserName);
 
     // Run plugin session hooks (e.g. auth) after context is ready.
     // Hooks from the tool context (resolved from the caller's `use` param)

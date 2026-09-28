@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
-import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, type BrowserName } from "../utils/browser.js";
+import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, keepBrowserBehindUser, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
@@ -481,6 +481,7 @@ class SessionManager {
       context = await browser.newContext(contextOpts as any);
       context.setDefaultTimeout(30000);
       page = await context.newPage();
+      await warmUpFirstFrame(page, browserName);
     }
 
     if (opts.url) {
