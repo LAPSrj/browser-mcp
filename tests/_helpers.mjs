@@ -22,7 +22,7 @@
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distRoot = path.resolve(__dirname, "..", "dist");
@@ -32,8 +32,8 @@ const {
   BROWSER_PRODUCT_SPECS,
   resolveBrowserProduct,
   defaultExePath,
-} = await import(path.join(distRoot, "utils/browser-products.js"));
-const { isWsl } = await import(path.join(distRoot, "utils/wsl.js"));
+} = await import(pathToFileURL(path.join(distRoot, "utils/browser-products.js")).href);
+const { isWsl } = await import(pathToFileURL(path.join(distRoot, "utils/wsl.js")).href);
 
 function skip(reason) {
   console.log(`SKIP: ${reason}`);

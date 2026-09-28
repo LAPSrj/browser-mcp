@@ -32,6 +32,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { windowsSystemBinary } from "./wsl.js";
 
 const SCHEMA_VERSION = 1;
 const SIDECAR_FILENAME = ".bm-browser.json";
@@ -79,7 +80,7 @@ function lockFilePath(userDataDirWsl: string): string {
   return `${userDataDirWsl}/${LOCK_FILENAME}`;
 }
 
-const PS = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+const PS = windowsSystemBinary("WindowsPowerShell/v1.0/powershell.exe");
 
 /**
  * Check if a Windows PID is alive. Used for sidecar PID-liveness sweep

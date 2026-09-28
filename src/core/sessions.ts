@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
 import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
-import { forceKillProfile, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import { forceKillProfile, keepBrowserBehindUser, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
 import { execFileSync } from "node:child_process";
 import {
@@ -17,6 +17,63 @@ import { isWsl } from "../utils/wsl.js";
 // Persistent browser sessions an agent can keep alive across MCP tool
 // calls. Guards against runaway lifetimes with idle + wall-clock TTLs,
 // a configurable session cap, and a SIGTERM/SIGINT cleanup hook.
+
+/**
+ * Browser root PID when this attach_cdp browser should stay behind the user's
+ * windows (Windows: WSL or native; browsers we launched, or another session
+ * launched on the same profile). null otherwise, including user-managed
+ * browsers (attach_cdp: "http://…"), whose windows we leave alone.
+ */
+function backgroundBrowserPid(attachCdp: AttachCdpHandle | undefined): number | null {
+  if (!attachCdp?.browserPid) return null;
+  return isWsl() || process.platform === "win32" ? attachCdp.browserPid : null;
+}
+
+/**
+ * Open a page without the browser taking focus: a background tab in its own
+ * window, then push that window behind the user's window. Playwright's
+ * newPage() opens a foreground tab and Chromium activates the window to show
+ * it (verified live: focus taken every time). A background tab in an existing
+ * window can't be screenshotted (hidden tab), so each tab gets its own window,
+ * where it is always the selected tab.
+ */
+async function openBackgroundPage(context: BrowserContext, browserPid: number): Promise<Page> {
+  const browser = context.browser();
+  if (!browser) throw new Error("openBackgroundPage: context has no browser");
+  const checked = new Set<Page>(context.pages());
+  const cdp = await browser.newBrowserCDPSession();
+  let targetId: string;
+  try {
+    ({ targetId } = await cdp.send("Target.createTarget", { url: "about:blank", newWindow: true, background: true }));
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+  // Match the new Page by target id: another session sharing this profile
+  // may be opening pages in the same context at the same time.
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    for (const p of context.pages()) {
+      if (checked.has(p)) continue;
+      checked.add(p);
+      try {
+        const s = await context.newCDPSession(p);
+        const { targetInfo } = await s.send("Target.getTargetInfo");
+        await s.detach().catch(() => {});
+        if (targetInfo.targetId !== targetId) continue;
+      } catch {
+        continue; // page closed mid-check
+      }
+      try {
+        keepBrowserBehindUser(browserPid);
+      } catch (e) {
+        console.error(`[browser-mcp] open_tab: could not move the new window behind the user's windows (${(e as Error).message})`);
+      }
+      return p;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`openBackgroundPage: page for target ${targetId} did not appear within 15s`);
+}
 
 export interface OpenSessionOptions {
   browser?: BrowserName;
@@ -360,7 +417,8 @@ class SessionManager {
         // DON'T inherit any existing page — create a fresh one. The owner-
         // ship filter on context.on('page') (added below) will keep our
         // session.pages clean of other servers' tabs going forward.
-        page = await context.newPage();
+        const bgPid = backgroundBrowserPid(attachCdp);
+        page = bgPid ? await openBackgroundPage(context, bgPid) : await context.newPage();
         // restore_previous_tabs cleanup is also skipped — those "previous"
         // tabs may be another active session's current work.
       } else {
@@ -944,7 +1002,8 @@ class SessionManager {
     // a tab id from nextAutoTabId() (potentially a different one than the
     // caller-supplied tab_id). Pre-seed the map with our chosen tid so the
     // context handler sees it already exists and skips re-tracking.
-    const page = await s.context.newPage();
+    const bgPid = backgroundBrowserPid(s.attachCdp);
+    const page = bgPid ? await openBackgroundPage(s.context, bgPid) : await s.context.newPage();
     // The context.on('page') handler already registered this page under a
     // freshly-allocated auto tab id. Re-key it under the caller's chosen id.
     let autoTid: string | undefined;
@@ -975,8 +1034,20 @@ class SessionManager {
       throw new Error(`Tab "${tab_id}" not found in session.`);
     }
     s.activeTabId = tab_id;
+    const page = s.pages.get(tab_id)!;
+    // Windows attach_cdp: tabs from open_tab are each the selected tab of their
+    // own window, so they already render, and bringToFront would take focus
+    // from the user (verified live). Only a hidden tab (a popup or restored
+    // tab sharing a window) still needs selecting.
+    if (backgroundBrowserPid(s.attachCdp)) {
+      const visibility = await page.evaluate(() => document.visibilityState).catch(() => "hidden");
+      if (visibility === "visible") {
+        this.touch(id);
+        return;
+      }
+    }
     try {
-      await s.pages.get(tab_id)?.bringToFront();
+      await page.bringToFront();
     } catch {
       // bringToFront is best-effort in headless mode
     }

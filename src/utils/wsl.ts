@@ -62,3 +62,16 @@ export function readWslGatewayIp(): string | null {
   }
   return null;
 }
+
+/**
+ * Path to a Windows System32 binary (e.g. "cmd.exe",
+ * "WindowsPowerShell/v1.0/powershell.exe") that this process can execute:
+ * the /mnt/c mount under WSL, the real path on native Windows.
+ */
+export function windowsSystemBinary(relPath: string): string {
+  if (process.platform === "win32") {
+    const root = process.env.SystemRoot ?? "C:\\Windows";
+    return `${root}\\System32\\${relPath.replace(/\//g, "\\")}`;
+  }
+  return `/mnt/c/Windows/System32/${relPath}`;
+}

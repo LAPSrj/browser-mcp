@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { sanitizeProcessName } from "./browser-products.js";
-import { isWsl, isWslMirrored, readWslGatewayIp } from "./wsl.js";
+import { isWsl, isWslMirrored, readWslGatewayIp, windowsSystemBinary } from "./wsl.js";
 import {
   aliveWindowsPids,
   finalizeSidecarTeardown,
@@ -210,10 +210,80 @@ L 'exited'
 
 function runPS(scriptText: string, timeoutMs = 5000): string {
   return execFileSync(
-    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    windowsSystemBinary("WindowsPowerShell/v1.0/powershell.exe"),
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", scriptText],
     { encoding: "utf8", timeout: timeoutMs },
   ).trim();
+}
+
+/**
+ * Keep the browser's windows behind whatever the user is working in, without
+ * ever activating them (Windows: WSL or native).
+ *
+ * - Minimized windows are restored without focus and sent to the bottom of the
+ *   window stack. The launch uses `start /MIN` so the window never takes focus,
+ *   but Chromium stops producing frames for a minimized window and
+ *   Page.captureScreenshot hangs (verified live: 0/5 screenshots minimized,
+ *   5/5 restored). A covered window keeps rendering thanks to
+ *   --disable-backgrounding-occluded-windows.
+ * - Other windows that sit above the user's focused window (e.g. a new tab
+ *   window opened by openBackgroundPage, which Chromium shows on top without
+ *   focus) are sent to the bottom. Skipped while the user is in the browser.
+ *
+ * SW_SHOWNOACTIVATE (4) restores without focus; HWND_BOTTOM (1) with
+ * SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE (0x13) sends it behind other windows.
+ * With waitForWindow, polls up to ~5s for a window to exist (fresh launch).
+ * Returns the number of browser windows found.
+ */
+export function keepBrowserBehindUser(browserPid: number, waitForWindow = false): number {
+  const script = String.raw`
+Add-Type @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class BmBg {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  static bool IsAbove(IntPtr h, IntPtr target) {
+    for (var w = GetWindow(h, 2); w != IntPtr.Zero; w = GetWindow(w, 2)) if (w == target) return true;
+    return false;
+  }
+  public static int Run(uint pid) {
+    var fgw = GetForegroundWindow(); uint fgPid; GetWindowThreadProcessId(fgw, out fgPid);
+    var wins = new List<IntPtr>();
+    EnumWindows((h, l) => {
+      uint p; GetWindowThreadProcessId(h, out p);
+      if (p == pid && IsWindowVisible(h)) wins.Add(h);
+      return true;
+    }, IntPtr.Zero);
+    foreach (var h in wins) {
+      if (IsIconic(h)) {
+        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
+        ShowWindow(h, 4);
+        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
+      } else if (fgPid != pid && IsAbove(h, fgw)) {
+        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
+      }
+    }
+    return wins.Count;
+  }
+}
+"@
+$n = [BmBg]::Run(${browserPid})
+for ($i = 0; ${waitForWindow ? "$true" : "$false"} -and $i -lt 25 -and $n -eq 0; $i++) {
+  Start-Sleep -Milliseconds 200
+  $n = [BmBg]::Run(${browserPid})
+}
+$n`;
+  const out = runPS(script, 20000);
+  return parseInt(out, 10) || 0;
 }
 
 function resolveWindowsTemp(): string {
@@ -352,7 +422,7 @@ async function killBrowserTreeByPid(pid: number): Promise<void> {
   // session close when --user-data-dir was overridden.
   try {
     execFileSync(
-      "/mnt/c/Windows/System32/taskkill.exe",
+      windowsSystemBinary("taskkill.exe"),
       ["/F", "/T", "/PID", String(pid)],
       { encoding: "utf8", timeout: 8000, stdio: "pipe" },
     );
@@ -546,10 +616,17 @@ async function spawnRelayProcess(opts: {
 }
 
 function spawnDetachedWindows(args: string[]): number {
-  // Use cmd.exe /c start /B so the spawned Windows process is fully decoupled from the WSL Node parent.
-  const child = spawn("/mnt/c/Windows/System32/cmd.exe", args, {
+  // Use cmd.exe /c start /B so the spawned Windows process is fully decoupled from the Node parent.
+  // Under WSL, interop quotes each argument for us. On native Windows, Node's
+  // quoting (backslash-escaped quotes) is not what cmd.exe parses, so pass the
+  // command line verbatim and double-quote any argument with spaces or cmd
+  // metacharacters (e.g. a --user-data-dir under "C:\Users\First Last").
+  const win32 = process.platform === "win32";
+  const cmdQuote = (a: string) => (a === '""' || !/[\s&|<>^()]/.test(a) ? a : `"${a}"`);
+  const child = spawn(windowsSystemBinary("cmd.exe"), win32 ? args.map(cmdQuote) : args, {
     detached: true,
     stdio: "ignore",
+    windowsVerbatimArguments: win32,
   });
   child.unref();
   return child.pid ?? -1;
@@ -1038,17 +1115,29 @@ export async function spawnAttachCdpRelay(
     // other way, revisit — the Preferences fix (set profile.exit_type=
     // "Normal" + exited_cleanly=true) is the backup.
     ...(opts.restorePreviousTabs ? [] : ["--hide-crash-restore-bubble"]),
+    // The Windows launch (WSL or native) keeps the window behind the user's windows (see
+    // sendBrowserWindowsToBackground). Chromium throttles or stops rendering
+    // covered windows and background renderers, which stalls screenshots, rAF
+    // and timers; these switches keep a covered window rendering normally.
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     "about:blank",
   ];
 
   dbg("spawning browser:", { wsl, exe: opts.executablePath, processName, port: cdpPort, profile: userDataDirWin });
   dbg("browserArgs:", browserArgs);
-  if (wsl) {
+  if (wsl || process.platform === "win32") {
+    // /MIN launches with SW_SHOWMINNOACTIVE: the window opens minimized without
+    // taking focus, so it doesn't interrupt the user. Once CDP is up, step 3b
+    // restores it behind the user's windows (a minimized window can't be
+    // screenshotted). The user brings it forward from the taskbar for login/MFA.
     const cmdArgs = [
       "/c",
       "start",
       '""',
       "/B",
+      "/MIN",
       opts.executablePath,
       ...browserArgs,
     ];
@@ -1067,12 +1156,6 @@ export async function spawnAttachCdpRelay(
         dbg("tasklist diagnostic failed:", e);
       }
     }
-  } else if (process.platform === "win32") {
-    const child = spawn(opts.executablePath, browserArgs, {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
   } else {
     // macOS / Linux native — spawn directly
     const child = spawn(opts.executablePath, browserArgs, {
@@ -1118,6 +1201,21 @@ export async function spawnAttachCdpRelay(
 
   const browserPid = await findBrowserRootPid(actualCdpPort, userDataDirWin, processName);
   dbg(`browser root pid: ${browserPid}`);
+
+  // ---- 3b. Move the minimized window behind the user's windows (WSL / Windows) ----
+  // Non-fatal: the browser still works, but a window left minimized can't be
+  // screenshotted, so say so on stderr.
+  if (wsl || process.platform === "win32") {
+    try {
+      const found = browserPid ? keepBrowserBehindUser(browserPid, true) : 0;
+      dbg(`browser windows moved to background: ${found}`);
+      if (found === 0) {
+        console.error(`[browser-mcp] attach_cdp: no browser window found for pid ${browserPid}; if the window stays minimized, screenshots will time out until it is restored.`);
+      }
+    } catch (e) {
+      console.error(`[browser-mcp] attach_cdp: could not move the browser window to the background (${(e as Error).message}); screenshots time out while it stays minimized.`);
+    }
+  }
 
   // ---- 4. Start the PS relay now that we know the browser PID to watch ----
   if (wsl && relayPort != null) {
