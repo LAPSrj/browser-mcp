@@ -5,8 +5,9 @@
  * Throws if the URL is relative and no baseUrl is configured.
  */
 export function resolveUrl(url: string, baseUrl?: string): string {
-  // Already absolute
-  if (/^https?:\/\//i.test(url)) {
+  // Already absolute: any scheme (http:, data:, file:, about:, chrome:, blob:…).
+  // A digit after the colon means host:port (e.g. "localhost:3000/x"), not a scheme.
+  if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(url)) {
     return url;
   }
 
