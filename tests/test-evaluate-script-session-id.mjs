@@ -8,6 +8,7 @@
  *  3. Ephemeral (no session_id) with url → backwards-compatible behavior.
  *  4. Validation: neither session_id nor url → error.
  *  5. tab_id targeting works.
+ *  6. undefined / non-JSON results still produce a string `text`.
  *
  * Run after `npm run build` (or `npx tsc`).
  */
@@ -144,6 +145,22 @@ console.log("\n=== Test 5: tab_id routes evaluation to the named tab ===");
   } finally {
     await sessionManager.close(session.session_id);
   }
+}
+
+// ===========================================================================
+// 6. Scripts that yield undefined (bare expression, no `return`) or a
+//    non-JSON value must still return a string `text`. JSON.stringify gives
+//    undefined for these, which fails MCP result validation.
+// ===========================================================================
+console.log("\n=== Test 6: undefined / non-JSON results still produce string text ===");
+{
+  for (const script of ["document.title", "return undefined", "return () => 1"]) {
+    const res = await evaluateScriptTool({ url: URL_A, script });
+    const text = res.content[res.content.length - 1]?.text;
+    check(typeof text === "string" && text.length > 0, `string text for ${JSON.stringify(script)}`, String(text));
+  }
+  const res = await evaluateScriptTool({ url: URL_A, script: "document.title" });
+  check(/use `return`/.test(parseText(res)), "missing-return hint included", parseText(res));
 }
 
 console.log(`\n=== Total: ${pass} passed, ${fail} failed ===`);

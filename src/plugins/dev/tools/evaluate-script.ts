@@ -72,9 +72,14 @@ export async function evaluateScriptTool(params: EvaluateScriptParams) {
     try {
       const raw = await evaluateScript(page, script);
       try {
-        resultText = JSON.stringify(raw, null, 2);
+        // JSON.stringify returns undefined (not a string) for undefined,
+        // functions and symbols; an undefined `text` fails MCP result validation.
+        resultText = JSON.stringify(raw, null, 2) ?? String(raw);
       } catch {
         resultText = String(raw);
+      }
+      if (raw === undefined) {
+        resultText += " (the script returned no value; use `return` to yield one)";
       }
     } catch (error) {
       errorText = (error as Error).message;
