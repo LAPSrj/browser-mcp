@@ -216,7 +216,7 @@ Requires `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY`.
 
 - **Idle TTL** — default 5 min. Reset on every tool call.
 - **Wall TTL** — default 30 min (2 min with video).
-- **Max concurrent sessions** — `BROWSER_MCP_MAX_SESSIONS` (default 5).
+- **Max concurrent sessions** — `BROWSER_MCP_MAX_SESSIONS` (default 5, `0` = unlimited).
 - **Process lifetime** — sessions die when the MCP server does. SIGINT /
   SIGTERM / `beforeExit` all run cleanup.
 
@@ -472,7 +472,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_OUTPUT_DIR` | `.browser` | Artifacts directory (screenshots, videos, traces). |
 | `BROWSER_MCP_PLUGINS` | — | Comma-separated plugin names to load (e.g. `dev,wp,wp-gutenberg`). |
 | `BROWSER_MCP_MAX_BROWSERS` | `3` | Max concurrent ephemeral browser launches. `0` = unlimited. |
-| `BROWSER_MCP_MAX_SESSIONS` | `5` | Max persistent sessions open at once. |
+| `BROWSER_MCP_MAX_SESSIONS` | `5` | Max persistent sessions open at once. `0` = unlimited. |
 | `BROWSER_MCP_LAUNCH_TIMEOUT` | `30000` | Per-launch timeout in ms. |
 | `BROWSER_MCP_LAUNCH_RETRIES` | `2` | Launch retries. |
 | `BROWSER_MCP_TOOL_TIMEOUT` | `90000` | Hard tool timeout in ms. |

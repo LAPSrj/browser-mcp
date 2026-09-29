@@ -13,6 +13,7 @@ import {
   resolveBrowserProduct,
 } from "../utils/browser-products.js";
 import { isWsl } from "../utils/wsl.js";
+import { parseIntEnv } from "../config.js";
 
 // Persistent browser sessions an agent can keep alive across MCP tool
 // calls. Guards against runaway lifetimes with idle + wall-clock TTLs,
@@ -265,10 +266,8 @@ class SessionManager {
   private sessions = new Map<string, Session>();
   private janitor?: NodeJS.Timeout;
   private signalsBound = false;
-  private maxSessions = Math.max(
-    1,
-    parseInt(process.env.BROWSER_MCP_MAX_SESSIONS || "5", 10) || 5,
-  );
+  // 0 = unlimited
+  private maxSessions = Math.max(0, parseIntEnv("BROWSER_MCP_MAX_SESSIONS", 5));
 
   private ensureJanitor() {
     if (this.janitor) return;
@@ -292,7 +291,7 @@ class SessionManager {
   }
 
   async open(opts: OpenSessionOptions): Promise<SessionInfo> {
-    if (this.sessions.size >= this.maxSessions) {
+    if (this.maxSessions > 0 && this.sessions.size >= this.maxSessions) {
       throw new Error(
         `Session limit reached (${this.maxSessions} open). Close an existing ` +
           `session first or raise BROWSER_MCP_MAX_SESSIONS.`,

@@ -9,7 +9,7 @@ export interface ServerConfig {
   toolTimeout?: number;
 }
 
-function parseIntEnv(name: string, fallback: number): number {
+export function parseIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
   const n = parseInt(raw, 10);

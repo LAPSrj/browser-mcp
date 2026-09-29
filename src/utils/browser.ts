@@ -4,6 +4,7 @@ import { chromium, firefox, webkit, type Browser, type BrowserType, type Browser
 import { connectBrowserStack, type BrowserStackCaps } from "./browserstack.js";
 import { Semaphore } from "./semaphore.js";
 import { isWsl } from "./wsl.js";
+import { parseIntEnv } from "../config.js";
 import type { SessionHook } from "../plugins/types.js";
 
 export type BrowserName = "chromium" | "firefox" | "webkit";
@@ -102,7 +103,7 @@ const browserTypes: Record<BrowserName, BrowserType> = {
 };
 
 // 0 = unlimited (no concurrency limit)
-const MAX_BROWSERS = Math.max(0, parseInt(process.env.BROWSER_MCP_MAX_BROWSERS || "3", 10) || 3);
+const MAX_BROWSERS = Math.max(0, parseIntEnv("BROWSER_MCP_MAX_BROWSERS", 3));
 const semaphore = new Semaphore(MAX_BROWSERS);
 
 // Configurable via env, overridable at runtime via setLaunchConfig()
