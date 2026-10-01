@@ -361,6 +361,12 @@ WP_URL_PROD=https://mysite.com      WP_USERNAME_PROD=admin   WP_PASSWORD_PROD=p,
 WP_REQUIRE_ALLOW_WRITE_PROD=1       # optional, see below
 ```
 
+Login goes through the `wp-login.php` form, so it needs the account's real
+password; WordPress application passwords don't work there. When
+WordPress shows its "Confirm your administration email" screen after login
+(every 6 months for admins), the login counts as successful and the prompt
+is left for a person to answer; a line on stderr says so.
+
 Each site logs in separately and caches its own cookie. `use: "wordpress"`
 picks the site from the call's `url`: a full URL uses the site it belongs to
 (same host, path under the site's path), and a relative URL or no URL uses

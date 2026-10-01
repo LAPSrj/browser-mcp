@@ -18,14 +18,14 @@ This file is the consumer-facing manual for agents that *invoke* browser-mcp too
 The server boots with a plugin set defined by the `BROWSER_MCP_PLUGINS` env var (comma-separated, e.g. `dev,wp,wp-gutenberg,design-compare`). Each plugin can:
 
 - **Register tools** (the `mcp__browser__*` surface). A tool is available whenever its registering plugin is loaded — there's no per-tool mode gate.
-- **Register modes** as session-level auth/setup bundles. A mode is a set of hooks (e.g. inject auth cookies before any tool runs in this session) that consumers opt into per session. Currently the `wp` plugin registers the `wordpress` mode (WordPress admin auth injection); no other plugin registers a mode.
+- **Register modes** as session-level auth/setup bundles. A mode is a set of hooks (e.g. inject auth cookies before any tool runs in this session) that consumers opt into per session. Currently the `wp` plugin registers the `wordpress` mode (WordPress admin auth injection; the site is picked from the call's full `url`, else the first site) plus one `wordpress:<name>` mode per `WP_SITES` site; no other plugin registers a mode. Mode names are case-insensitive.
 - **Declare required env vars and dependencies** on other plugins.
 
-**Tolerant loader.** A plugin with a missing required env var is silently skipped, and its dependents cascade-skip (e.g. `wp-gutenberg` skips when `wp` skips for a missing `WP_URL`). Stderr carries the warning; the server still boots and unaffected plugins still work. Hard errors only fire on real config bugs (sealed registry, name collision, undeclared dependency, tool/action/mode collision).
+**Tolerant loader.** A plugin with a missing required env var is silently skipped, and its dependents cascade-skip (e.g. `wp-gutenberg` skips when `wp` skips because neither `WP_URL` nor `WP_SITES` is set, or a site listed in `WP_SITES` has no `WP_URL_<NAME>`). Stderr carries the warning; the server still boots and unaffected plugins still work. Hard errors only fire on real config bugs (sealed registry, name collision, undeclared dependency, tool/action/mode collision).
 
 > **Hazard:** if `mcp__browser__list_modes` returns "No modes registered" or an expected mode is missing, the cause is almost always a silently-skipped plugin from missing env. See § Diagnosis › Mode not registered for the fix recipe.
 
-**MCP scopes replace, do not merge.** When the same server name (`browser`) appears in both `~/.claude.json` (user scope) and a project-local `.mcp.json`, the project entry **fully replaces** the user entry. There is no env-block merge. If a project needs a different `WP_URL`, the project entry must duplicate the full env block, not just the override.
+**MCP scopes replace, do not merge.** When the same server name (`browser`) appears in both `~/.claude.json` (user scope) and a project-local `.mcp.json`, the project entry **fully replaces** the user entry. There is no env-block merge. If a project needs a different `WP_URL` / `WP_SITES`, the project entry must duplicate the full env block, not just the override.
 
 **Where plugins live in source.** `src/plugins/dev`, `src/plugins/design-compare`, `src/plugins/wp`, `src/plugins/wp-gutenberg`. Plugin manifests at `src/plugins/<name>/index.ts`. Tool implementations under `src/plugins/<name>/tools/` (or `src/core/` for primitives). The plugin registry (`src/plugins/registry.ts`) enforces the dependency graph and the cascade-skip behavior.
 
@@ -494,7 +494,7 @@ Surface granularity is **per contract**, not per tool. Tools that share a contra
 
 **Authoritative for:** enumeration of currently registered modes in this server process. Output reflects the env-var-loaded plugin set.
 
-**Not authoritative for:** anything about plugins that aren't loaded. A skipped plugin produces no entry; the tool can't tell you "this would be present if you set `WP_URL`."
+**Not authoritative for:** anything about plugins that aren't loaded. A skipped plugin produces no entry; the tool can't tell you "this would be present if you set `WP_URL` or `WP_SITES`."
 
 **Coordinate frame:** none.
 

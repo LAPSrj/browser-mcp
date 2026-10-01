@@ -111,7 +111,7 @@ export const useSchemaField = {
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe(
-      'Opt into plugin-provided capabilities by mode name. E.g. use: "wordpress" applies the wp plugin\'s authenticated WP session cookie to this call, letting the tool reach /wp-admin/* and other login-gated URLs. Pass an array to stack multiple modes. Discover available modes via the list_modes tool.',
+      'Opt into plugin-provided capabilities by mode name. E.g. use: "wordpress" applies the wp plugin\'s authenticated WP session cookie to this call, letting the tool reach /wp-admin/* and other login-gated URLs. With several WordPress sites configured, "wordpress" logs into the site the call\'s full url belongs to (the first site for a relative url), and "wordpress:<site>" picks a site by name. Pass an array to stack multiple modes. Discover available modes via the list_modes tool.',
     ),
 };
 
