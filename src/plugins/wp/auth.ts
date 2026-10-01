@@ -1,5 +1,15 @@
 import type { BrowserContext, Page } from "playwright";
-import type { ResolvedPluginConfig } from "../types.js";
+
+/** One site's login settings (a WpSiteConfig from config.ts fits). */
+export interface WpAuthConfig {
+  wpUrl: string;
+  wpUsername?: string;
+  wpPassword?: string;
+  wpLoginUrl?: string;
+  wpSessionTtl?: string;
+  /** Suffix on this site's env var names, for error messages ("_PROD"; "" for WP_URL). */
+  envSuffix?: string;
+}
 
 interface StorageStateData {
   cookies: Array<{
@@ -19,6 +29,20 @@ interface StorageStateData {
 }
 
 /**
+ * WordPress's "Confirm your administration email" screen
+ * (wp-login.php?action=confirm_admin_email, or the same action on a custom
+ * login URL). WordPress redirects anonymous visitors away from it, so
+ * landing here means the login succeeded.
+ */
+function isAdminEmailConfirmUrl(url: string): boolean {
+  try {
+    return new URL(url).searchParams.get("action") === "confirm_admin_email";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Manages WordPress authentication via wp-login.php.
  *
  * Logs in once via Playwright form submission, caches the storageState
@@ -31,8 +55,13 @@ export class WpAuth {
   private loginLock: Promise<StorageStateData> | null = null;
   private sessionTtl: number;
 
-  constructor(private config: ResolvedPluginConfig) {
+  constructor(private config: WpAuthConfig) {
     this.sessionTtl = parseInt(config.wpSessionTtl ?? "3600", 10) * 1000;
+  }
+
+  /** Env var name for this site, e.g. envVar("WP_PASSWORD") → "WP_PASSWORD_PROD". */
+  private envVar(base: string): string {
+    return `${base}${this.config.envSuffix ?? ""}`;
   }
 
   /** Get storageState for a new browser context. Logs in if needed. */
@@ -80,7 +109,13 @@ export class WpAuth {
 
   /** Check if a page ended up on the login page (session expired). */
   isOnLoginPage(page: Page): boolean {
-    const url = page.url();
+    return this.isLoginUrl(page.url());
+  }
+
+  private isLoginUrl(url: string): boolean {
+    // The admin email confirmation screen lives on the login URL but is only
+    // shown to a logged-in user, so it means the session is valid.
+    if (isAdminEmailConfirmUrl(url)) return false;
     // Check for standard WP login page and custom login URLs
     if (url.includes("wp-login.php")) return true;
     // Check if we were redirected to the configured custom login URL
@@ -99,7 +134,8 @@ export class WpAuth {
   private async performLogin(page: Page): Promise<StorageStateData> {
     if (!this.canAutoLogin()) {
       throw new Error(
-        "WordPress auto-login is not configured (WP_USERNAME and WP_PASSWORD not set). " +
+        `WordPress auto-login is not configured for ${this.config.wpUrl} ` +
+        `(${this.envVar("WP_USERNAME")} and ${this.envVar("WP_PASSWORD")} not set). ` +
         "Either set those env vars, or authenticate manually in a persistent browser session " +
         "before calling tools that need an authenticated WP context."
       );
@@ -111,7 +147,7 @@ export class WpAuth {
     } catch (error) {
       throw new Error(
         `Could not reach WordPress at ${loginUrl}. ` +
-        `Verify the site is running and WP_URL is correct. ` +
+        `Verify the site is running and ${this.envVar("WP_URL")} is correct. ` +
         `(${(error as Error).message})`
       );
     }
@@ -123,27 +159,28 @@ export class WpAuth {
       if (!userField) {
         throw new Error(
           `Login form not found at ${loginUrl}. ` +
-          `The site may use a custom login URL. Set WP_LOGIN_URL to override.`
+          `The site may use a custom login URL. Set ${this.envVar("WP_LOGIN_URL")} to override.`
         );
       }
     }
 
     // Clear any existing values and fill credentials
     await page.fill("#user_login", "");
-    await page.fill("#user_login", this.config.wpUsername);
+    await page.fill("#user_login", this.config.wpUsername!);
     await page.fill("#user_pass", "");
-    await page.fill("#user_pass", this.config.wpPassword);
+    await page.fill("#user_pass", this.config.wpPassword!);
 
     // Click submit. WordPress either redirects to wp-admin (success) or
     // re-renders the login page with an #login_error (failure).
     await page.click("#wp-submit");
 
-    // Wait for either: successful redirect away from wp-login.php, OR the
-    // login error div to appear. Whichever happens first ends the wait.
+    // Wait for either: successful redirect away from the login form (to
+    // wp-admin or the admin email confirmation screen), OR the login error
+    // div to appear. Whichever happens first ends the wait.
     try {
       await Promise.race([
         page.waitForURL(
-          (url) => !url.toString().includes("wp-login.php"),
+          (url) => !this.isLoginUrl(url.toString()),
           { timeout: 30000 },
         ),
         page.waitForSelector("#login_error", { timeout: 30000 }),
@@ -163,7 +200,17 @@ export class WpAuth {
     if (this.isOnLoginPage(page)) {
       throw new Error(
         `WordPress login failed: still on login page after form submission. ` +
-        `Verify WP_USERNAME and WP_PASSWORD are correct.`
+        `Verify ${this.envVar("WP_USERNAME")} and ${this.envVar("WP_PASSWORD")} are correct.`
+      );
+    }
+
+    // WordPress sends admins here every 6 months after login. The auth
+    // cookies are already set, so leave the prompt for a human to answer.
+    if (isAdminEmailConfirmUrl(page.url())) {
+      console.error(
+        `[browser-mcp] WordPress showed its "Confirm your administration email" screen after login ` +
+        `at ${loginUrl}. Login succeeded; the prompt was left unanswered and will reappear on the ` +
+        `next login until an admin answers it in a browser.`,
       );
     }
 
@@ -174,23 +221,4 @@ export class WpAuth {
 
     return state;
   }
-}
-
-// Shared WpAuth instance — the wp plugin installs itself here on register()
-// so wp-gutenberg (and any future wp-* plugin) can reuse the same cached
-// login session without double-authenticating.
-let sharedAuth: WpAuth | null = null;
-
-export function setSharedWpAuth(auth: WpAuth): void {
-  sharedAuth = auth;
-}
-
-export function getSharedWpAuth(): WpAuth {
-  if (!sharedAuth) {
-    throw new Error(
-      "WordPress auth is not initialized. Ensure BROWSER_MCP_PLUGINS includes " +
-      '"wp" before any plugin that depends on it (e.g. wp-gutenberg).',
-    );
-  }
-  return sharedAuth;
 }

@@ -55,7 +55,8 @@ function withTimeout<T extends { use?: UseParam }>(
         isError: true,
       };
     }
-    const ctx = createToolContext(sessionHooks);
+    const rawUrl = (params as { url?: unknown }).url;
+    const ctx = createToolContext(sessionHooks, typeof rawUrl === "string" ? rawUrl : undefined);
     // result_path only reaches here for tools registered with resultFile
     // (zod drops it from every other schema); the tool itself never sees it.
     // stripUse returns a copy, so deleting from it leaves `params` intact.

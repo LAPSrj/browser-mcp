@@ -1,5 +1,6 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import {
   selectBlock,
@@ -15,9 +16,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
  */
 export function createInspectToolbarHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
@@ -25,18 +24,20 @@ export function createInspectToolbarHandler(
     client_id?: string;
     block_path?: number[];
     session_id?: string;
+    site?: string;
   }): Promise<ToolResponse> => {
     const { post_id, block_index, client_id, block_path, session_id } = params;
 
+    const site = resolveToolSite(core, sites, params);
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_inspect_toolbar",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport: { width: 1440, height: 900 },
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {

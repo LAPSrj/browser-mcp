@@ -1,5 +1,6 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
@@ -15,9 +16,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
  */
 export function createEvaluateHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
@@ -25,6 +24,7 @@ export function createEvaluateHandler(
     viewport?: { width: number; height: number };
     waitForEditor?: boolean;
     session_id?: string;
+    site?: string;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -34,10 +34,11 @@ export function createEvaluateHandler(
       session_id,
     } = params;
 
+    const site = resolveToolSite(core, sites, params);
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_evaluate",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport,
     });
 
@@ -52,7 +53,7 @@ export function createEvaluateHandler(
         pageErrors.push(err.message);
       });
 
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {

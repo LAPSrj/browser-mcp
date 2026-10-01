@@ -1,15 +1,14 @@
 import path from "node:path";
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, waitForBlockType, getEditorFrame, checkEditorError } from "../utils/editor.js";
 import { insertBlock, getBlocks, getBlockInfoById, getPostContentClientId, isBlockRegistered, savePost } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createInsertBlockHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
   defaultOutputDir: string,
 ) {
   return async (params: {
@@ -24,6 +23,8 @@ export function createInsertBlockHandler(
     viewport?: { width: number; height: number };
     outputDir?: string;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -37,12 +38,16 @@ export function createInsertBlockHandler(
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
       session_id,
+      allow_write,
     } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    if (save) assertCanWrite(site, allow_write, "save the post (or omit save: true)");
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_insert_block",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport,
     });
 
@@ -59,7 +64,7 @@ export function createInsertBlockHandler(
         consoleLogs.push(error.message);
       });
 
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       // Check for editor crash
       const editorError = await checkEditorError(resolved.page);
@@ -114,7 +119,7 @@ export function createInsertBlockHandler(
       // Persist if requested — otherwise the insert dies with the session.
       let savedPost: { id: number; link: string; status: string } | null = null;
       if (save) {
-        savedPost = await savePost(resolved.page);
+        savedPost = await savePost(resolved.page, allow_write);
       }
 
       // Get block state. Look the block up by clientId (resolves at any

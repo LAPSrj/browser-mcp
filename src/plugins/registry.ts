@@ -102,6 +102,13 @@ export class PluginRegistry {
       return;
     }
 
+    const configError = plugin.checkConfig?.(resolved) ?? null;
+    if (configError) {
+      this.skipped.set(name, configError);
+      console.error(`[browser-mcp] Skipping plugin "${name}" — ${configError}`);
+      return;
+    }
+
     const prefixTools = plugin.prefixTools !== false;
 
     // Build the plugin context with scoped registration methods
@@ -143,9 +150,9 @@ export class PluginRegistry {
     return [...this.sessionHooks];
   }
 
-  /** Look up a mode by name. */
+  /** Look up a mode by name (case-insensitive). */
   getMode(name: string): ModeInfo | undefined {
-    return this.modes.get(name);
+    return this.modes.get(name.toLowerCase());
   }
 
   /** Get all registered modes (for discovery via list_modes). */
@@ -215,14 +222,17 @@ export class PluginRegistry {
     hooks: SessionHook[],
     description?: string,
   ): void {
-    if (this.modes.has(modeName)) {
-      const existing = this.modes.get(modeName)!;
+    // Keyed lowercase so use: "wordpress:prod" finds a mode registered as
+    // "wordpress:PROD"; ModeInfo keeps the name as registered.
+    const key = modeName.toLowerCase();
+    if (this.modes.has(key)) {
+      const existing = this.modes.get(key)!;
       throw new Error(
         `Plugin "${pluginName}" tried to register mode "${modeName}" ` +
         `which is already registered by plugin "${existing.pluginName}".`
       );
     }
-    this.modes.set(modeName, {
+    this.modes.set(key, {
       name: modeName,
       pluginName,
       description: description ?? null,

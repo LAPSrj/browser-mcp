@@ -1,5 +1,6 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, getEditorFrame, checkEditorError } from "../utils/editor.js";
 import {
   getBlockClientIdByIndex,
@@ -25,9 +26,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
  */
 export function createBlockHtmlHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
@@ -43,6 +42,8 @@ export function createBlockHtmlHandler(
     strip_css_vars?: string[];
     strip_subtrees?: string[];
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -58,16 +59,22 @@ export function createBlockHtmlHandler(
       strip_css_vars,
       strip_subtrees,
       session_id,
+      allow_write,
     } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    if (save_before_frontend) {
+      assertCanWrite(site, allow_write, "publish the post before reading the frontend (or pass save_before_frontend: false)");
+    }
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_block_html",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {
@@ -274,7 +281,7 @@ export function createBlockHtmlHandler(
       // Save so frontend reflects the current editor state
       if (save_before_frontend) {
         await editPostStatus(resolved.page, "publish");
-        await savePost(resolved.page);
+        await savePost(resolved.page, allow_write);
       }
 
       const frontendUrl = await resolved.page.evaluate(() => {

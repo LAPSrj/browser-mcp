@@ -1,30 +1,34 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { clearBlocks, savePost } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createClearBlocksHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
     skip_save?: boolean;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
-    const { post_id, skip_save = false, session_id } = params;
+    const { post_id, skip_save = false, session_id, allow_write } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    if (!skip_save) assertCanWrite(site, allow_write, "save the cleared post (or pass skip_save: true)");
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_clear_blocks",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {
@@ -41,7 +45,7 @@ export function createClearBlocksHandler(
       ];
 
       if (!skip_save) {
-        const postInfo = await savePost(resolved.page);
+        const postInfo = await savePost(resolved.page, allow_write);
         lines.push(`Saved. Status: ${postInfo.status}`);
       } else {
         lines.push("Save skipped (skip_save: true).");

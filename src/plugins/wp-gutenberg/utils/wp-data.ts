@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import { assertCanWrite, findWpSiteForUrl } from "../../wp/sites.js";
 
 // Types returned by wp.data queries, kept minimal for serialization
 
@@ -115,9 +116,14 @@ export async function selectBlock(
 }
 
 /**
- * Save/publish the post via wp.data.dispatch.
+ * Save/publish the post via wp.data.dispatch. Refuses when the page is on a
+ * site with WP_REQUIRE_ALLOW_WRITE set and allowWrite isn't true. Tools also
+ * check before starting; this is the check on the site the save actually
+ * reaches.
  */
-export async function savePost(page: Page): Promise<PostInfo> {
+export async function savePost(page: Page, allowWrite = false): Promise<PostInfo> {
+  const site = findWpSiteForUrl(page.url());
+  if (site) assertCanWrite(site, allowWrite, "save the post");
   return page.evaluate(async () => {
     const wp = (window as any).wp;
     await wp.data.dispatch("core/editor").savePost();

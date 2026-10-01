@@ -67,12 +67,18 @@ export interface ToolContext {
    * appends a warning instead of silently no-op'ing a recognized param.
    */
   hooksConsumed: boolean;
+  /**
+   * The tool call's raw `url` param, before relative-URL resolution. Passed
+   * to session hooks so a mode can tell a full URL from a relative one (the
+   * wp plugin's "wordpress" mode picks the site from it).
+   */
+  targetUrl?: string;
 }
 
 export const toolContextStorage = new AsyncLocalStorage<ToolContext>();
 
-export function createToolContext(sessionHooks: SessionHook[] = []): ToolContext {
-  return { activeServers: new Set<BrowserServer>(), aborted: false, sessionHooks, hooksConsumed: false };
+export function createToolContext(sessionHooks: SessionHook[] = [], targetUrl?: string): ToolContext {
+  return { activeServers: new Set<BrowserServer>(), aborted: false, sessionHooks, hooksConsumed: false, targetUrl };
 }
 
 /**
@@ -413,7 +419,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     const ctxHooks = ctx?.sessionHooks ?? [];
     const allHooks = [...ctxHooks, ...(sessionHooks ?? [])];
     for (const hook of allHooks) {
-      await hook(context, page, toolName);
+      await hook(context, page, toolName, ctx?.targetUrl);
     }
     // Mark the caller's `use:`-resolved hooks as actually applied, so the
     // server wrapper doesn't warn that they were silently dropped.

@@ -1,30 +1,31 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { getBlocks } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createGetBlocksHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
     include_inner?: boolean;
     session_id?: string;
+    site?: string;
   }): Promise<ToolResponse> => {
     const { post_id, include_inner = false, session_id } = params;
 
+    const site = resolveToolSite(core, sites, params);
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_get_blocks",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {

@@ -3,10 +3,8 @@ import type {
   ScreenshotPlugin,
   PluginContext,
   PluginConfigSchema,
-  ResolvedPluginConfig,
 } from "../types.js";
-import { WP_CONFIG_SCHEMA } from "../wp/config.js";
-import { getSharedWpAuth } from "../wp/auth.js";
+import { getSharedWpSites, assertCanWrite } from "../wp/sites.js";
 import { createInsertBlockHandler } from "./tools/insert-block.js";
 import { createGetBlocksHandler } from "./tools/get-blocks.js";
 import { createScreenshotBlockHandler } from "./tools/screenshot-block.js";
@@ -61,25 +59,15 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
   version: "0.1.0",
   dependencies: ["wp"],
 
+  // Site settings come from the wp plugin (WP_URL / WP_SITES).
   getConfigSchema(): PluginConfigSchema {
-    return WP_CONFIG_SCHEMA;
+    return {};
   },
 
-  async register(ctx: PluginContext, resolvedConfig: ResolvedPluginConfig): Promise<void> {
-    const auth = getSharedWpAuth();
+  async register(ctx: PluginContext): Promise<void> {
+    const sites = getSharedWpSites();
     const defaultOutputDir = ctx.config.outputDir ?? ".browser";
-
-    // Reuse wp's authHook locally for launchSession. Stays in sync with the
-    // "wordpress" mode hook wp registers — both do auth-inject with lazy
-    // login, but only attempt auto-login when credentials are configured.
-    const authHook = async (context: any, page: Page, _toolName: string) => {
-      const injected = await auth.injectAuth(context);
-      if (!injected && auth.canAutoLogin()) {
-        await auth.getStorageState(page);
-        await auth.injectAuth(context);
-      }
-    };
-    const sessionHooks = [authHook];
+    const siteNames = sites.list.map((s) => s.name).join(", ");
 
     // --- Tools ---
 
@@ -92,6 +80,16 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       "on that session's active page and the caller owns lifecycle (close via " +
       "close_session). When omitted, an ephemeral session is launched for this " +
       "call only.",
+    );
+
+    const siteSchema = z.string().optional().describe(
+      `WordPress site to use, by name (case-insensitive): ${siteNames}. ` +
+      "Default: the site of the session_id page when it's on a configured site, otherwise the first site.",
+    );
+
+    const allowWriteSchema = z.boolean().optional().describe(
+      "Allow saving the post on a site with WP_REQUIRE_ALLOW_WRITE_<NAME> set (default: false). " +
+      "Has no effect on other sites, which allow saves.",
     );
 
     ctx.registerTool({
@@ -125,8 +123,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createInsertBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
+      handler: createInsertBlockHandler(ctx.core, sites, defaultOutputDir),
     });
 
     ctx.registerTool({
@@ -139,8 +139,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         post_id: z.number().describe("WordPress post ID to inspect"),
         include_inner: z.boolean().optional().describe("Include each block's innerBlocks recursively (default: false)"),
         session_id: sessionIdSchema,
+        site: siteSchema,
       },
-      handler: createGetBlocksHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createGetBlocksHandler(ctx.core, sites),
     });
 
     ctx.registerTool({
@@ -162,8 +163,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         frontend_padding: z.number().optional().describe("Pixels of padding around the block bbox (default: 0)"),
         frontend_crop: z.boolean().optional().describe("Clip the frontend screenshot to the block bbox (default: true)"),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createScreenshotBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
+      handler: createScreenshotBlockHandler(ctx.core, sites, defaultOutputDir),
     });
 
     ctx.registerTool({
@@ -177,8 +180,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         client_id: z.string().optional().describe("Block clientId"),
         block_path: z.array(z.number()).optional().describe("Path to a nested block, e.g. [0, 1]"),
         session_id: sessionIdSchema,
+        site: siteSchema,
       },
-      handler: createInspectToolbarHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createInspectToolbarHandler(ctx.core, sites),
     });
 
     ctx.registerTool({
@@ -203,8 +207,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createCompareBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
+      handler: createCompareBlockHandler(ctx.core, sites, defaultOutputDir),
     });
 
     ctx.registerTool({
@@ -218,8 +224,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
         waitForEditor: z.boolean().optional().describe("Wait for wp.data + editor-canvas readiness (default: true)"),
         session_id: sessionIdSchema,
+        site: siteSchema,
       },
-      handler: createEvaluateHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createEvaluateHandler(ctx.core, sites),
     });
 
     ctx.registerTool({
@@ -242,8 +249,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
         outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createCheckBlockHandler(ctx.core, resolvedConfig, auth, sessionHooks, defaultOutputDir),
+      handler: createCheckBlockHandler(ctx.core, sites, defaultOutputDir),
     });
 
     ctx.registerTool({
@@ -253,8 +262,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         post_id: z.number().describe("WordPress post ID"),
         status: z.enum(["publish", "draft", "pending", "private"]).optional().describe('Post status (default: "publish")'),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createPublishHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createPublishHandler(ctx.core, sites),
     });
 
     ctx.registerTool({
@@ -307,8 +318,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
           "Class names that mark project-specific editor chrome. Any element bearing one of these classes is removed entirely with its subtree.",
         ),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createBlockHtmlHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createBlockHtmlHandler(ctx.core, sites),
       resultFile: true,
     });
 
@@ -323,8 +336,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         post_id: z.number().describe("WordPress post ID to clear"),
         skip_save: z.boolean().optional().describe("Clear in memory but don't save (default: false)"),
         session_id: sessionIdSchema,
+        site: siteSchema,
+        allow_write: allowWriteSchema,
       },
-      handler: createClearBlocksHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      handler: createClearBlocksHandler(ctx.core, sites),
     });
 
     // --- Custom actions (usable in any tool's actions[] array) ---
@@ -360,9 +375,15 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
 
     ctx.registerAction("gutenberg_clear", async (page, params) => {
       const skipSave = params.skip_save === true;
+      // Refuse before clearing, so a refused save doesn't leave the editor
+      // holding an unsaved empty post.
+      const site = sites.forUrl(page.url());
+      if (!skipSave && site) {
+        assertCanWrite(site, params.allow_write === true, "save the cleared post (or pass skip_save: true)");
+      }
       await waitForWpData(page);
       await clearBlocks(page);
-      if (!skipSave) await savePost(page);
+      if (!skipSave) await savePost(page, params.allow_write === true);
     });
 
     ctx.registerAction("gutenberg_select_block", async (page, params) => {

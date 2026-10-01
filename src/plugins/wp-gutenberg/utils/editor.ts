@@ -1,6 +1,5 @@
 import type { Page, Frame } from "playwright";
-import type { ResolvedPluginConfig } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { WpSite, WpSites } from "../../wp/sites.js";
 
 /**
  * Wait for the Gutenberg block editor to be fully loaded and interactive.
@@ -60,14 +59,14 @@ export async function getEditorFrame(page: Page): Promise<Page | Frame> {
 }
 
 /**
- * Returns true when the page is already on /wp-admin/post.php?post=<postId>&action=edit
- * for ANY host. Lets caller-owned sessions authed against a different host
- * (e.g. staging) skip the goto that would otherwise yank the page to config.wpUrl.
+ * Returns true when the page is already on <site>/wp-admin/post.php?post=<postId>&action=edit
+ * for ANY host. Lets caller-owned sessions authed against an unconfigured host
+ * (e.g. staging) skip the goto that would otherwise yank the page to the site URL.
  */
 function isOnPostEditor(currentUrl: string, postId: number): boolean {
   try {
     const u = new URL(currentUrl);
-    if (u.pathname !== "/wp-admin/post.php") return false;
+    if (!u.pathname.endsWith("/wp-admin/post.php")) return false;
     if (u.searchParams.get("post") !== String(postId)) return false;
     if (u.searchParams.get("action") !== "edit") return false;
     return true;
@@ -80,20 +79,24 @@ function isOnPostEditor(currentUrl: string, postId: number): boolean {
  * Navigate to the WordPress post editor and ensure auth + editor readiness.
  * If the session has expired (redirected to login), re-authenticates and retries.
  *
- * Detect-and-skip: when the page is already on the target post editor on any
- * host, skip the goto. Otherwise navigation would force the page to config.wpUrl,
- * breaking caller-owned sessions authed against a different host.
+ * Detect-and-skip: when the page is already on the target post editor on the
+ * target site, or on a host that isn't a configured site, skip the goto.
+ * Otherwise navigation would force the page to the site URL, breaking
+ * caller-owned sessions authed against an unconfigured host. A page on
+ * another configured site's editor is moved to the target site.
  */
 export async function navigateToEditor(
   page: Page,
   postId: number,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
+  site: WpSite,
+  sites: WpSites,
 ): Promise<void> {
-  const base = config.wpUrl.replace(/\/+$/, "");
-  const editorUrl = `${base}/wp-admin/post.php?post=${postId}&action=edit`;
+  const auth = site.auth;
+  const editorUrl = `${site.url}/wp-admin/post.php?post=${postId}&action=edit`;
+  const current = page.url();
+  const alreadyThere = isOnPostEditor(current, postId) && (sites.forUrl(current) ?? site) === site;
 
-  if (!isOnPostEditor(page.url(), postId)) {
+  if (!alreadyThere) {
     await page.goto(editorUrl, { waitUntil: "load", timeout: 30000 });
 
     // Detect auth redirect

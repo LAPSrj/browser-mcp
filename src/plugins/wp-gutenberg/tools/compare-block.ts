@@ -2,8 +2,9 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import {
   getBlocks,
@@ -28,9 +29,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
  */
 export function createCompareBlockHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
   defaultOutputDir: string,
 ) {
   return async (params: {
@@ -49,6 +48,8 @@ export function createCompareBlockHandler(
     viewport?: { width: number; height: number };
     outputDir?: string;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -65,6 +66,7 @@ export function createCompareBlockHandler(
       viewport,
       outputDir = defaultOutputDir,
       session_id,
+      allow_write,
     } = params;
 
     const refBuffer = await fs.readFile(referenceImage);
@@ -79,15 +81,20 @@ export function createCompareBlockHandler(
       height: Math.max(refImg.height, 900),
     };
 
+    const site = resolveToolSite(core, sites, params);
+    if (save_before_frontend) {
+      assertCanWrite(site, allow_write, "publish the post before reading the frontend (or pass save_before_frontend: false)");
+    }
+
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_compare_block",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport: resolvedViewport,
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {
         return {
@@ -129,7 +136,7 @@ export function createCompareBlockHandler(
 
       if (save_before_frontend) {
         await editPostStatus(resolved.page, "publish");
-        await savePost(resolved.page);
+        await savePost(resolved.page, allow_write);
       }
 
       const frontendUrl = await resolved.page.evaluate(() => {

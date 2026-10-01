@@ -1,6 +1,7 @@
 import path from "node:path";
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, getEditorFrame, checkEditorError } from "../utils/editor.js";
 import {
   getBlocks,
@@ -16,9 +17,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createScreenshotBlockHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
   defaultOutputDir: string,
 ) {
   return async (params: {
@@ -35,6 +34,8 @@ export function createScreenshotBlockHandler(
     frontend_padding?: number;
     frontend_crop?: boolean;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -50,12 +51,18 @@ export function createScreenshotBlockHandler(
       frontend_padding = 0,
       frontend_crop = true,
       session_id,
+      allow_write,
     } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    if (context !== "editor" && save_before_frontend) {
+      assertCanWrite(site, allow_write, "publish the post before reading the frontend (or pass save_before_frontend: false)");
+    }
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_screenshot_block",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport,
     });
 
@@ -67,7 +74,7 @@ export function createScreenshotBlockHandler(
 
       // --- Editor screenshot ---
       if (context === "editor" || context === "both") {
-        await navigateToEditor(resolved.page, post_id, config, auth);
+        await navigateToEditor(resolved.page, post_id, site, sites);
 
         const editorError = await checkEditorError(resolved.page);
         if (editorError) {
@@ -152,7 +159,7 @@ export function createScreenshotBlockHandler(
 
         if ((context === "both") && save_before_frontend) {
           await editPostStatus(resolved.page, "publish");
-          await savePost(resolved.page);
+          await savePost(resolved.page, allow_write);
         }
       }
 
@@ -162,7 +169,7 @@ export function createScreenshotBlockHandler(
         // (frontend-only path still has to visit the editor to look up the
         // clientId and the frontend URL).
         if (!targetClientId) {
-          await navigateToEditor(resolved.page, post_id, config, auth);
+          await navigateToEditor(resolved.page, post_id, site, sites);
           targetClientId = client_id;
           if (!targetClientId && block_path) {
             targetClientId = await getBlockClientIdByPath(resolved.page, block_path) ?? undefined;
@@ -185,7 +192,7 @@ export function createScreenshotBlockHandler(
 
           if (save_before_frontend) {
             await editPostStatus(resolved.page, "publish");
-            await savePost(resolved.page);
+            await savePost(resolved.page, allow_write);
           }
           frontendUrl = await resolved.page.evaluate(() => {
             const wp = (window as any).wp;

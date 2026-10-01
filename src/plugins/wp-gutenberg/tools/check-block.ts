@@ -1,6 +1,7 @@
 import path from "node:path";
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, waitForBlockType, checkEditorError } from "../utils/editor.js";
 import {
   insertBlock, getBlockInfoById, getPostContentClientId, isBlockRegistered,
@@ -17,9 +18,7 @@ import { resolveGutenbergSession } from "../utils/session.js";
  */
 export function createCheckBlockHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
   defaultOutputDir: string,
 ) {
   return async (params: {
@@ -31,6 +30,8 @@ export function createCheckBlockHandler(
     viewport?: { width: number; height: number };
     outputDir?: string;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
@@ -41,12 +42,16 @@ export function createCheckBlockHandler(
       viewport = { width: 1280, height: 720 },
       outputDir = defaultOutputDir,
       session_id,
+      allow_write,
     } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    assertCanWrite(site, allow_write, "publish the test post");
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_check_block",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
       viewport,
     });
 
@@ -67,7 +72,7 @@ export function createCheckBlockHandler(
       const results: Record<string, unknown> = {};
 
       // 1. Navigate to editor
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {
@@ -134,7 +139,7 @@ export function createCheckBlockHandler(
 
       // 6. Publish and check frontend
       await editPostStatus(resolved.page, "publish");
-      const postInfo = await savePost(resolved.page);
+      const postInfo = await savePost(resolved.page, allow_write);
       results.post_url = postInfo.link;
 
       if (postInfo.link) {

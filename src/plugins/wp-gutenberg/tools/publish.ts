@@ -1,34 +1,39 @@
-import type { CoreUtils, ResolvedPluginConfig, ToolResponse, SessionHook } from "../../types.js";
-import type { WpAuth } from "../../wp/auth.js";
+import type { CoreUtils, ToolResponse } from "../../types.js";
+import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
+import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { savePost, editPostStatus } from "../utils/wp-data.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 export function createPublishHandler(
   core: CoreUtils,
-  config: ResolvedPluginConfig,
-  auth: WpAuth,
-  sessionHooks: SessionHook[],
+  sites: WpSites,
 ) {
   return async (params: {
     post_id: number;
     status?: string;
     session_id?: string;
+    site?: string;
+    allow_write?: boolean;
   }): Promise<ToolResponse> => {
     const {
       post_id,
       status = "publish",
       session_id,
+      allow_write,
     } = params;
+
+    const site = resolveToolSite(core, sites, params);
+    assertCanWrite(site, allow_write, "save or publish a post");
 
     const resolved = await resolveGutenbergSession(core, {
       session_id,
       toolName: "gutenberg_publish",
-      sessionHooks,
+      sessionHooks: [siteAuthHook(site)],
     });
 
     try {
-      await navigateToEditor(resolved.page, post_id, config, auth);
+      await navigateToEditor(resolved.page, post_id, site, sites);
 
       const editorError = await checkEditorError(resolved.page);
       if (editorError) {
@@ -63,7 +68,7 @@ export function createPublishHandler(
       let postInfo;
       let skipped = false;
       if (statusNeedsChange || isDirty) {
-        postInfo = await savePost(resolved.page);
+        postInfo = await savePost(resolved.page, allow_write);
       } else {
         skipped = true;
         postInfo = await resolved.page.evaluate(() => {

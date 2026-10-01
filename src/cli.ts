@@ -153,7 +153,10 @@ export async function runCli(args: string[], registry?: PluginRegistry, outputDi
     params as { use?: UseParam },
   );
   if (toolName === "list_modes") toolParams._registry = registry;
-  const ctx = createToolContext(sessionHooks);
+  const ctx = createToolContext(
+    sessionHooks,
+    typeof toolParams.url === "string" ? toolParams.url : undefined,
+  );
 
   try {
     const result = await applyResultPath(

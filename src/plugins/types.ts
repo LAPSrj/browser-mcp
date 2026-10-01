@@ -72,6 +72,8 @@ export type SessionHook = (
   context: BrowserContext,
   page: Page,
   toolName: string,
+  /** The tool call's raw `url` param (before relative-URL resolution), if any. */
+  targetUrl?: string,
 ) => Promise<void>;
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,14 @@ export interface ScreenshotPlugin {
    * Keys are friendly config names, values describe the env var binding.
    */
   getConfigSchema(): PluginConfigSchema;
+
+  /**
+   * Optional extra validation for config the schema can't express (e.g.
+   * "WP_URL or WP_SITES", or env var names built from another var). Return
+   * a reason to skip the plugin, or null when the config is usable. Runs
+   * after the schema's required vars are checked.
+   */
+  checkConfig?(resolvedConfig: ResolvedPluginConfig): string | null;
 
   /**
    * Called once after config is validated and resolved.

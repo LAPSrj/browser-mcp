@@ -340,8 +340,8 @@ them by their short, well-known names.
 
 No tools. Registers the `wordpress` mode — any tool can opt in with
 `use: "wordpress"` to attach the cached wp-login.php cookie to the browser
-context. Required env vars: `WP_URL`, `WP_USERNAME`, `WP_PASSWORD`.
-Optional: `WP_LOGIN_URL`, `WP_SESSION_TTL`.
+context. For one site, set `WP_URL`, `WP_USERNAME`, `WP_PASSWORD`.
+Optional: `WP_LOGIN_URL`, `WP_SESSION_TTL`, `WP_REQUIRE_ALLOW_WRITE`.
 
 ```bash
 BROWSER_MCP_PLUGINS=wp WP_URL=https://mysite.com WP_USERNAME=admin \
@@ -349,9 +349,43 @@ BROWSER_MCP_PLUGINS=wp WP_URL=https://mysite.com WP_USERNAME=admin \
   --url=https://mysite.com/wp-admin/users.php --use=wordpress
 ```
 
+**Several sites** (e.g. local and production): list their names in
+`WP_SITES`, then give each site the same variables with `_<NAME>` appended.
+Each password is its own variable, so it can contain commas. When `WP_SITES`
+is set, the unsuffixed `WP_URL` set is ignored.
+
+```bash
+WP_SITES=LOCAL,PROD
+WP_URL_LOCAL=https://mysite.local   WP_USERNAME_LOCAL=admin  WP_PASSWORD_LOCAL=...
+WP_URL_PROD=https://mysite.com      WP_USERNAME_PROD=admin   WP_PASSWORD_PROD=p,a,s,s
+WP_REQUIRE_ALLOW_WRITE_PROD=1       # optional, see below
+```
+
+Each site logs in separately and caches its own cookie. `use: "wordpress"`
+picks the site from the call's `url`: a full URL uses the site it belongs to
+(same host, path under the site's path), and a relative URL or no URL uses
+the first site in `WP_SITES`. A full URL outside every site is an error.
+`use: "wordpress:<name>"` (e.g. `wordpress:prod`, any case) picks a site by
+name, whatever the URL.
+
+**Write guard.** Writes are allowed by default. With
+`WP_REQUIRE_ALLOW_WRITE_<NAME>=1` (or `true` / `yes` / `on`), the
+`wp-gutenberg` tools refuse to save posts on that site unless the call passes
+`allow_write: true`, and they refuse before opening the editor. The guard
+covers every save the plugin makes (`publish`, `clear_blocks`,
+`check_block`, `insert_block` with `save: true`, and the
+`save_before_frontend` step of `screenshot_block` / `compare_block` /
+`block_html`) plus the `gutenberg_clear` action. It doesn't cover scripts
+passed to `wp-gutenberg_evaluate` / `evaluate_script` or clicks in wp-admin
+under `use: "wordpress"`.
+
 ### `wp-gutenberg` — Gutenberg editor workflows
 
 Depends on `wp`. Enable with `BROWSER_MCP_PLUGINS=wp,wp-gutenberg`.
+Every tool takes an optional `site` (a `WP_SITES` name, any case). Without
+it, a tool uses the site of the `session_id` page when that page is on a
+configured site, otherwise the first site. Tools that can save also take
+`allow_write` (see the write guard above).
 Provides block-level tools for WordPress block editor workflows:
 
 - `wp-gutenberg_insert_block` — insert a block via `wp.data`; accepts `inner_blocks` for InnerBlocks parents (recursive tree seeding) and `save: true` to persist (default is in-memory only, ephemeral). On `template-locked` FSE posts (WP 6.5+ block themes) the outer store top level is the locked template canvas — inserting there is silently rejected — so insertion auto-targets the editable post body (the `core/post-content` controlled inner-block list); pass an explicit `root_client_id` to override, and classic / `post-only` posts are unaffected
@@ -499,9 +533,11 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_PRODUCT` | `edge` (WSL/Win) / `chrome` (macOS/Linux) | Which Chromium-channel browser auto-launch uses. One of `edge`, `chrome`, `brave`, `vivaldi`, `opera`. Throws on typo. |
 | `BROWSER_MCP_EXECUTABLE_PATH` | per-product default | Path to the browser executable for `open_session({ attach_cdp: true })` auto-launch. Overrides the product's canonical default; required for Opera on Windows (no machine-wide path). Per-call `executable_path` overrides this. |
 | `BROWSER_MCP_CDP_DEBUG` | `0` | When `1`, the WSL CDP relay logs activity to `%TEMP%\browser-mcp\<session>\relay.log`. |
-| `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | Required by the `wp` and `wp-gutenberg` plugins. |
+| `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | One WordPress site for the `wp` and `wp-gutenberg` plugins. The plugins need either `WP_URL` or `WP_SITES`. |
+| `WP_SITES` | — | Comma-separated site names (e.g. `LOCAL,PROD`). Each site reads `WP_URL_<NAME>`, `WP_USERNAME_<NAME>`, `WP_PASSWORD_<NAME>`, and optionally `WP_LOGIN_URL_<NAME>`, `WP_SESSION_TTL_<NAME>`, `WP_REQUIRE_ALLOW_WRITE_<NAME>`. When set, the unsuffixed `WP_URL` set is ignored. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |
-| `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. |
+| `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. Also the default for `WP_SESSION_TTL_<NAME>`. |
+| `WP_REQUIRE_ALLOW_WRITE` | off | When `1`/`true`/`yes`/`on`, `wp-gutenberg` tools refuse to save posts on the site unless the call passes `allow_write: true`. |
 | `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. The access key also authenticates the `browserStackLocal` tunnel. See [BrowserStack](#browserstack). |
 
 ## Writing a plugin

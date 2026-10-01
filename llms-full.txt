@@ -70,7 +70,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `wp` | WordPress admin login + REST helpers | requires `WP_URL`; optional `WP_USERNAME` / `WP_PASSWORD` |
+| `wp` | WordPress admin login + REST helpers | requires `WP_URL` (one site) or `WP_SITES=LOCAL,PROD` with `WP_URL_<NAME>` / `WP_USERNAME_<NAME>` / `WP_PASSWORD_<NAME>` per site; registers `wordpress` (site picked from the call's full `url`, else the first site) and `wordpress:<name>` modes |
 
 ### wp-gutenberg plugin
 
@@ -91,7 +91,9 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 
 > **Hazard (block-theme posts & canvas-root insertion).** On `template-locked` FSE posts the OUTER `core/block-editor` store top level is the locked template canvas (`core/template-part → main → core/post-content → core/template-part`); dispatching `insertBlock` / `resetBlocks` there is **silently rejected** — the block lands nowhere and never reaches the saved post body, yielding false-negative `check_block` verdicts. The editable post body is the *controlled inner-block list* of the `core/post-content` block, reachable in the SAME store via that block's clientId — `getBlockOrder(pcId)` / `getBlocks(pcId)` / `getBlock(cid)` see it and `insertBlock(block, idx, pcId)` syncs into `getEditedPostContent()` (no nested entity-store dispatch needed; `getBlocks()` with no clientId only walks the serialized template tree, which is why the body looks empty from the top level). So `insert_block` and `check_block` resolve the `core/post-content` clientId and insert there (pass `insert_block`'s `root_client_id` to override); `clear_blocks` empties only that block's inner list, preserving the template. On classic-theme / `post-only` posts there is no `core/post-content` leaf, so all three fall back to top-level insert / `resetBlocks([])` — behaviorally unchanged.
 
-> **Hazard (WP_URL host binding).** Every `wp-gutenberg` post-editing tool routes through `navigateToEditor`, which builds `${WP_URL}/wp-admin/post.php?post=${post_id}&action=edit` and navigates there. The env-var `WP_URL` is the host these tools drive — passing a `session_id` authed against a different host (e.g. staging) is not sufficient to retarget the tool; the call will yank the page to `WP_URL`'s host, where the post likely doesn't exist or the session has no cookies. **Detect-and-skip:** when the page is already on `/wp-admin/post.php?post=${post_id}&action=edit` (on any host), the tool skips the navigation — so the working pattern for a non-`WP_URL` host is to first navigate the session to that host's editor URL yourself (via `navigate({ session_id, url })`), then call the `wp-gutenberg` tool with the same `post_id`. There is currently no per-call `wp_url` override; the env var is the only host knob.
+> **Site selection (WP_SITES).** Every `wp-gutenberg` tool takes an optional `site` (a `WP_SITES` name, any case) and drives `${site URL}/wp-admin/post.php?post=${post_id}&action=edit`. Without `site`, it uses the site of the `session_id` page when that page is on a configured site, otherwise the first site. **Detect-and-skip:** when the page is already on that post's editor on the target site, or on a host that isn't a configured site (e.g. an unconfigured staging host you navigated to yourself), the tool skips the navigation. A page on another configured site's editor is moved to the target site.
+
+> **Write guard.** With `WP_REQUIRE_ALLOW_WRITE_<NAME>=1`, tools that save a post on that site (`publish`, `clear_blocks` without `skip_save`, `check_block`, `insert_block` with `save: true`, and `screenshot_block` / `compare_block` / `block_html` with `save_before_frontend`) fail unless the call passes `allow_write: true`. They fail before opening the editor. Off by default.
 
 ### Session / navigation primitives (every plugin)
 
