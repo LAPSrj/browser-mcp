@@ -4,6 +4,7 @@ import { allPrimitives } from "./core/primitives.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
 import { toolContextStorage, createToolContext } from "./utils/browser.js";
+import { applyResultPath } from "./utils/result-file.js";
 
 const primitiveDefs = allPrimitives();
 const PRIMITIVE_NAMES = Object.keys(primitiveDefs);
@@ -119,7 +120,7 @@ function parseArgs(args: string[]): Record<string, unknown> {
   return result;
 }
 
-export async function runCli(args: string[], registry?: PluginRegistry): Promise<void> {
+export async function runCli(args: string[], registry?: PluginRegistry, outputDir = ".browser"): Promise<void> {
   const toolName = args[0];
   const pluginToolNames = registry?.getTools().map((t) => t.name) ?? [];
 
@@ -148,13 +149,19 @@ export async function runCli(args: string[], registry?: PluginRegistry): Promise
     console.error(`Error: ${(error as Error).message}`);
     process.exit(1);
   }
-  const toolParams: Record<string, unknown> = stripUse(params as { use?: UseParam });
+  const { result_path: resultPath, ...toolParams }: Record<string, unknown> = stripUse(
+    params as { use?: UseParam },
+  );
   if (toolName === "list_modes") toolParams._registry = registry;
   const ctx = createToolContext(sessionHooks);
 
   try {
-    const result = await toolContextStorage.run(ctx, () =>
-      isCore ? runCoreTool(toolName, toolParams) : runPluginTool(toolName, toolParams, registry!),
+    const result = await applyResultPath(
+      await toolContextStorage.run(ctx, () =>
+        isCore ? runCoreTool(toolName, toolParams) : runPluginTool(toolName, toolParams, registry!),
+      ),
+      typeof resultPath === "string" ? resultPath : undefined,
+      outputDir,
     );
 
     for (const item of result.content) {

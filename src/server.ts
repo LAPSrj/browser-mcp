@@ -12,7 +12,8 @@ import {
 } from "./utils/browser.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
-import { actionSchema, useSchemaField, browserStackFields } from "./utils/schemas.js";
+import { actionSchema, useSchemaField, browserStackFields, resultPathField } from "./utils/schemas.js";
+import { applyResultPath } from "./utils/result-file.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
 
@@ -40,6 +41,7 @@ function appendModeWarning(result: any, use: UseParam): any {
 
 function withTimeout<T extends { use?: UseParam }>(
   timeoutMs: number,
+  outputDir: string,
   fn: (params: Omit<T, "use">) => Promise<any>,
   registry?: PluginRegistry,
 ): (params: T) => Promise<any> {
@@ -54,7 +56,12 @@ function withTimeout<T extends { use?: UseParam }>(
       };
     }
     const ctx = createToolContext(sessionHooks);
-    const toolParams = stripUse(params);
+    // result_path only reaches here for tools registered with resultFile
+    // (zod drops it from every other schema); the tool itself never sees it.
+    // stripUse returns a copy, so deleting from it leaves `params` intact.
+    const toolParams = stripUse(params) as Omit<T, "use"> & { result_path?: string };
+    const resultPath = toolParams.result_path;
+    delete toolParams.result_path;
 
     return toolContextStorage.run(ctx, async () => {
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -69,7 +76,11 @@ function withTimeout<T extends { use?: UseParam }>(
           }, timeoutMs);
         });
 
-        const result = await Promise.race([fn(toolParams), timeoutPromise]);
+        const result = await applyResultPath(
+          await Promise.race([fn(toolParams), timeoutPromise]),
+          resultPath,
+          outputDir,
+        );
         // Fail-loud on a dropped mode: `use:` resolved hooks but no code path
         // consumed them (e.g. a mode passed to open_session / a session_id
         // tool / an attach_cdp session — those don't apply session hooks).
@@ -103,10 +114,10 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
     version: "0.1.1",
   });
 
-  const wrap = <T extends { use?: UseParam }>(fn: (params: Omit<T, "use">) => Promise<any>) =>
-    withTimeout<T>(toolTimeout, fn, registry);
-
   const defaultOutputDir = config.outputDir ?? ".browser";
+
+  const wrap = <T extends { use?: UseParam }>(fn: (params: Omit<T, "use">) => Promise<any>) =>
+    withTimeout<T>(toolTimeout, defaultOutputDir, fn, registry);
 
   const urlDescription = config.baseUrl
     ? `URL to screenshot (absolute or relative path — base: ${config.baseUrl})`
@@ -230,7 +241,10 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- Plugin-registered tools ----------
   if (registry) {
     for (const tool of registry.getTools()) {
-      server.tool(tool.name, tool.description, tool.schema, wrap(tool.handler));
+      const schema = tool.resultFile
+        ? { ...tool.schema, ...resultPathField(defaultOutputDir) }
+        : tool.schema;
+      server.tool(tool.name, tool.description, schema, wrap(tool.handler));
     }
   }
 

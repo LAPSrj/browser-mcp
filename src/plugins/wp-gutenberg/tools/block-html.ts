@@ -117,7 +117,9 @@ export function createBlockHtmlHandler(
         const tree = await parsePostContentBlocks(resolved.page);
         const target = resolvePostContentTarget(tree, {
           block_path,
-          block_index,
+          // Same documented default as the template path: block 0 when the
+          // caller names no target at all.
+          block_index: block_index ?? (block_path || block_name ? undefined : 0),
           block_name,
         });
         if (!target) {
@@ -321,8 +323,15 @@ export function createBlockHtmlHandler(
         ...diagnostics,
       };
 
+      const frontendPart = frontendHtml === null
+        ? `frontend not found${diagnostics.frontend_error ? ` (${diagnostics.frontend_error})` : ""}`
+        : `frontend ${frontendHtml.length} chars (matched by ${frontendMatchedBy}), ` +
+          `identical: ${editorHtml === frontendHtml}`;
       const response: ToolResponse = {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        _summary:
+          `${blockName ?? "unknown block"} (source ${effectiveSource}): ` +
+          `editor ${editorHtml.length} chars, ${frontendPart}.`,
       };
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;

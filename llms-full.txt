@@ -64,7 +64,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | Tool | Purpose | Notes |
 |---|---|---|
 | `design_compare` | CSS-property comparison live ↔ design spec | (contract) compare-tool selection |
-| `design_audit` | `design_compare` + visual diff + cross-reference | (contract) compare-tool selection, hide, coverage |
+| `design_audit` | `design_compare` + visual diff + cross-reference | (contract) compare-tool selection, hide, coverage, result-file |
 
 ### wp plugin
 
@@ -84,7 +84,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `evaluate` | JS in editor iframe context | |
 | `check_block` | Validity / breakage check | inserts into the post body (not the locked canvas root) on `template-locked` FSE posts |
 | `publish` | Save + publish current post | |
-| `block_html` | Normalized editor + frontend HTML for structural diff | strips Gutenberg noise; `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts; `source: "auto"\|"template"\|"post_content"` resolves the target in the canvas tree or in the parsed post body (auto-detected on block-theme posts) |
+| `block_html` | Normalized editor + frontend HTML for structural diff | strips Gutenberg noise; `strip_attributes` / `strip_classes` / `strip_css_vars` / `strip_subtrees` for project-specific runtime artifacts; `source: "auto"\|"template"\|"post_content"` resolves the target in the canvas tree or in the parsed post body (auto-detected on block-theme posts); (contract) result-file |
 | `clear_blocks` | Empty the post | clears the post body and leaves the surrounding template intact on `template-locked` FSE posts; returns the number of body blocks removed |
 
 > **Hazard (block-theme posts & `core/post-content` leaf).** In WP 6.5+ block themes, the post editor mounts a canvas template tree where `core/post-content` is a renderer leaf and the post body blocks live in a nested `useEntityBlockEditor("postType","post")` provider — invisible to `wp.data.select("core/block-editor").getBlocks()`. `block_html` defaults to `source: "auto"`: if the canvas tree contains a `core/post-content` leaf, it parses `wp.data.select("core/editor").getEditedPostContent()` instead and resolves the target there. On classic-theme posts auto is a no-op (no leaf → uses canvas tree). Pass `source: "template"` to force the canvas-tree path or `source: "post_content"` to force parsing. In `post_content` mode `client_id` is rejected (parsed blocks have synthetic clientIds); use `block_name`, `block_path`, or `block_index`. The `client_id` field in the response reports the inner-store clientId read off the located `[data-block]` element. This read-side `source` flag is only on `block_html` for now; `get_blocks`, `compare_block`, `screenshot_block`, `inspect_toolbar` haven't been extended pending a consumer ask. (The mutation tools `insert_block` / `check_block` / `clear_blocks` handle the same canvas-tree case automatically — see the next hazard.)
@@ -210,6 +210,16 @@ Both `compare_element`/`compare_screenshot` and `design_audit` surface coverage 
 - `design_audit.coverageManifest`: takes `nodeNames: string[]` and `propertyCounts: {[name]: number}` (typically from figexport's `resolve_styles _meta`); reports per-element coverage stats and unmapped node count. Additional fields produced by upstream tooling (e.g. figexport's `propertyHashes`) are accepted and ignored — browser-mcp does not currently consume them. If a future enforcement check is added, it will be a non-breaking schema extension; producers can pass extras safely today.
 
 Both metrics are percentages, both 1 decimal. Tool-emitted warnings: `maskCoverage > 50%` (generic), `maskCoverage > 60%` with both broad flags (mask-coverage trap fingerprint). `hiddenArea` has no per-call warning; consumers gate it externally.
+
+### Result-file contract {#result-file-contract}
+
+`block_html` and `design_audit` accept `result_path`. With it, the tool writes its result to that file and returns one text line instead: `Result written to <absolute path> (<bytes> bytes, sha256 <hex>). <summary>`.
+
+- The file holds exactly the text the tool returns inline without `result_path`. Several text parts are joined with `\n`; a single-part result (`block_html`, `design_audit` without action messages) is byte-identical to the inline text, so it parses as the same JSON and its sha256 equals the sha256 of the inline text.
+- Relative paths resolve under `BROWSER_MCP_OUTPUT_DIR` (default `.browser`); absolute paths are used as given; an existing file is overwritten.
+- Errors (`isError`) stay inline and write no file. Image parts stay inline after the line.
+- The summary is tool-specific. `design_audit`: element and property match counts, layout checks, visual score and match, cluster counts, size mismatch, diff image path, action stop, assertion counts. `block_html`: block name, source, editor and frontend lengths, frontend selector, whether the two normalized strings are identical (raw equality, before any consumer-side exclusions).
+- Other tools don't take the param (it's dropped by their schema); the CLI applies it to any tool.
 
 ### Action contract {#action-contract}
 

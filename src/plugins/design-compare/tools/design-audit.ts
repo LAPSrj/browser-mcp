@@ -628,7 +628,7 @@ export async function designAuditTool(params: DesignAuditParams) {
         error: `Root selector not found: ${rootSelector}`,
         designCompare: { elements: elementResults, layout: layoutResult },
       }, null, 2) });
-      return { content };
+      return { content, _summary: `Root selector not found: ${rootSelector}. No visual diff ran.` };
     }
 
     // Gather exclusion bounding boxes BEFORE screenshot (same coordinate space as rootBbox)
@@ -709,7 +709,7 @@ export async function designAuditTool(params: DesignAuditParams) {
         error: "Either referenceImage or referenceUrl must be provided",
         designCompare: { elements: elementResults, layout: layoutResult },
       }, null, 2) });
-      return { content };
+      return { content, _summary: "Either referenceImage or referenceUrl must be provided. No visual diff ran." };
     }
 
     const liveImg = PNG.sync.read(screenshotBuffer);
@@ -946,7 +946,7 @@ export async function designAuditTool(params: DesignAuditParams) {
     if (actionStopMsg) content.push({ type: "text", text: actionStopMsg });
     if (assertionsMsg) content.push({ type: "text", text: assertionsMsg });
     content.push({ type: "text", text: JSON.stringify(result, null, 2) });
-    return { content };
+    return { content, _summary: summarizeAudit(result, actionStopMsg, assertionsMsg) };
   } finally {
     await closeSession(session);
   }
@@ -955,6 +955,32 @@ export async function designAuditTool(params: DesignAuditParams) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** One-line summary returned in place of the full result when result_path is set. */
+function summarizeAudit(
+  result: AuditResult,
+  actionStopMsg: string | undefined,
+  assertionsMsg: string | undefined,
+): string {
+  const s = result.summary;
+  const parts = [
+    `elements found ${s.elementsFound}/${s.totalElements}`,
+    `properties matching ${s.propertyMatches}/${s.totalProperties}`,
+  ];
+  if (s.layoutChecks) parts.push(`layout checks passed ${s.layoutPassed}/${s.layoutChecks}`);
+  parts.push(`visual score ${s.visualDiffScore} (${s.visualDiffMatch ? "match" : "no match"})`);
+  parts.push(
+    `clusters ${s.explainedClusters} explained, ${s.excludedClusters} excluded, ${s.unexplainedClusters} unexplained`,
+  );
+  if (s.dimensionMismatch) {
+    const { live, ref } = s.dimensionMismatch;
+    parts.push(`size mismatch: live ${live.width}x${live.height}, reference ${ref.width}x${ref.height}`);
+  }
+  parts.push(`diff image ${result.visualDiff.diffImagePath}`);
+  if (actionStopMsg) parts.push("actions stopped early (details in the file)");
+  if (assertionsMsg) parts.push(assertionsMsg.split("\n")[0]);
+  return `${parts.join("; ")}.`;
+}
 
 function bboxesOverlap(a: BoundingBox, b: BoundingBox): boolean {
   return (

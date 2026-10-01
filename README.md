@@ -369,6 +369,23 @@ Plus custom actions usable in any tool's `actions[]`: `gutenberg_insert`,
 `gutenberg_set_attribute`, `gutenberg_select_block`, `gutenberg_remove`,
 `gutenberg_clear`.
 
+### Large results: `result_path`
+
+`wp-gutenberg_block_html` and `design-compare_design_audit` accept
+`result_path`. The tool then writes its result to that file instead of
+returning it, and the response is one line:
+
+```
+Result written to /abs/path/audit.json (14128 bytes, sha256 96af…f6f6). elements found 1/1; properties matching 2/2; visual score 0.7806 (no match); …
+```
+
+The file holds exactly the text the tool would have returned inline
+(several text parts joined by newlines), so its sha256 identifies the result
+and a consumer can parse it the same way. Relative paths resolve under
+`BROWSER_MCP_OUTPUT_DIR`; an existing file is overwritten. Errors and images
+are still returned inline. A plugin opts a tool in with `resultFile: true` and
+can return a `_summary` string for the line.
+
 ## Actions
 
 Every ephemeral tool accepts an `actions` array of pre-run steps:
@@ -517,6 +534,9 @@ const myPlugin: ScreenshotPlugin = {
       description: "Do a domain-specific thing.",
       schema: { target: z.string() },
       handler: async (params) => ({ content: [{ type: "text", text: "done" }] }),
+      // Optional — adds a `result_path` param for large results (see
+      // § Large results). The handler may return `_summary` for the line.
+      resultFile: false,
     });
 
     ctx.registerMode("my-mode", [async (context, page) => { /* hook */ }],

@@ -309,6 +309,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         session_id: sessionIdSchema,
       },
       handler: createBlockHtmlHandler(ctx.core, resolvedConfig, auth, sessionHooks),
+      resultFile: true,
     });
 
     ctx.registerTool({

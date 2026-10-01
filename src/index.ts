@@ -52,9 +52,9 @@ async function main() {
   if (args.length > 0) {
     // Direct CLI usage: node dist/index.js <tool> [options]
     // Load plugins so plugin tools (e.g. gutenberg_*) are also runnable via CLI.
-    const { registry } = await bootstrap();
+    const { config, registry } = await bootstrap();
     try {
-      await runCli(args, registry);
+      await runCli(args, registry, config.outputDir);
     } finally {
       await registry.destroyAll();
     }

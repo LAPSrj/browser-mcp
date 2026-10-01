@@ -23,6 +23,11 @@ export interface ToolResponse {
    * sessions are open) without breaking response parsers.
    */
   _warnings?: string[];
+  /**
+   * One-line summary of the result, returned after the file path when the
+   * caller passes `result_path`. Never sent otherwise.
+   */
+  _summary?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +47,12 @@ export interface PluginToolDefinition {
   /** Zod shape object: Record<string, ZodType> — same format as core tool schemas. */
   schema: Record<string, unknown>;
   handler: (params: any) => Promise<ToolResponse>;
+  /**
+   * When true, the server adds a `result_path` param that writes the result
+   * to a file and returns a one-line summary instead (see
+   * utils/result-file.ts). For tools whose results are large.
+   */
+  resultFile?: boolean;
 }
 
 // ---------------------------------------------------------------------------

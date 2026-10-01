@@ -115,6 +115,24 @@ export const useSchemaField = {
     ),
 };
 
+// `result_path` param for tools whose results are large enough that an agent
+// should be able to keep them out of its context. Added by the server to
+// every plugin tool registered with `resultFile: true`; applied by
+// applyResultPath (utils/result-file.ts).
+export function resultPathField(outputDir: string) {
+  return {
+    result_path: z
+      .string()
+      .optional()
+      .describe(
+        `Write the result to this file instead of returning it inline. Relative paths resolve under "${outputDir}"; an existing file is overwritten. ` +
+          "The file holds the exact text the tool would have returned (several text parts are joined by newlines). " +
+          "The response is then one line: \"Result written to <absolute path> (<bytes> bytes, sha256 <hex>).\" followed by a short summary of the result. " +
+          "Images and errors are still returned inline.",
+      ),
+  };
+}
+
 // BrowserStack targeting fields, shared across every tool that exposes
 // `useBrowserStack`. They select which BrowserStack platform the remote browser
 // runs on. Only meaningful when `useBrowserStack: true` on an ephemeral call

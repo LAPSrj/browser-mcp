@@ -203,6 +203,7 @@ const designComparePlugin: ScreenshotPlugin = {
           ...params,
           url: resolveUrl(params.url, config.baseUrl),
         })) as any,
+      resultFile: true,
     });
   },
 };
