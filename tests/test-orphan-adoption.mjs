@@ -132,13 +132,19 @@ async function main() {
   }
   ok("adopted sidecar points at original Edge root PID + CDP port; Session B recorded");
 
-  if (sidecar2.relay_pid === originalRelayPid) {
-    fail("adopted sidecar should have a NEW relay_pid (old one was killed)");
+  if (originalRelayPid == null) {
+    // Mirrored networking / native: CDP is reachable directly, no relay either time.
+    if (sidecar2.relay_pid != null) fail(`no relay was needed at spawn, but adoption recorded relay_pid ${sidecar2.relay_pid}`);
+    ok("no relay needed (direct CDP), none spawned on adoption");
+  } else {
+    if (sidecar2.relay_pid === originalRelayPid) {
+      fail("adopted sidecar should have a NEW relay_pid (old one was killed)");
+    }
+    if (sidecar2.relay_pid == null || !isWindowsPidAlive(sidecar2.relay_pid)) {
+      fail(`adopted relay pid ${sidecar2.relay_pid} is not alive`);
+    }
+    ok(`fresh relay spawned (pid ${sidecar2.relay_pid}) — distinct from killed original (${originalRelayPid})`);
   }
-  if (sidecar2.relay_pid == null || !isWindowsPidAlive(sidecar2.relay_pid)) {
-    fail(`adopted relay pid ${sidecar2.relay_pid} is not alive`);
-  }
-  ok(`fresh relay spawned (pid ${sidecar2.relay_pid}) — distinct from killed original (${originalRelayPid})`);
 
   // ---- Phase 4: Drive a tab through the adopted session ----
   log("\n=== Phase 4 — Session B can drive a tab through the adopted browser ===");
