@@ -14,6 +14,7 @@ import {
 } from "../utils/browser-products.js";
 import { isWsl } from "../utils/wsl.js";
 import { parseIntEnv } from "../config.js";
+import { DownloadTracker } from "./downloads.js";
 
 // Persistent browser sessions an agent can keep alive across MCP tool
 // calls. Guards against runaway lifetimes with idle + wall-clock TTLs,
@@ -160,6 +161,12 @@ export interface OpenSessionOptions {
    * HTTPS pages with invalid certificates show a browser error screen.
    */
   ignore_https_errors?: boolean;
+  /**
+   * Folder this session's downloads are saved into. Linux/WSL path, ~/...,
+   * or (on WSL) a Windows path. Default: the browser's own download folder
+   * for attach_cdp, <output_dir>/downloads otherwise.
+   */
+  download_dir?: string;
 }
 
 export interface TabInfo {
@@ -180,6 +187,8 @@ export interface SessionInfo {
   idle_ttl_ms: number;
   wall_ttl_ms: number;
   expires_at: string;
+  /** Folder downloads are saved into. null = the browser's own download folder. */
+  download_dir: string | null;
 }
 
 export interface CloseResult {
@@ -246,6 +255,7 @@ interface Session {
   isBrowserStackRealDevice: boolean;
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
+  downloads: DownloadTracker;
   /** Launch-time options captured for pause_session — replayed verbatim into resume_session's open(). */
   pauseFields: {
     viewport: { width: number; height: number };
@@ -328,6 +338,17 @@ class SessionManager {
     }
     const idleTTL = opts.idle_ttl_ms ?? DEFAULT_IDLE_TTL;
 
+    const downloads = new DownloadTracker({
+      attachCdp: !!opts.attach_cdp,
+      fallbackDir: path.resolve(outputDir, "downloads"),
+      tabIdOf: (pg) => {
+        for (const [tid, p] of this.sessions.get(id)?.pages ?? []) if (p === pg) return tid;
+        return null;
+      },
+    });
+    // Before launching anything, so a bad path fails fast.
+    if (opts.download_dir) await downloads.setDir(opts.download_dir);
+
     let server: BrowserServer | undefined;
     let browser: Browser;
     let attachCdp: AttachCdpHandle | undefined;
@@ -372,6 +393,11 @@ class SessionManager {
           restorePreviousTabs: opts.restore_previous_tabs === true,
         });
         browser = await chromium.connectOverCDP(attachCdp.endpoint);
+      }
+      try {
+        await downloads.useBrowserDownloadSettings(browser);
+      } catch (e) {
+        console.error(`[browser-mcp] attach_cdp: could not restore the browser's download settings; downloads may fail (${(e as Error).message})`);
       }
     } else if (opts.useBrowserStack) {
       // BrowserStack cloud grid. connectBrowserStack returns a connect()'d
@@ -483,6 +509,7 @@ class SessionManager {
       await warmUpFirstFrame(page, browserName);
     }
 
+    downloads.watchPage(page);
     if (opts.url) {
       try {
         await page.goto(opts.url, { waitUntil: "load", timeout: 30000 });
@@ -514,6 +541,7 @@ class SessionManager {
       isAttachCdp: !!opts.attach_cdp,
       isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
+      downloads,
       pauseFields: {
         viewport,
         user_agent: opts.user_agent,
@@ -585,6 +613,7 @@ class SessionManager {
    * session's pages map + pageOrder + reselect activeTabId if needed.
    */
   private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
+    session.downloads.watchPage(page);
     page.on("close", () => {
       if (session.closing) return; // closeInternal handles its own teardown
       session.pages.delete(tabId);
@@ -635,6 +664,7 @@ class SessionManager {
       idle_ttl_ms: s.idleTTLMs,
       wall_ttl_ms: s.wallTTLMs,
       expires_at: new Date(expires).toISOString(),
+      download_dir: s.downloads.downloadDir(),
     };
   }
 
@@ -1017,6 +1047,7 @@ class SessionManager {
     s.pages.set(tid, page);
     if (!s.pageOrder.includes(tid)) s.pageOrder.push(tid);
     s.activeTabId = tid;
+    this.attachPageLifecycle(s, page, tid);
     if (url) {
       try {
         await page.goto(url, { waitUntil: "load", timeout: 30000 });
@@ -1082,6 +1113,10 @@ class SessionManager {
     return this.get(session_id).context;
   }
 
+  getDownloads(session_id: string): DownloadTracker {
+    return this.get(session_id).downloads;
+  }
+
   /** True when the session runs on a real BrowserStack device (real iOS Safari). */
   isBrowserStackRealDevice(session_id: string): boolean {
     return this.get(session_id).isBrowserStackRealDevice;
@@ -1123,6 +1158,7 @@ class SessionManager {
     }
     s.closing = true;
     this.sessions.delete(s.id);
+    await s.downloads.dispose();
 
     // Capture video paths by closing each page first (that flushes video
     // frames), then the context, then the underlying server.

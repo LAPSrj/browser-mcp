@@ -53,6 +53,9 @@ Capture + save:
 
 Dialogs:
   handle_next_dialog
+
+Downloads (session-only):
+  wait_for_download, list_downloads, set_download_dir
 ${pluginSection}
 Options are passed as --key=value or --key value. JSON values are supported.
 

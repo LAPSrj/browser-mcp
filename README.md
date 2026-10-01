@@ -86,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -176,6 +176,13 @@ opener; not auto-claimed by any session). See § Multi-server in
 / Vivaldi / Opera are code-supported via the same spawn + relay + teardown
 path but not live-validated — per-product FRE dialogs or default-browser
 prompts may surface that aren't documented yet.
+
+**Downloads.** On connect, Playwright points the browser's downloads at a
+temp folder on the machine running browser-mcp. A Windows browser driven
+from WSL can't write to that Linux path, so every download failed with
+"Couldn't download". attach_cdp sessions switch the browser back to its own
+download settings, so files land in its Downloads folder under their real
+names. See [§ Downloads](#downloads-session-scoped).
 
 **Limits.** Chromium-channel only (no Firefox / WebKit). Cannot combine
 with `record_video`.
@@ -303,6 +310,47 @@ pass an explicit `tab_id`.
 `handle_next_dialog` pre-arms a one-shot handler (`accept` / `dismiss`,
 optional prompt text) for the next `alert` / `confirm` / `prompt` raised
 on the session's active tab.
+
+### Downloads (session-scoped)
+
+| Tool | Purpose |
+|---|---|
+| `wait_for_download` | Wait for the oldest download this tool hasn't returned yet to finish, and return it. Call it after the click that starts the download; one that already finished comes back immediately. Optional `timeout` (default 30000). |
+| `list_downloads` | Every download in the session with its state, path, and size, plus the folder new downloads go to. |
+| `set_download_dir` | Change the folder for downloads that start after the call. Omit `path` to go back to the default. |
+
+Each download comes back as:
+
+```json
+{ "id": 1, "tab_id": "main", "url": "https://…/report.pdf", "suggested_filename": "report.pdf",
+  "state": "completed", "path": "/mnt/c/Users/me/Downloads/report.pdf",
+  "browser_path": "C:\\Users\\me\\Downloads\\report.pdf", "bytes": 48213 }
+```
+
+`state` is `in_progress`, `completed`, or `failed` (with `error`). `path` is
+always a path the MCP host can open. When a Windows browser is driven from
+WSL, `path` is the `/mnt/c/...` form and `browser_path` holds the Windows
+path the browser reported.
+
+Where files go:
+
+- **attach_cdp sessions** save into the browser's own download folder (its
+  Downloads setting) under the real filename. If the profile is set to ask
+  where to save each file, the browser shows its Save dialog and the
+  download stays `in_progress` until someone answers it.
+- **Other sessions** (Playwright-launched, BrowserStack) save into
+  `<output_dir>/downloads`. Playwright's own copy is a GUID-named temp file
+  that's deleted with the session, so browser-mcp copies it out under the
+  real filename.
+- **`download_dir`** (on `open_session`, or later via `set_download_dir`)
+  sends files to a folder you pick. It accepts a Linux/WSL path (absolute,
+  relative, or `~/...`) and, on WSL, a Windows path (`C:\...` or
+  `\\wsl.localhost\<distro>\...`). On attach_cdp sessions the browser still
+  saves into its own folder first and the file is then moved.
+
+A name that's already taken gets a ` (1)`, ` (2)`… suffix. Downloads are
+tracked per tab, so sessions sharing one attach_cdp profile only see their
+own.
 
 ## Plugins
 

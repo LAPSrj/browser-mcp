@@ -1,4 +1,7 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 
 let cached: boolean | undefined;
 
@@ -89,4 +92,28 @@ export function windowsSystemBinary(relPath: string): string {
     return `${root}\\System32\\${relPath.replace(/\//g, "\\")}`;
   }
   return `/mnt/c/Windows/System32/${relPath}`;
+}
+
+/** Windows path (C:\..., \\wsl.localhost\...) → the WSL path this process can open. WSL only. */
+export function winToWslPath(winPath: string): string {
+  return execFileSync("/usr/bin/wslpath", ["-u", winPath], {
+    encoding: "utf8",
+    timeout: 2000,
+  }).trim();
+}
+
+/** C:\... or \\server\share\... */
+export function isWindowsPath(p: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(p);
+}
+
+/**
+ * Resolve a path a caller passed in to an absolute path this process can
+ * open. Accepts Linux/WSL paths, ~/..., and on WSL also Windows paths
+ * (C:\... → /mnt/c/..., \\wsl.localhost\<distro>\... → /...).
+ */
+export function toLocalPath(p: string): string {
+  if (p === "~" || p.startsWith("~/")) p = path.join(os.homedir(), p.slice(1));
+  if (isWsl() && isWindowsPath(p)) return winToWslPath(p);
+  return path.resolve(p);
 }

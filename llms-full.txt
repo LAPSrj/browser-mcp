@@ -113,6 +113,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `screenshot` | session-bound screenshot (optional `selector` crop, `full_page`); returns page URL + title |
 | `save_pdf`, `save_html` | output capture |
 | `handle_next_dialog` | pre-arm a confirm/alert handler |
+| `wait_for_download`, `list_downloads`, `set_download_dir` | file downloads: wait for one to finish and get its saved path, list them, pick the folder (see Download contract) |
 | `list_modes` | enumerate registered modes |
 
 ## Cross-cutting concepts {#cross-cutting}
@@ -233,7 +234,7 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 
 ### Session contract {#session-contract}
 
-- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors` for non-default browser modes (see hazard below for `attach_cdp`); `useBrowserStack` + `browserStackOs` / `browserStackOsVersion` / `browserStackDevice` for a persistent BrowserStack session (see BrowserStack contract). `ignore_https_errors: true` accepts self-signed / expired / invalid TLS certificates without showing a browser error page — use for local dev servers with self-signed certs.
+- `open_session({ browser, viewport, ... })` returns `session_id`. The session keeps a Playwright `BrowserContext` alive across calls. Optional `headless`, `record_video`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors` for non-default browser modes (see hazard below for `attach_cdp`); `download_dir` for where downloads go (see Download contract); `useBrowserStack` + `browserStackOs` / `browserStackOsVersion` / `browserStackDevice` for a persistent BrowserStack session (see BrowserStack contract). `ignore_https_errors: true` accepts self-signed / expired / invalid TLS certificates without showing a browser error page — use for local dev servers with self-signed certs.
 - **Session-aware surfaces** accept optional `session_id` + `tab_id`. Without `session_id`, those tools spin an ephemeral context per call.
 - `close_session({ session_id })` releases the context; `list_sessions()` enumerates active ones.
 
@@ -248,6 +249,19 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 > **Hazard (capture-tools window).** `console_capture` and `network_log` attach their event listeners at tool-call time, so events emitted *before* the call (during prior tool calls or the initial page load) are NOT captured — Playwright only delivers events while a listener is registered on the Page. To capture a fresh page load on a reused session, pass `url` along with `session_id` (the tool will navigate inside the listener window). For "what's already in the page", use `evaluate_script({ session_id, script: "..." })` to read console buffers or perform fetches directly.
 
 > **`performance_metrics` on a reused session** returns metrics from the original navigation (potentially stale). Re-navigate via `navigate({ session_id, url })` first if you want fresh load metrics — or pass `url` to the tool to trigger the navigation inline.
+
+### Download contract {#download-contract}
+
+- Every session tracks the downloads its own tabs start (main tab, `open_tab` tabs, claimed popups). Sessions sharing one attach_cdp profile don't see each other's downloads.
+- `wait_for_download({ session_id, timeout? })` returns the oldest download it hasn't returned yet, once that download finishes. Call it after the click that starts the download; a download that already finished comes back immediately, so there's no race. With no download started by `timeout` (default 30000) it returns an error; with one still running it returns that entry with `state: "in_progress"`, and the next call waits for the same entry.
+- Each entry: `id`, `tab_id`, `url`, `suggested_filename`, `state` (`in_progress` | `completed` | `failed`), `path`, `browser_path`, `bytes`, `error`, `started_at`, `finished_at`. A `failed` entry is returned as an error result.
+- `path` is always a path the MCP host can open. A Windows browser driven from WSL reports `C:\...`; `path` is the `/mnt/c/...` form and `browser_path` keeps the Windows original.
+- **attach_cdp default:** the browser's own download folder (its Downloads setting) under the real filename. `download_dir` is `null` in `open_session` / `list_downloads` output to mean this. If the profile asks where to save each file, the browser's Save dialog opens and the download stays `in_progress` until someone answers it.
+- **Other sessions default:** `<output_dir>/downloads`. Playwright's own copy is a GUID-named temp file deleted with the session; browser-mcp copies it out under the real filename.
+- `download_dir` (on `open_session`, or `set_download_dir({ session_id, path })` later; omit `path` to restore the default) accepts a Linux/WSL path (absolute, relative to the server's cwd, or `~/...`) and, on WSL, a Windows path (`C:\...`, `\\wsl.localhost\<distro>\...`). The folder is created if missing. It applies to downloads that start after it's set. On attach_cdp the browser still saves into its own folder first and the file is then moved.
+- A taken name gets ` (1)`, ` (2)`… appended before the extension.
+
+> **Hazard (old browser-mcp on a shared profile):** Playwright's `connectOverCDP` points the browser's downloads at a temp folder on the connecting machine (`/tmp/playwright-artifacts-*`, GUID filenames). browser-mcp undoes that right after connecting. The setting is per browser profile, so a browser-mcp version without this fix attaching to the same profile switches it back for everyone, and downloads fail again until a current version opens a session there. See § Diagnosis › Download fails with a GUID filename.
 
 ### Pause / resume contract {#pause-resume-contract}
 
@@ -615,6 +629,13 @@ When NOT to use a long `wall_ttl_ms`:
 - **Video recording is on (`record_video: true`)**: capped at 10 minutes hard. Long recordings produce huge files and "I forgot to stop recording" should cost you minutes, not gigabytes.
 - **Short ephemeral tool calls**: omit `wall_ttl_ms` entirely and the 30-min default is fine.
 
+### Download a file and use it
+
+1. `open_session({ attach_cdp: true, user_data_dir, download_dir: "~/work/invoices" })`, or omit `download_dir` to keep the browser's Downloads folder.
+2. `click({ session_id, selector: "role=link[name=\"Download PDF\"]" })`.
+3. `wait_for_download({ session_id })` → `{ state: "completed", path: "/home/me/work/invoices/invoice-0423.pdf", bytes: 48213, ... }`.
+4. Read or upload `path` directly. For several files, repeat the click + `wait_for_download` pair, or click them all and call `wait_for_download` once per file (it returns them oldest first). `list_downloads` shows everything so far.
+
 ### Run an a11y audit on a logged-in page
 
 1. `open_session` + log in (via `type_text` / `click` against the login form, or via the `wp` plugin's `use: "wordpress"` mode if it's a WP site).
@@ -642,6 +663,7 @@ Quick symptom lookup:
 | `evaluate_script("el.click()")` returns success but the page state doesn't change; a save button stays disabled after a value-setter eval; framework synthetic-event handlers don't fire | [Synthetic-click no-event-trigger](#synthetic-click-no-event-trigger) |
 | `target="_blank" href="data:..."` click returns success but no popup tab appears; `context.pages()` stays the same; `waitForEvent("page")` times out | [Data-URL popup silently blocked](#data-url-popup-blocked) |
 | Session gets killed at exactly the `wall_ttl_ms` value you passed (e.g. 1h cut on a long support chat); felt like a "cap" but you set it yourself | [wall_ttl_ms misread as a cap](#wall-ttl-misread) |
+| attach_cdp download shows in the browser as a GUID name (`f862ec60-…`) with "Couldn't download - Download error"; empty `C:\tmp\playwright-artifacts-*` folders appear | [Download fails with a GUID filename](#download-guid-failure) |
 
 ### Mode not registered {#mode-not-registered}
 
@@ -740,6 +762,17 @@ There is **NO server-side cap on `wall_ttl_ms` for non-recording sessions**. Sou
 3. See § Common workflows › Long-lived attach_cdp sessions for the recipe.
 
 **For implementers:** if you find yourself wanting "infinite wall TTL," pass `Number.MAX_SAFE_INTEGER` (~285,000 years in ms) — it'll outlive the session in any practical sense. A "no expiry" sentinel value (`0`, `-1`) isn't accepted today; that's a deliberate "every session has an upper bound" guard.
+
+### Download fails with a GUID filename {#download-guid-failure}
+
+**Symptom:** In an attach_cdp session, a download shows in the browser's download list under a GUID name and fails with "Couldn't download - Download error". `wait_for_download` returns `state: "failed"` with `error: "canceled"`. Empty `C:\tmp\playwright-artifacts-*` folders pile up on Windows.
+
+**Cause:** Playwright's `connectOverCDP` sends `Browser.setDownloadBehavior` with `behavior: "allowAndName"` (GUID filenames) and `downloadPath` set to a temp folder it creates on the connecting machine, e.g. `/tmp/playwright-artifacts-XXXX`. A Windows browser driven from WSL reads that as `C:\tmp\playwright-artifacts-XXXX`, creates the folder, and cancels the download with 0 bytes. browser-mcp sends `behavior: "default"` right after connecting, which puts the browser back on its own download settings. The setting belongs to the browser profile, not to one connection, so the symptom comes back when something else connects to the same profile with Playwright defaults: an older browser-mcp, or your own `connectOverCDP` script.
+
+**Fix:**
+1. Update every browser-mcp server that attaches to that profile.
+2. Open a new session on the profile (`open_session({ attach_cdp: true, user_data_dir })`); it switches the setting back.
+3. In your own scripts, send `Browser.setDownloadBehavior({ behavior: "default", eventsEnabled: true })` on a `browser.newBrowserCDPSession()` after connecting.
 
 ### Content vs translation misclassification {#content-vs-translation}
 

@@ -100,6 +100,10 @@ const selectorField = {
 const timeoutField = {
   timeout: z.number().optional().describe("Action timeout in ms (default: 30000)"),
 };
+const downloadDirField = z.string().optional();
+const DOWNLOAD_DIR_FORMS =
+  "Accepts an absolute or relative Linux/WSL path or ~/..., and on WSL also a Windows path " +
+  "(C:\\... or \\\\wsl.localhost\\<distro>\\...). Created if missing.";
 
 // ---------------------------------------------------------------------------
 // Session lifecycle tools
@@ -189,6 +193,11 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "Accept self-signed, expired, or otherwise invalid TLS certificates without error (default: false). " +
           "Set true for local dev servers with self-signed certs (e.g. https://localhost, https://*.local). " +
           "Without this, HTTPS pages with invalid certificates show a browser error screen instead of the page content.",
+      ),
+      download_dir: downloadDirField.describe(
+        "Folder this session's downloads are saved into. " + DOWNLOAD_DIR_FORMS +
+          " Default: the browser's own download folder for attach_cdp sessions (its Downloads setting), " +
+          "<output_dir>/downloads for the rest. Change it later with set_download_dir.",
       ),
       useBrowserStack: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
@@ -1255,6 +1264,67 @@ export const dialogPrimitives: Record<string, PrimitiveDef> = {
 };
 
 // ---------------------------------------------------------------------------
+// Downloads (session-only)
+// ---------------------------------------------------------------------------
+
+export const downloadPrimitives: Record<string, PrimitiveDef> = {
+  wait_for_download: {
+    description:
+      "Wait for a file download in the session to finish and return where it was saved. Returns the oldest download " +
+      "this tool hasn't returned yet, so call it after the click that starts the download; one that already finished " +
+      "comes back immediately. `path` is a path this server can open (on WSL, a Windows browser's C:\\... path comes " +
+      "back as /mnt/c/..., with the original in `browser_path`). If the download is still running at `timeout`, it " +
+      "comes back with state \"in_progress\" and the next call waits for it again. attach_cdp sessions save into the " +
+      "browser's own download folder unless download_dir is set; if that profile asks where to save each file, the " +
+      "browser shows its Save dialog and the download stays in progress until someone answers it.",
+    schema: {
+      session_id: z.string().describe("Session id"),
+      timeout: z.number().optional().describe(
+        "Max ms to wait (default: 30000). Keep it under the server's tool timeout (BROWSER_MCP_TOOL_TIMEOUT, default 90000).",
+      ),
+    },
+    handler: async (p) => {
+      sessionManager.touch(p.session_id);
+      const timeout = p.timeout ?? 30000;
+      const d = await sessionManager.getDownloads(p.session_id).waitNext(timeout);
+      sessionManager.touch(p.session_id);
+      if (!d) return err(`No download started within ${timeout}ms.`);
+      return d.state === "failed" ? err(JSON.stringify(d, null, 2)) : json(d);
+    },
+  },
+
+  list_downloads: {
+    description:
+      "List every download in the session (newest last) with its state, saved path, and size, plus the folder new " +
+      "downloads go to (null = the browser's own download folder).",
+    schema: {
+      session_id: z.string().describe("Session id"),
+    },
+    handler: async (p) => {
+      sessionManager.touch(p.session_id);
+      const tracker = sessionManager.getDownloads(p.session_id);
+      return json({ download_dir: tracker.downloadDir(), downloads: tracker.list() });
+    },
+  },
+
+  set_download_dir: {
+    description:
+      "Set the folder this session's downloads are saved into, for downloads that start after this call. " +
+      "Omit `path` to go back to the default. On attach_cdp sessions the browser still saves into its own download " +
+      "folder and the file is then moved here.",
+    schema: {
+      session_id: z.string().describe("Session id"),
+      path: downloadDirField.describe(`Folder for downloads. ${DOWNLOAD_DIR_FORMS} Omit to restore the default.`),
+    },
+    handler: async (p) => {
+      sessionManager.touch(p.session_id);
+      const dir = await sessionManager.getDownloads(p.session_id).setDir(p.path);
+      return json({ download_dir: dir });
+    },
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Type + aggregator
 // ---------------------------------------------------------------------------
 
@@ -1276,5 +1346,6 @@ export function allPrimitives(): Record<string, PrimitiveDef> {
     ...capturePrimitives,
     ...savePrimitives,
     ...dialogPrimitives,
+    ...downloadPrimitives,
   };
 }

@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { sanitizeProcessName } from "./browser-products.js";
-import { isWsl, isWslMirrored, readWslGatewayIp, windowsSystemBinary } from "./wsl.js";
+import { isWsl, isWslMirrored, readWslGatewayIp, windowsSystemBinary, winToWslPath } from "./wsl.js";
 import {
   aliveWindowsPids,
   finalizeSidecarTeardown,
@@ -295,13 +295,6 @@ function resolveWindowsTemp(): string {
     throw new Error("Could not resolve %TEMP% on Windows side");
   }
   return t;
-}
-
-function winToWslPath(winPath: string): string {
-  return execFileSync("/usr/bin/wslpath", ["-u", winPath], {
-    encoding: "utf8",
-    timeout: 2000,
-  }).trim();
 }
 
 function wslToWinPath(wslPath: string): string {
