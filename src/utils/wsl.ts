@@ -37,7 +37,22 @@ export function isWslMirrored(): boolean {
     return false;
   }
   try {
-    const mac = readFileSync("/sys/class/net/eth0/address", "utf8").trim().toLowerCase();
+    // The routing NIC isn't always eth0 (e.g. mirrored-mode hosts with
+    // multiple adapters expose eth1) — resolve it from the default route.
+    let iface = "eth0";
+    try {
+      const route = readFileSync("/proc/net/route", "utf8");
+      for (const line of route.split("\n").slice(1)) {
+        const cols = line.split(/\s+/);
+        if (cols[1] === "00000000" && cols[0]) {
+          iface = cols[0];
+          break;
+        }
+      }
+    } catch {
+      // keep eth0 fallback
+    }
+    const mac = readFileSync(`/sys/class/net/${iface}/address`, "utf8").trim().toLowerCase();
     mirroredCache = !mac.startsWith("00:15:5d");
   } catch {
     mirroredCache = false;
