@@ -77,6 +77,35 @@ async function openBackgroundPage(context: BrowserContext, browserPid: number): 
   throw new Error(`openBackgroundPage: page for target ${targetId} did not appear within 15s`);
 }
 
+/**
+ * Load the tabs Edge restored but left unloaded. After an unclean exit Edge
+ * restores every tab of the last session and loads only the selected one; the
+ * others are tab targets with no URL and no page target, so context.pages()
+ * doesn't list them, however long you wait (verified live on Edge 154).
+ * Target.autoAttachRelated on such a tab makes Edge load it without selecting
+ * it, so the window doesn't take focus, and Playwright's own auto-attach then
+ * adds the page to the context.
+ */
+async function loadRestoredTabs(context: BrowserContext): Promise<void> {
+  const browser = context.browser();
+  if (!browser) return;
+  const before = context.pages().length;
+  const cdp = await browser.newBrowserCDPSession();
+  try {
+    const { targetInfos } = await cdp.send("Target.getTargets", { filter: [{ type: "tab" }] });
+    const unloaded = targetInfos.filter((t) => t.type === "tab" && !t.url);
+    for (const t of unloaded) {
+      await cdp.send("Target.autoAttachRelated", { targetId: t.targetId, waitForDebuggerOnStart: false });
+    }
+    const deadline = Date.now() + 10000;
+    while (context.pages().length < before + unloaded.length && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 export interface OpenSessionOptions {
   browser?: BrowserName;
   viewport?: { width: number; height: number };
@@ -474,6 +503,20 @@ class SessionManager {
           }
           if (!opts.url && page.url() !== "about:blank") {
             try { await page.goto("about:blank", { timeout: 5000 }); } catch { /* best-effort */ }
+          }
+        } else if (attachCdp?.attachedVia === "spawn") {
+          // Only a browser we just launched has restored tabs. On an adopted
+          // or user-managed browser, unloaded tabs are the user's sleeping
+          // tabs; leave them alone.
+          try {
+            await loadRestoredTabs(context);
+          } catch (e) {
+            console.error(`[browser-mcp] attach_cdp: could not load the restored tabs; only the selected one is listed (${(e as Error).message})`);
+          }
+          // The url gets its own page instead of replacing a restored tab.
+          if (opts.url) {
+            const bgPid = backgroundBrowserPid(attachCdp);
+            page = bgPid ? await openBackgroundPage(context, bgPid) : await context.newPage();
           }
         }
       }
@@ -981,7 +1024,7 @@ class SessionManager {
    * is a fresh session that happens to inherit storage state — it isn't the
    * "same" session as the one that was paused).
    *
-   * Accepts per-call overrides for ttl, headless, record_video, output_dir.
+   * Accepts per-call overrides for ttl, headless, output_dir.
    * The browser engine is locked to the snapshot's value (resuming on a
    * different engine wouldn't honor the storageState anyway).
    */

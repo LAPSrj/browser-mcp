@@ -55,7 +55,9 @@ export interface SpawnAttachCdpOptions {
    * agent's first click on a credentialed profile, but it ALSO disables
    * silent auto-restoration — so when the caller has explicitly asked to
    * resume the prior session (`sessionManager.open({ restore_previous_tabs:
-   * true })`), the flag has to be left off. Default false.
+   * true })`), the flag has to be left off. Restore mode also drops the
+   * about:blank startup URL (it suppresses the restore) and adds
+   * --restore-last-session. Default false.
    */
   restorePreviousTabs?: boolean;
 }
@@ -1115,7 +1117,13 @@ export async function spawnAttachCdpRelay(
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
-    "about:blank",
+    // Startup page. A startup URL on the command line makes Edge open only
+    // that URL and skip the session restore (verified live on Edge 154), so
+    // restore mode passes none. Edge restores on its own after an unclean exit
+    // (cleanup() kills the browser) but not after a clean one (the user closed
+    // the window); --restore-last-session covers that case without changing
+    // the profile's startup setting.
+    ...(opts.restorePreviousTabs ? ["--restore-last-session"] : ["about:blank"]),
   ];
 
   dbg("spawning browser:", { wsl, exe: opts.executablePath, processName, port: cdpPort, profile: userDataDirWin });
