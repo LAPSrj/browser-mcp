@@ -12,7 +12,7 @@ import {
 } from "./utils/browser.js";
 import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
-import { actionSchema, useSchemaField, browserStackFields, resultPathField } from "./utils/schemas.js";
+import { actionSchema, actionsDesc, useSchemaField, browserStackFields, resultPathField } from "./utils/schemas.js";
 import { applyResultPath } from "./utils/result-file.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
@@ -121,12 +121,10 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
     withTimeout<T>(toolTimeout, defaultOutputDir, fn, registry);
 
   const urlDescription = config.baseUrl
-    ? `URL to screenshot (absolute or relative path — base: ${config.baseUrl})`
-    : "URL to screenshot (absolute URL required)";
+    ? `Absolute URL or path relative to ${config.baseUrl}`
+    : "Absolute URL";
 
-  const urlVisitDescription = config.baseUrl
-    ? `URL to visit (absolute or relative path — base: ${config.baseUrl})`
-    : "URL to visit (absolute URL required)";
+  const urlVisitDescription = urlDescription;
 
   function resolveParams<T extends { url: string; outputDir?: string }>(params: T): T {
     return {
@@ -139,17 +137,15 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- multi_screenshot ----------
   server.tool(
     "multi_screenshot",
-    "Take screenshots of a URL across multiple browsers and viewports in one call. Launches ephemeral browsers with fresh, independent sessions (no cookies, no auth, no prior state). " +
-      "For a single screenshot of a page in an existing session (with its auth, cookies, and scroll position intact), use screenshot({session_id}) instead. " +
-      "Returns an error if the page cannot be loaded (certificate errors, DNS failures, connection refused, HTTP 5xx). " +
-      "Supports pre-screenshot actions, console capture, and full-page capture." +
-      (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+    "Screenshot a URL across several browsers and viewports in one call, in fresh ephemeral browsers (no cookies, auth, or state). " +
+      "For a page in an existing session use screenshot({session_id}); for one element use element_screenshot. " +
+      "Errors if the page can't load (TLS, DNS, refused, HTTP 5xx).",
     {
       url: z.string().describe(urlDescription),
       browsers: z
         .array(z.enum(["chromium", "firefox", "webkit"]))
         .optional()
-        .describe('Browsers to use (default: ["chromium"])'),
+        .describe('Default ["chromium"]'),
       viewports: z
         .array(
           z.object({
@@ -159,22 +155,20 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
           }),
         )
         .optional()
-        .describe("Viewport sizes (default: [{width:1280, height:720}])"),
-      fullPage: z.boolean().optional().describe("Capture full scrollable page (default: false)"),
-      outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-      actions: z.array(actionSchema).optional().describe(
-        "Actions to run before screenshot. Selector-based actions (click, type, hover, scroll_to, select, wait_for_selector) support optional (skip if element missing) and timeout (ms) params",
-      ),
-      captureConsole: z.boolean().optional().describe("Also return console logs (default: false)"),
-      consoleToFile: z.boolean().optional().describe("Write console logs to file (default: false)"),
-      waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
-      useBrowserStack: z.boolean().optional().describe("Use BrowserStack instead of local browsers (default: false)"),
+        .describe("Default [{width:1280, height:720}]"),
+      fullPage: z.boolean().optional().describe("Full scrollable page (default false)"),
+      outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+      actions: z.array(actionSchema).optional().describe(actionsDesc),
+      captureConsole: z.boolean().optional().describe("Also return console logs (default false)"),
+      consoleToFile: z.boolean().optional().describe("Write console logs to a file (default false)"),
+      waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+      useBrowserStack: z.boolean().optional().describe("Default false"),
       ...browserStackFields,
-      delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
-      startY: z.number().optional().describe("Y coordinate to start the screenshot clip from (pixels from top)"),
-      endY: z.number().optional().describe("Y coordinate to end the screenshot clip at (pixels from top)"),
-      startX: z.number().optional().describe("X coordinate to start the screenshot clip from (pixels from left). Defaults to 0. For a center crop of width W, pass startX = (viewport.width - W) / 2"),
-      endX: z.number().optional().describe("X coordinate to end the screenshot clip at (pixels from left). Defaults to viewport width"),
+      delay: z.number().optional().describe("Extra ms before capture (default 0)"),
+      startY: z.number().optional().describe("Clip top, px from page top"),
+      endY: z.number().optional().describe("Clip bottom, px from page top"),
+      startX: z.number().optional().describe("Clip left, px (default 0). Center crop of width W: (viewport.width - W) / 2"),
+      endX: z.number().optional().describe("Clip right, px (default viewport width)"),
       ...useSchemaField,
     },
     wrap(async (params) => screenshotTool(resolveParams(params)) as any),
@@ -183,19 +177,17 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- element_screenshot ----------
   server.tool(
     "element_screenshot",
-    "Take a screenshot of a specific element on a page identified by CSS selector. Launches an ephemeral browser with a fresh session (no cookies, no auth). " +
-      "Returns an error if the page cannot be loaded (certificate errors, DNS failures, connection refused)." +
-      (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+    "Screenshot one element (CSS selector) of a URL in a fresh ephemeral browser (no cookies or auth). " +
+      "For an element in an existing session use screenshot({session_id, selector}). " +
+      "Errors if the page can't load (TLS, DNS, refused).",
     {
       url: z.string().describe(urlVisitDescription),
-      selector: z.string().describe("CSS selector of the element to screenshot"),
-      browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
-      viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
-      actions: z.array(actionSchema).optional().describe(
-        "Actions to run before screenshot. Selector-based actions support optional and timeout params",
-      ),
-      outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-      useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+      selector: z.string().describe("CSS selector"),
+      browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"'),
+      viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
+      actions: z.array(actionSchema).optional().describe(actionsDesc),
+      outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+      useBrowserStack: z.boolean().optional().describe("Default false"),
       ...browserStackFields,
       ...useSchemaField,
     },
@@ -205,7 +197,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- list_modes ----------
   server.tool(
     "list_modes",
-    'List named modes registered by loaded plugins. Pass a mode name via a tool\'s `use` param to opt into its session hooks (e.g. use: "wordpress" attaches the wp plugin\'s auth cookie to a core tool call, unlocking /wp-admin/ URLs).',
+    "List the modes loaded plugins register, for a tool's `use` param.",
     {},
     async () => {
       const modes = registry?.listModes() ?? [];

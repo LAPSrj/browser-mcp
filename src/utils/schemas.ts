@@ -4,89 +4,89 @@ import { z } from "zod";
 // tools (src/plugins/*/index.ts). Keeping them in one place keeps the
 // `actions[]` surface + `use` param identical across every entry point.
 
-export const optionalDesc =
-  "If true, skip this action silently when the element is not found instead of failing (default: false)";
-
-export const timeoutDesc =
-  "Timeout in ms. When set and the action fails, remaining actions are skipped but the tool still completes and returns the error alongside the result. When optional is true, defaults to 5000. Otherwise uses the context default (30s) and failures abort the tool entirely";
+// The optional/timeout semantics are described once on the `actions` array
+// (actionsDesc) instead of on every action variant.
+export const actionsDesc =
+  "Steps run on the page after load. optional: skip the step if it fails (e.g. element missing). " +
+  "timeout (ms): if set, a failing step stops the remaining steps and the tool returns its result plus the error; " +
+  "if unset, a failure aborts the tool. Default timeout 5000 when optional, else 30000. " +
+  "assert_* steps report pass/fail and never abort.";
 
 export const coreActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("click"),
     selector: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
-    force: z.boolean().optional().describe(
-      "Skip actionability checks (visible, enabled, stable) and click immediately (default: false)",
-    ),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
+    force: z.boolean().optional().describe("Skip actionability checks"),
   }),
   z.object({
     action: z.literal("type"),
     selector: z.string(),
     text: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
   }),
   z.object({
     action: z.literal("wait_for_selector"),
     selector: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
   }),
   z.object({ action: z.literal("wait"), ms: z.number() }),
   z.object({
     action: z.literal("scroll_to"),
     selector: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
   }),
   z.object({
     action: z.literal("evaluate"),
     script: z.string().describe(
-      "JS to run in page context. Wrapped in an IIFE under the hood — use `return` to yield a value (value is discarded by the action; use the evaluate_script tool to get it back)",
+      "Runs in an IIFE; the return value is discarded (use evaluate_script to get it)",
     ),
   }),
   z.object({
     action: z.literal("assert_visible"),
     selector: z.string(),
-    timeout: z.number().optional().describe("How long to wait for the element to become visible (default: 3000ms)"),
+    timeout: z.number().optional().describe("ms (default 3000)"),
   }),
   z.object({
     action: z.literal("assert_hidden"),
     selector: z.string(),
-    timeout: z.number().optional().describe("How long to wait for the element to become hidden (default: 3000ms)"),
+    timeout: z.number().optional().describe("ms (default 3000)"),
   }),
   z.object({
     action: z.literal("assert_attribute"),
     selector: z.string(),
     attribute: z.string(),
-    equals: z.string().optional().describe("Expected attribute value. Omit to assert presence regardless of value"),
-    absent: z.boolean().optional().describe("When true, assert the attribute is NOT set. Mutually exclusive with equals"),
+    equals: z.string().optional().describe("Omit to assert presence only"),
+    absent: z.boolean().optional().describe("Exclusive with equals"),
   }),
   z.object({
     action: z.literal("assert_text"),
     selector: z.string(),
-    contains: z.string().optional().describe("Expected substring within the element's trimmed textContent"),
-    equals: z.string().optional().describe("Expected exact trimmed textContent"),
+    contains: z.string().optional().describe("Substring of trimmed textContent"),
+    equals: z.string().optional().describe("Exact trimmed textContent"),
   }),
   z.object({
     action: z.literal("assert_count"),
     selector: z.string(),
-    equals: z.number().describe("Expected number of matching elements"),
+    equals: z.number(),
   }),
   z.object({
     action: z.literal("hover"),
     selector: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
-    force: z.boolean().optional().describe("Skip actionability checks and hover immediately (default: false)"),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
+    force: z.boolean().optional().describe("Skip actionability checks"),
   }),
   z.object({
     action: z.literal("select"),
     selector: z.string(),
     value: z.string(),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
   }),
 ]);
 
@@ -94,9 +94,9 @@ export const coreActionSchema = z.discriminatedUnion("action", [
 // Validated at runtime by the custom action handler.
 export const pluginActionSchema = z
   .object({
-    action: z.string().describe("Plugin-provided action type (e.g. wp-gutenberg_insert, wp-gutenberg_select_block)"),
-    optional: z.boolean().optional().describe(optionalDesc),
-    timeout: z.number().optional().describe(timeoutDesc),
+    action: z.string().describe("Plugin action, e.g. gutenberg_insert"),
+    optional: z.boolean().optional(),
+    timeout: z.number().optional(),
   })
   .passthrough();
 
@@ -111,7 +111,7 @@ export const useSchemaField = {
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe(
-      'Opt into plugin-provided capabilities by mode name. E.g. use: "wordpress" applies the wp plugin\'s authenticated WP session cookie to this call, letting the tool reach /wp-admin/* and other login-gated URLs. With several WordPress sites configured, "wordpress" logs into the site the call\'s full url belongs to (the first site for a relative url), and "wordpress:<site>" picks a site by name. Pass an array to stack multiple modes. Discover available modes via the list_modes tool.',
+      'Plugin mode(s); see list_modes. "wordpress" injects the WP login cookie for the site of the full url (first site for a relative url); "wordpress:<site>" picks one. Array stacks modes. Not applied with session_id.',
     ),
 };
 
@@ -125,10 +125,9 @@ export function resultPathField(outputDir: string) {
       .string()
       .optional()
       .describe(
-        `Write the result to this file instead of returning it inline. Relative paths resolve under "${outputDir}"; an existing file is overwritten. ` +
-          "The file holds the exact text the tool would have returned (several text parts are joined by newlines). " +
-          "The response is then one line: \"Result written to <absolute path> (<bytes> bytes, sha256 <hex>).\" followed by a short summary of the result. " +
-          "Images and errors are still returned inline.",
+        `Write the text result to this file (relative to "${outputDir}", overwrites) instead of inline. ` +
+          "The response becomes \"Result written to <path> (<bytes> bytes, sha256 <hex>).\" plus a short summary. " +
+          "Images and errors stay inline.",
       ),
   };
 }
@@ -143,29 +142,25 @@ export const browserStackFields = {
     .string()
     .optional()
     .describe(
-      'BrowserStack desktop OS when useBrowserStack is true and no browserStackDevice is set (e.g. "Windows", "OS X"). Default: "Windows". Ignored for local browsers and when targeting a real device. NOTE: even "OS X" runs Playwright-WebKit on a Mac host, NOT Apple Safari — for real Safari use browserStackDevice.',
+      'Desktop OS with useBrowserStack and no device: "Windows" (default) or "OS X". "OS X" runs Playwright WebKit, not real Safari (use browserStackDevice).',
     ),
   browserStackOsVersion: z
     .string()
     .optional()
     .describe(
-      'BrowserStack OS/device version when useBrowserStack is true. Desktop: "11" (Windows) or "Sequoia"/"Sonoma"/"Ventura" (OS X). Real device: the iOS version, e.g. "17". Default desktop: "11". Ignored for local browsers.',
+      'Desktop: "11" (default, Windows) or "Sequoia"/"Sonoma"/"Ventura" (OS X). Real device: iOS version (default "17").',
     ),
   browserStackDevice: z
     .string()
     .optional()
     .describe(
-      'Target a REAL BrowserStack mobile device by name (e.g. "iPhone 15 Pro Max", "iPhone 14"). Requires useBrowserStack:true. When set, the session runs on a real device — real iOS Safari — and browserStackOsVersion is the iOS version (default "17"). Real devices boot slowly (allow ~60-90s). NOTE: only real iOS (Apple Safari) is supported today; real Android is not yet wired.',
+      'Real iOS device with real Safari (e.g. "iPhone 15 Pro Max"); needs useBrowserStack. iOS only, no Android. Boots in ~60-90s.',
     ),
   browserStackLocal: z
     .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
     .optional()
     .describe(
-      'Route a BrowserStack session through a BrowserStack Local tunnel so the remote browser or REAL device can ' +
-        'reach localhost and private URLs served from THIS machine (e.g. "http://clw.localhost/"). Requires ' +
-        'useBrowserStack:true. The tunnel auto-starts on the first tunneled session and stops when the last closes. ' +
-        'Ignored when useBrowserStack is false. NOTE: the URL must resolve from the host running this MCP server — ' +
-        'on WSL that is the WSL box, not Windows.',
+      "Tunnel so BrowserStack can reach localhost/private URLs of the host running this server (on WSL, the WSL side). Needs useBrowserStack.",
     ),
 };
 

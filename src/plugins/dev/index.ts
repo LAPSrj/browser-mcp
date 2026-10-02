@@ -6,7 +6,7 @@ import type {
   PluginContext,
   PluginConfigSchema,
 } from "../types.js";
-import { actionSchema, useSchemaField, browserStackFields } from "../../utils/schemas.js";
+import { actionSchema, actionsDesc, useSchemaField, browserStackFields } from "../../utils/schemas.js";
 import { sessionManager } from "../../core/sessions.js";
 import { consoleCaptureTool } from "./tools/console-capture.js";
 import { domSnapshotTool } from "./tools/dom-snapshot.js";
@@ -44,13 +44,9 @@ const devPlugin: ScreenshotPlugin = {
     const defaultOutputDir = config.outputDir ?? ".browser";
     const resolveUrl = ctx.core.resolveUrl;
 
-    const urlVisitDesc = config.baseUrl
-      ? `URL to visit (absolute or relative path — base: ${config.baseUrl})`
-      : "URL to visit (absolute URL required)";
-
     const urlCaptureDesc = config.baseUrl
-      ? `URL to screenshot (absolute or relative path — base: ${config.baseUrl})`
-      : "URL to screenshot (absolute URL required)";
+      ? `Absolute URL or path relative to ${config.baseUrl}`
+      : "Absolute URL";
 
     const withUrl = <T extends { url: string }>(p: T): T => ({
       ...p,
@@ -68,27 +64,28 @@ const devPlugin: ScreenshotPlugin = {
       url: p.url ? resolveUrl(p.url, config.baseUrl) : undefined,
     });
 
-    const urlOptionalDesc = "URL to navigate to before running. Optional when session_id is provided (runs on the session's current page); required when ephemeral";
-    const sessionIdDesc = "Reuse an open_session. Skips the per-call browser launch; when `url` is omitted, runs on the session's current page without re-navigating";
-    const tabIdDesc = "Which tab in the session to target. Defaults to the session's active tab";
+    const urlOptionalDesc =
+      "Navigate here first. Required without session_id" +
+      (config.baseUrl ? `; may be relative to ${config.baseUrl}` : "");
+    const sessionIdDesc = "open_session id. Without url, runs on the session's current page (no navigation)";
+    const tabIdDesc = "Session tab (default: active)";
 
     // ---------- console_capture ----------
     ctx.registerTool({
       name: "console_capture",
       description:
-        "Capture browser console output (logs, warnings, errors) from a page. Session-aware: pass `session_id` to capture from the session's current page (cookies + auth state intact). Capture window starts when the listener attaches — events emitted before this call are NOT seen." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Capture console logs, warnings, errors, and page errors. Only events after this call starts are seen; pass url to capture a fresh load.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
-        actions: z.array(actionSchema).optional().describe("Actions to run. Selector-based actions support optional and timeout params"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-        toFile: z.boolean().optional().describe("Write logs to file (default: false)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
+        actions: z.array(actionSchema).optional().describe(actionsDesc + " Runs while capturing."),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        toFile: z.boolean().optional().describe("Write logs to a file (default false)"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: { totalLogs, byType, errorPreviews } (top 5 errors/warnings, capped at 200 chars each) instead of the full log body. Page errors collapse to count + 5 previews. Note: structural switch — at very low log counts (~5 or fewer) the aggregate may exceed the raw output; the win materializes at higher volumes (default: false)"),
+        summaryOnly: z.boolean().optional().describe("Return { totalLogs, byType, errorPreviews } (top 5, 200 chars each) instead of all logs; larger than full output below ~5 logs (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await consoleCaptureTool({
@@ -101,19 +98,18 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "dom_snapshot",
       description:
-        "Get a simplified DOM tree of a page or element. Returns tag names, IDs, classes, and text content. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Simplified DOM tree (tags, ids, classes, text) of the page or an element. For specific fields of known elements use dom_query.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        selector: z.string().optional().describe('Root CSS selector (default: "body")'),
-        maxDepth: z.number().optional().describe("Max DOM depth to traverse (default: 5)"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before snapshot. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        selector: z.string().optional().describe('Root CSS selector (default "body")'),
+        maxDepth: z.number().optional().describe("Default 5"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: { rootTag, totalNodes, maxDepthReached, truncatedBranches, byTag } instead of the full tree. Re-run without to walk the tree itself (default: false)"),
-        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true. Caller-supplied flags always win over profile defaults'),
+        summaryOnly: z.boolean().optional().describe("Return { rootTag, totalNodes, maxDepthReached, truncatedBranches, byTag } instead of the tree (default false)"),
+        profile: z.enum(["walker"]).optional().describe('"walker" sets summaryOnly:true; explicit flags win'),
         ...useSchemaField,
       },
       handler: async (params) => (await domSnapshotTool(withOptionalUrl(params))) as any,
@@ -123,17 +119,15 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "accessibility_snapshot",
       description:
-        "Discover what's clickable / nameable on the page via the accessibility tree — roles + accessible names + values. " +
-        "Best entry point when you don't yet know the page structure: returns every interactive role (button, link, textbox, combobox, checkbox, menuitem, …) with its accessible name, so you can feed names directly into `click({selector: 'role=button[name=\"Submit\"]'})`. " +
-        "Pass `summaryOnly:true` for a role-count overview, or `assertRules` to run named WCAG-like checks alongside the tree. " +
-        "Also useful for verifying a11y compliance. Session-aware: pass `session_id` to snapshot the session's current page without re-navigating." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Accessibility tree: roles, accessible names, values. Good first look at an unknown page; names feed click selectors like " +
+        "`role=button[name=\"Submit\"]`. assertRules runs named a11y checks. For a flat list of clickables with ready selectors use " +
+        "list_interactive_elements; for a full WCAG audit use axe_audit.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        actions: z.array(actionSchema).optional().describe("Actions to run before snapshot. Selector-based actions support optional and timeout params"),
-        scope: z.string().optional().describe("CSS selector to scope the snapshot and asserts (default: document.body)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        scope: z.string().optional().describe("CSS selector scoping tree and asserts (default body)"),
         assertRules: z
           .array(
             z.enum([
@@ -146,11 +140,11 @@ const devPlugin: ScreenshotPlugin = {
             ]),
           )
           .optional()
-          .describe("Named rule checks to run. Returns pass/fail per rule alongside the tree"),
-        skipTree: z.boolean().optional().describe("Omit the full accessibility tree from output (default: false). Set true when you only want assertRules results"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+          .describe("Returns pass/fail per rule"),
+        skipTree: z.boolean().optional().describe("Omit the tree, e.g. to get only assertRules results (default false)"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: { rootRole, totalNodes, maxDepth, byRole, headingCount, landmarkCount, namedNodeCount } instead of the full tree. assertRules findings still surface in full (default: false)"),
+        summaryOnly: z.boolean().optional().describe("Return role counts { rootRole, totalNodes, maxDepth, byRole, headingCount, landmarkCount, namedNodeCount } instead of the tree; assertRules results stay full (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await accessibilitySnapshotTool(withOptionalUrl(params))) as any,
@@ -160,20 +154,19 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "axe_audit",
       description:
-        "Run an axe-core accessibility audit on the page. Injects axe-core into the page context, runs the configured rule set, and returns structured violations/passes/incomplete/inapplicable results. Default rule set covers WCAG 2.0/2.1 A+AA plus best-practice. Session-aware: pass `session_id` to audit the page that's currently open (cookies + auth state intact) without re-navigating. See axe-core docs (https://github.com/dequelabs/axe-core/blob/develop/doc/rule-descriptions.md) for the rule catalog + result schema." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Run an axe-core accessibility audit; returns a summary (counts, impact) plus violations/passes/incomplete/inapplicable. Default rules: WCAG 2.0/2.1 A+AA and best-practice.",
       schema: {
-        url: z.string().optional().describe("URL to navigate to before auditing. Optional when session_id is provided (audit the session's current page); required when ephemeral"),
-        session_id: z.string().optional().describe("Reuse an open_session. Skips the per-call browser launch; when `url` is omitted the audit runs against the session's current page without re-navigating"),
-        tab_id: z.string().optional().describe("Which tab in the session to audit. Defaults to the session's active tab"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium"). axe-core is browser-agnostic'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before auditing (e.g. open a menu, dismiss a modal). Selector-based actions support optional and timeout params"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before auditing (default: true)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        include: z.array(z.string()).optional().describe("CSS selectors to limit the audit to. When omitted, audits the entire document"),
-        exclude: z.array(z.string()).optional().describe("CSS selectors to exclude from the audit (e.g. third-party widgets you don't own)"),
+        include: z.array(z.string()).optional().describe("CSS selectors to limit the audit to (default: whole document)"),
+        exclude: z.array(z.string()).optional().describe("CSS selectors to skip, e.g. third-party widgets"),
         tags: z.array(z.enum([
           "wcag2a",
           "wcag2aa",
@@ -185,11 +178,11 @@ const devPlugin: ScreenshotPlugin = {
           "ACT",
           "section508",
           "experimental",
-        ])).optional().describe('Rule tag filter. Default ["wcag2a","wcag2aa","wcag21a","wcag21aa","best-practice"]. Mutually exclusive with `rules` — when both are set, `rules` wins'),
-        rules: z.array(z.string()).optional().describe("Specific axe rule IDs to run (e.g. [\"color-contrast\",\"label\",\"button-name\"]). Overrides `tags` when set. See axe-core docs for the full rule catalog"),
-        disableRules: z.array(z.string()).optional().describe("Specific axe rule IDs to disable. Applied on top of `tags` or `rules`. Useful for suppressing known-noisy rules per call"),
-        resultTypes: z.array(z.enum(["violations", "passes", "incomplete", "inapplicable"])).optional().describe('Which result buckets to return in full. Default ["violations","incomplete"]. The summary block (counts + impact breakdown) is always returned'),
-        summaryOnly: z.boolean().optional().describe("Return only the summary block (counts + impact breakdown), no per-violation details (default: false)"),
+        ])).optional().describe('Default ["wcag2a","wcag2aa","wcag21a","wcag21aa","best-practice"]. Ignored when rules is set'),
+        rules: z.array(z.string()).optional().describe("axe rule IDs to run (e.g. [\"color-contrast\",\"label\"]); overrides tags"),
+        disableRules: z.array(z.string()).optional().describe("axe rule IDs to skip, on top of tags or rules"),
+        resultTypes: z.array(z.enum(["violations", "passes", "incomplete", "inapplicable"])).optional().describe('Buckets returned in full (default ["violations","incomplete"]); the summary always returns'),
+        summaryOnly: z.boolean().optional().describe("Only the summary, no per-rule details (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await axeAuditTool({
@@ -202,15 +195,15 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "visual_diff",
       description:
-        "Compare two PNG images pixel-by-pixel and return a diff image with mismatch percentage.",
+        "Pixel-compare two PNG files; writes a diff image and returns the mismatch %. To capture a live page against a reference use compare_screenshot or compare_element.",
       schema: {
-        imageA: z.string().describe("Path to the first image"),
-        imageB: z.string().describe("Path to the second image"),
-        outputDir: z.string().optional().describe(`Output directory for diff image (default: "${defaultOutputDir}")`),
-        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode: "precise" (threshold 0.1) for same-page screenshots, "design" (threshold 0.3) for Figma/design mockups (default: "precise")'),
-        threshold: z.number().optional().describe("Pixel diff threshold 0-1. Overrides the mode default if provided"),
-        maxDiffPercent: z.number().optional().describe("Maximum allowed diff percentage to still count as a match (default: 5)"),
-        crop: z.boolean().optional().describe("Auto-crop both images to the smaller dimensions when sizes differ (default: false)"),
+        imageA: z.string().describe("PNG path"),
+        imageB: z.string().describe("PNG path"),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        mode: z.enum(["precise", "design"]).optional().describe('"precise" (threshold 0.1) for screenshots of the same page, "design" (0.3) for design mockups (default "precise")'),
+        threshold: z.number().optional().describe("Per-pixel threshold 0-1; overrides mode"),
+        maxDiffPercent: z.number().optional().describe("Max diff % that still matches (default 5)"),
+        crop: z.boolean().optional().describe("Crop both to the smaller size when sizes differ (default false)"),
         ...useSchemaField,
       },
       handler: async (params) =>
@@ -219,9 +212,9 @@ const devPlugin: ScreenshotPlugin = {
 
     // ---------- compare_screenshot ----------
     const ignoreElementSchema = z.object({
-      selector: z.string().describe("CSS selector for elements to ignore"),
+      selector: z.string().describe("CSS selector"),
       mode: z.enum(["invisible", "position-only"]).describe(
-        '"invisible" = area completely excluded from comparison; "position-only" = replaced with solid block to verify position/size only',
+        '"invisible" excludes the area; "position-only" paints a solid block so only position/size are compared',
       ),
     });
     const ignoreRegionSchema = z.object({
@@ -229,41 +222,43 @@ const devPlugin: ScreenshotPlugin = {
       y: z.number(),
       width: z.number(),
       height: z.number(),
-      mode: z.enum(["invisible", "position-only"]).optional().describe('Mask mode (default: "invisible")'),
-      reason: z.string().optional().describe("Human-readable note for why this region is masked. Echoed back in the result so the mask trail is reviewable"),
+      mode: z.enum(["invisible", "position-only"]).optional().describe('Default "invisible"'),
+      reason: z.string().optional().describe("Note echoed back in the result"),
     });
+    const summaryOnlyCompareDesc =
+      "Return only match/diff %, a mask line, top clusters on one line, and file paths; no cluster DOM notes or preview files (default false)";
 
     ctx.registerTool({
       name: "compare_screenshot",
       description:
-        "Take a screenshot of a URL and compare it pixel-by-pixel against a reference image. The page viewport width is automatically matched to the reference image width. Supports clipping the screenshot to a vertical range with startY/endY or a horizontal range with startX/endX (the reference image must already be cropped to the matching dimensions)." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Screenshot a URL (fresh ephemeral browser) and pixel-compare it with a reference PNG. Viewport width is set to the reference width. " +
+        "Returns match, diff %, and top diff clusters. For one element use compare_element; to find element shifts use align_elements.",
       schema: {
-        url: z.string().describe(urlCaptureDesc.replace("screenshot", "screenshot and compare")),
-        referenceImage: z.string().describe("Path to the reference PNG image"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
-        actions: z.array(actionSchema).optional().describe("Actions to run before screenshot. Selector-based actions support optional and timeout params"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode: "precise" (threshold 0.1) for same-page screenshots, "design" (threshold 0.3) for Figma/design mockups (default: "precise")'),
-        threshold: z.number().optional().describe("Pixel diff threshold 0-1. Overrides the mode default if provided"),
-        maxDiffPercent: z.number().optional().describe("Maximum allowed diff percentage to still count as a match (default: 5)"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        url: z.string().describe(urlCaptureDesc),
+        referenceImage: z.string().describe("Reference PNG path"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"'),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        mode: z.enum(["precise", "design"]).optional().describe('"precise" (threshold 0.1) for screenshots of the same page, "design" (0.3) for design mockups (default "precise")'),
+        threshold: z.number().optional().describe("Per-pixel threshold 0-1; overrides mode"),
+        maxDiffPercent: z.number().optional().describe("Max diff % that still matches (default 5)"),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
-        startY: z.number().optional().describe("Y coordinate to start the screenshot clip from (pixels from top)"),
-        endY: z.number().optional().describe("Y coordinate to end the screenshot clip at (pixels from top)"),
-        startX: z.number().optional().describe("X coordinate to start the screenshot clip from (pixels from left). Reference image must already be cropped to match"),
-        endX: z.number().optional().describe("X coordinate to end the screenshot clip at (pixels from left). Reference image must already be cropped to match"),
-        ignoreImages: z.boolean().optional().describe("Replace all <img> elements with solid blocks so only their position/size is compared (default: false)"),
-        ignoreBackgrounds: z.boolean().optional().describe("Replace all elements with a CSS background-image with solid blocks (default: false)"),
-        ignoreAllImages: z.boolean().optional().describe("Shorthand for ignoreImages + ignoreBackgrounds (default: false)"),
-        ignoreText: z.boolean().optional().describe("Mask every rendered text line (per-line client-rect) in position-only mode"),
-        ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before comparison. Masks are applied to both the live screenshot and reference image at the same coordinates"),
-        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask on both the live screenshot and reference image"),
-        summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
-        clustersTopN: z.number().optional().describe("How many top diff clusters to surface in the response (default: 5)"),
-        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true and clustersTopN:3. Caller-supplied flags always win over profile defaults'),
+        delay: z.number().optional().describe("Extra ms before capture (default 0)"),
+        startY: z.number().optional().describe("Clip top, px. The reference must already be cropped to the same clip"),
+        endY: z.number().optional().describe("Clip bottom, px"),
+        startX: z.number().optional().describe("Clip left, px"),
+        endX: z.number().optional().describe("Clip right, px"),
+        ignoreImages: z.boolean().optional().describe("Paint <img> as solid blocks, comparing only position/size (default false)"),
+        ignoreBackgrounds: z.boolean().optional().describe("Same for CSS background-image elements (default false)"),
+        ignoreAllImages: z.boolean().optional().describe("ignoreImages + ignoreBackgrounds"),
+        ignoreText: z.boolean().optional().describe("Mask each text line in position-only mode"),
+        ignoreElements: z.array(ignoreElementSchema).optional().describe("Masked at the same coordinates on both images"),
+        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pixel regions masked on both images"),
+        summaryOnly: z.boolean().optional().describe(summaryOnlyCompareDesc),
+        clustersTopN: z.number().optional().describe("Default 5"),
+        profile: z.enum(["walker"]).optional().describe('"walker" sets summaryOnly:true, clustersTopN:3; explicit flags win'),
         ...useSchemaField,
       },
       handler: async (params) => (await compareScreenshotTool(withUrlAndOut(params))) as any,
@@ -273,32 +268,31 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "compare_element",
       description:
-        "All-in-one element visual regression: takes a page screenshot, locates an element by CSS selector, crops it (with padding) from both the live page and the reference image at the same coordinates, and compares them pixel-by-pixel." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Pixel-compare one element: screenshots the page, crops the element (plus padding) from both the live page and the reference PNG at the same coordinates, and diffs them.",
       schema: {
         url: z.string().describe(urlCaptureDesc),
-        referenceImage: z.string().describe("Path to the reference PNG image"),
-        selector: z.string().describe("CSS selector of the element to compare"),
-        padding: z.number().optional().describe("Padding in pixels around the element bounding box (default: 50)"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: matched to reference image dimensions)"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before screenshot. Selector-based actions support optional and timeout params"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode (default: "precise")'),
-        threshold: z.number().optional().describe("Pixel diff threshold 0-1"),
-        maxDiffPercent: z.number().optional().describe("Maximum allowed diff percentage (default: 5)"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        referenceImage: z.string().describe("Reference PNG path"),
+        selector: z.string().describe("CSS selector"),
+        padding: z.number().optional().describe("px around the element box (default 50)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default: the reference image size"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        mode: z.enum(["precise", "design"]).optional().describe('Default "precise"'),
+        threshold: z.number().optional().describe("Per-pixel threshold 0-1"),
+        maxDiffPercent: z.number().optional().describe("Default 5"),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
-        ignoreImages: z.boolean().optional().describe("Replace <img> elements with solid blocks (default: false)"),
-        ignoreBackgrounds: z.boolean().optional().describe("Replace bg-image elements with solid blocks (default: false)"),
-        ignoreAllImages: z.boolean().optional().describe("Shorthand for ignoreImages + ignoreBackgrounds"),
-        ignoreText: z.boolean().optional().describe("Mask every rendered text line in position-only mode"),
-        ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before comparison"),
-        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask"),
-        boundsHandling: z.enum(["strict", "intersect"]).optional().describe('"strict" (default) errors when the element crop extends past the reference bounds; "intersect" clamps the crop to the reference\'s dimensions'),
-        alignTo: z.enum(["top", "center"]).optional().describe('Alignment shortcut: "top" or "center". Mutually exclusive with alignOn'),
+        delay: z.number().optional().describe("Extra ms before capture (default 0)"),
+        ignoreImages: z.boolean().optional().describe("Paint <img> as solid blocks (default false)"),
+        ignoreBackgrounds: z.boolean().optional().describe("Paint background-image elements as solid blocks (default false)"),
+        ignoreAllImages: z.boolean().optional().describe("ignoreImages + ignoreBackgrounds"),
+        ignoreText: z.boolean().optional().describe("Mask each text line in position-only mode"),
+        ignoreElements: z.array(ignoreElementSchema).optional(),
+        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pixel regions to mask"),
+        boundsHandling: z.enum(["strict", "intersect"]).optional().describe('"strict" (default) errors if the crop extends past the reference; "intersect" clamps it to the reference'),
+        alignTo: z.enum(["top", "center"]).optional().describe("Exclusive with alignOn"),
         alignOn: z
           .object({
             referenceRect: z.object({
@@ -311,10 +305,10 @@ const devPlugin: ScreenshotPlugin = {
             mode: z.enum(["top-left", "center"]).optional(),
           })
           .optional()
-          .describe("Opt-in: shift the reference crop so the named anchor pairs in live + reference overlap before diffing"),
-        summaryOnly: z.boolean().optional().describe("Compact response: match/diff%/mode line, mask one-liner, top-N clusters as one line, canonical file paths only. Drops cluster DOM annotations, preview file generation, and verbose box/coord blocks. Re-run without to drill into a specific cluster (default: false)"),
-        clustersTopN: z.number().optional().describe("How many top diff clusters to surface in the response (default: 5)"),
-        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true and clustersTopN:3. Caller-supplied flags always win over profile defaults'),
+          .describe("Shift the reference crop so this anchor (reference rect, live selector) lines up before diffing"),
+        summaryOnly: z.boolean().optional().describe(summaryOnlyCompareDesc),
+        clustersTopN: z.number().optional().describe("Default 5"),
+        profile: z.enum(["walker"]).optional().describe('"walker" sets summaryOnly:true, clustersTopN:3; explicit flags win'),
         ...useSchemaField,
       },
       handler: async (params) => (await compareElementTool(withUrlAndOut(params))) as any,
@@ -324,37 +318,38 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "align_elements",
       description:
-        "Visual alignment probe. For each candidate element, finds the integer (dx, dy) that, applied as `transform: translate(dx, dy)`, makes the element's pixels best match the reference image. Search is grounded in pixel SAD over the live screenshot vs the reference — DOM-reported coordinates only seed the search center, not the answer. By default discovers candidates from diff clusters inside `scope`; pass explicit `selectors` to override. Groups elements with similar deltas and commits the rigid shift at their lowest common ancestor (`rigid-with-parent` classification). Returns per-element delta, baseline-vs-aligned diff scores, and a classification (translation / rigid-with-parent / content-change / size-mismatch / ambiguous / no-clusters)." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "For each element, find the integer translate(dx, dy) that makes its pixels best match the reference PNG (pixel search, not DOM coordinates). " +
+        "Candidates come from diff clusters in scope unless selectors is given. Elements sharing a shift are reported at their common ancestor. " +
+        "Returns per-element delta, baseline vs aligned diff scores, and a class: translation, rigid-with-parent, content-change, size-mismatch, ambiguous, or no-clusters.",
       schema: {
         url: z.string().describe(urlCaptureDesc),
-        referenceImage: z.string().describe("Path to the reference PNG image"),
-        scope: z.string().optional().describe('Root selector to search within when discovering candidates from diff clusters (default: "body"). Ignored when `selectors` is provided'),
-        selectors: z.array(z.string()).optional().describe("Explicit list of element selectors to align. When omitted, candidates are discovered automatically from the diff clusters inside `scope`"),
-        refineRadius: z.number().optional().describe("Floor for the per-element search radius in pixels. Cluster geometry can raise this; this is the minimum (default: 3)"),
-        maxRadius: z.number().optional().describe("Ceiling for the per-element search radius in pixels (default: 60). The tool auto-grows once if the first pass hits the radius edge"),
-        uniformityTolerance: z.number().optional().describe("Manhattan-distance threshold (px) at which two element deltas are considered the same shift, triggering a parent commit (default: 2)"),
-        minImprovement: z.number().optional().describe("Minimum SAD improvement (0..1) required to classify an element as 'translation'. Below this it's labelled 'content-change' (default: 0.005)"),
-        applyTransform: z.boolean().optional().describe("After finding deltas, apply CSS transforms on the live page and capture an aligned screenshot for visual confirmation (default: true)"),
-        topClusters: z.number().optional().describe("How many top diff clusters to consider when discovering candidates (default: 12)"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: matched to reference image dimensions)"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before aligning. Selector-based actions support optional and timeout params"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode: "precise" or "design" (default: "design"). Sets the pixelmatch threshold used for the baseline/aligned diffs only — template matching is metric-fixed (SAD)'),
-        threshold: z.number().optional().describe("Pixel diff threshold 0-1. Overrides the mode default if provided"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before screenshot (default: true)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        referenceImage: z.string().describe("Reference PNG path"),
+        scope: z.string().optional().describe('Root selector for candidate discovery (default "body")'),
+        selectors: z.array(z.string()).optional().describe("Elements to align; skips discovery"),
+        refineRadius: z.number().optional().describe("Min search radius, px (default 3)"),
+        maxRadius: z.number().optional().describe("Max search radius, px (default 60; grows once if hit)"),
+        uniformityTolerance: z.number().optional().describe("Max px distance between deltas counted as one shared shift (default 2)"),
+        minImprovement: z.number().optional().describe("Min score gain 0-1 to classify as translation, else content-change (default 0.005)"),
+        applyTransform: z.boolean().optional().describe("Apply the found transforms live and capture an aligned screenshot (default true)"),
+        topClusters: z.number().optional().describe("Diff clusters considered for discovery (default 12)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default: the reference image size"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        mode: z.enum(["precise", "design"]).optional().describe('Default "design". Affects only the baseline/aligned diff scores, not the search'),
+        threshold: z.number().optional().describe("Per-pixel threshold 0-1; overrides mode"),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        delay: z.number().optional().describe("Extra delay in ms before capture (default: 0)"),
-        ignoreImages: z.boolean().optional().describe("Replace <img> elements with solid blocks (default: false)"),
-        ignoreBackgrounds: z.boolean().optional().describe("Replace bg-image elements with solid blocks (default: false)"),
-        ignoreAllImages: z.boolean().optional().describe("Shorthand for ignoreImages + ignoreBackgrounds"),
-        ignoreText: z.boolean().optional().describe("Mask every rendered text line in position-only mode"),
-        ignoreElements: z.array(ignoreElementSchema).optional().describe("Elements to mask before scoring"),
-        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pre-computed pixel-space regions to mask"),
-        summaryOnly: z.boolean().optional().describe("Compact response: drops the full per-element table; surfaces the summary block plus the most significant rows. Re-run without to see every candidate (default: false)"),
-        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets summaryOnly:true. Caller-supplied flags always win over profile defaults'),
+        delay: z.number().optional().describe("Extra ms before capture (default 0)"),
+        ignoreImages: z.boolean().optional().describe("Paint <img> as solid blocks (default false)"),
+        ignoreBackgrounds: z.boolean().optional().describe("Paint background-image elements as solid blocks (default false)"),
+        ignoreAllImages: z.boolean().optional().describe("ignoreImages + ignoreBackgrounds"),
+        ignoreText: z.boolean().optional().describe("Mask each text line in position-only mode"),
+        ignoreElements: z.array(ignoreElementSchema).optional(),
+        ignoreRegions: z.array(ignoreRegionSchema).optional().describe("Pixel regions to mask"),
+        summaryOnly: z.boolean().optional().describe("Summary plus the most significant rows instead of every element (default false)"),
+        profile: z.enum(["walker"]).optional().describe('"walker" sets summaryOnly:true; explicit flags win'),
         ...useSchemaField,
       },
       handler: async (params) => (await alignElementsTool(withUrlAndOut(params))) as any,
@@ -364,17 +359,16 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "network_log",
       description:
-        "Capture network requests made by a page. Returns URL, method, status, content type, and duration. Session-aware: pass `session_id` to capture from the session's current page (cookies + auth state intact). Capture window starts when the listeners attach — requests fired before this call are NOT seen. To capture a fresh load, also pass `url`." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Capture network requests (URL, method, status, content type, duration). Only requests after this call starts are seen; pass url to capture a fresh load.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        actions: z.array(actionSchema).optional().describe("Actions to run. Selector-based actions support optional and timeout params"),
-        filterUrl: z.string().optional().describe("Regex to filter request URLs"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc + " Runs while capturing."),
+        filterUrl: z.string().optional().describe("Regex on request URLs"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: { totalRequests, errorCount, byStatus, byContentType, avgDurationMs, slowestN (top 5), errorsTopN (top 5 4xx/5xx) } instead of the full entries array. Note: structural switch — at very low request counts (~5 or fewer) the aggregate may exceed the raw output; the win materializes at higher volumes (default: false)"),
+        summaryOnly: z.boolean().optional().describe("Return { totalRequests, errorCount, byStatus, byContentType, avgDurationMs, slowestN, errorsTopN } (top 5 each) instead of all entries; larger than full output below ~5 requests (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await networkLogTool(withOptionalUrl(params))) as any,
@@ -384,14 +378,13 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "page_metadata",
       description:
-        "Extract page metadata: title, description, Open Graph tags, meta tags, favicon, language, and charset. Session-aware: pass `session_id` to read from the session's current page without re-navigating." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Page metadata: title, description, Open Graph and other meta tags, favicon, language, charset.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        actions: z.array(actionSchema).optional().describe("Actions to run before extraction. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
         ...useSchemaField,
       },
@@ -402,17 +395,16 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "performance_metrics",
       description:
-        "Measure page performance: load time, DOM content loaded, FCP, LCP, CLS, TBT, TTFB. Session-aware: pass `session_id` to read metrics from the session's current page. When `url` is omitted, returns metrics from the original navigation (may be stale) — re-navigate via navigate({session_id,url}) first for fresh metrics." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Page performance: load, DOMContentLoaded, FCP, LCP, CLS, TBT, TTFB. With session_id and no url, metrics are from the page's original navigation and may be stale; pass url for fresh ones.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser to use (default: "chromium"). Some metrics are Chromium-only.'),
-        actions: z.array(actionSchema).optional().describe("Actions to run before measuring. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"; some metrics are Chromium-only'),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: pipe-separated 'LCP=Xms | FCP=Yms | TTFB=Zms | DCL=… | Load=… | CLS=… | TBT=… | transfer=…' line instead of the JSON object (default: false)"),
+        summaryOnly: z.boolean().optional().describe("One 'LCP=Xms | FCP=… | TTFB=… | DCL=… | Load=… | CLS=… | TBT=… | transfer=…' line instead of JSON (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await performanceMetricsTool(withOptionalUrl(params))) as any,
@@ -422,20 +414,19 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "computed_styles",
       description:
-        "Get the computed/effective CSS styles of a DOM element. Returns all styles or only non-default ones. Optionally traces each property to its source CSS file and line number (Chromium only). Session-aware: pass `session_id` to inspect the session's current page without re-navigating." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Read an element's computed CSS (all or non-default), optionally with the source file and line of each rule (Chromium). To assert expected values use style_check.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        selector: z.string().describe("CSS selector of the element to inspect"),
-        filter: z.enum(["all", "non-default"]).optional().describe('Which properties to return (default: "non-default")'),
-        properties: z.array(z.string()).optional().describe("Limit output to specific CSS properties. When set, `filter` is ignored"),
-        includeSource: z.boolean().optional().describe("Include source CSS file + line number. Chromium CDP only (default: false)"),
-        includeInherited: z.boolean().optional().describe("When includeSource is true, also return the chain of inherited styles from ancestor elements (default: false)"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before inspecting styles. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        selector: z.string().describe("CSS selector"),
+        filter: z.enum(["all", "non-default"]).optional().describe('Default "non-default"'),
+        properties: z.array(z.string()).optional().describe("Only these properties; overrides filter"),
+        includeSource: z.boolean().optional().describe("Source file + line per property, Chromium only (default false)"),
+        includeInherited: z.boolean().optional().describe("With includeSource, also inherited styles from ancestors (default false)"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
         ...useSchemaField,
       },
@@ -446,24 +437,19 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "evaluate_script",
       description:
-        "Run a JavaScript snippet in the page context and return its JSON-serialized result. `return` works at the top level (the script is wrapped in an IIFE). Reuses an open session via `session_id` (no navigation when `url` is omitted); falls back to ephemeral when omitted. " +
-        "**REACH FOR THIS LAST.** Most intents have a dedicated tool that is safer and shorter: " +
-        "for clicks use `click({selector})` — JS `el.click()` does NOT dispatch trusted events, so React/Vue/Angular synthetic-event handlers may silently ignore it (see § Diagnosis › synthetic-click-no-event-trigger). " +
-        "For typing use `type_text({selector, text})` — setting `input.value` directly bypasses framework change detection. " +
-        "For element discovery use `dom_query` (typed schema for filtered queries) or `accessibility_snapshot` (the page's clickables-by-role+name tree, summaryOnly available). " +
-        "For waits use `wait_for_selector` (event-driven) over sleep loops. " +
-        "Use `evaluate_script` for things the dedicated tools genuinely can't express: custom `fetch()` from the page origin, calling page-defined JS APIs (e.g. `wp.data`), reading non-DOM page state (perf entries, JS globals), monkey-patching for diagnostics." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Run JS in the page and return the JSON-serialized result. Use last, only for what other tools can't do: fetch() from the page origin, page JS APIs (e.g. wp.data), JS globals, perf entries. " +
+        "Use click, not el.click() (untrusted events that React/Vue handlers may ignore); type_text, not setting input.value (skips framework change detection); " +
+        "dom_query, accessibility_snapshot, or list_interactive_elements to find elements; wait_for_selector, not sleep loops.",
       schema: {
-        url: z.string().optional().describe("URL to navigate to before evaluating. Optional when session_id is provided (evaluate on the session's current page); required when ephemeral"),
-        session_id: z.string().optional().describe("Reuse an open_session. Skips the per-call browser launch; when `url` is omitted the script runs on the session's current page without re-navigating"),
-        tab_id: z.string().optional().describe("Which tab in the session to evaluate in. Defaults to the session's active tab"),
-        script: z.string().describe("JS to evaluate. Use `return` to yield a value; result is JSON-stringified in the response"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before evaluating. Selector-based actions support optional and timeout params"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle before evaluating (default: true)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        script: z.string().describe("Wrapped in an IIFE; use `return` to yield a value"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
         ...useSchemaField,
       },
@@ -478,35 +464,34 @@ const devPlugin: ScreenshotPlugin = {
       "rect", "tag", "id", "classes", "text", "html", "role", "visible", "attributes", "computed",
     ]);
     const domQuerySchema = z.object({
-      id: z.string().optional().describe("Caller-defined correlation id. Defaults to the array index. Echoed back in the matching result"),
-      selector: z.string().describe("CSS selector for the element(s) to read"),
+      id: z.string().optional().describe("Echoed in the result (default: array index)"),
+      selector: z.string().describe("CSS selector"),
       pseudoElement: z.enum(["before", "after"]).optional().describe(
-        "Read styles from the ::before or ::after pseudo-element. When set, `rect`/`html`/`visible`/`attributes` fields are skipped (pseudo-elements have no DOMRect or attributes); `text` reads the computed `content` property",
+        "Read the ::before/::after pseudo-element: rect, html, visible, attributes are skipped; text reads its `content`",
       ),
-      match: z.enum(["first", "all"]).optional().describe('"first" returns the first match in `element` (default); "all" returns every match in `elements` (capped at 50, sets `truncated:true` on overflow)'),
-      fields: z.array(domFieldEnum).optional().describe('Which fields to populate per matched element. Default ["rect","tag"]. Available: rect, tag, id, classes, text (innerText, trimmed, capped 2 KB), html (outerHTML, capped 4 KB), role (computed ARIA role), visible (CSS-visibility boolean), attributes, computed'),
-      computed: z.array(z.string()).optional().describe('CSS property names to read into `computed`. Mixes literal property names with preset bucket names: "box" (width/height/padding-*/margin-*/border-*-width/box-sizing), "text" (font-*/line-height/letter-spacing/text-transform/color/text-align), "flex" (display/flex-*/justify-content/align-items/gap/row-gap/column-gap)'),
-      attributes: z.array(z.string()).optional().describe("Attribute names to read into `attributes`. Missing attributes report `null` (distinct from empty string)"),
-      requireVisible: z.boolean().optional().describe('When true (default), hidden elements (display:none, visibility:hidden, opacity:0) report `found:false`. Set false to also surface hidden elements (e.g. for a11y walks)'),
+      match: z.enum(["first", "all"]).optional().describe('"first" (default) fills `element`; "all" fills `elements` (max 50, then truncated:true)'),
+      fields: z.array(domFieldEnum).optional().describe('Default ["rect","tag"]. text = trimmed innerText (2 KB cap), html = outerHTML (4 KB cap), role = computed ARIA role'),
+      computed: z.array(z.string()).optional().describe('CSS properties, or presets "box" (size, padding, margin, border widths), "text" (font-*, line-height, letter-spacing, color, ...), "flex" (display, flex-*, alignment, gaps)'),
+      attributes: z.array(z.string()).optional().describe("Missing ones report null"),
+      requireVisible: z.boolean().optional().describe("Default true: hidden elements (display:none, visibility:hidden, opacity:0) report found:false"),
     });
     ctx.registerTool({
       name: "dom_query",
       description:
-        "Batched DOM read: collapse N selector reads into one round-trip + one page.evaluate. Per-query try/catch so a bad selector reports `error` without sinking siblings; selector-syntax errors are distinct from no-match (no-match: `found:false`; bad selector: `found:false, error:\"SyntaxError…\"`). Reuses an open session via `session_id` (eliminates per-query browser launch); falls back to ephemeral when omitted." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Read many elements in one call (rect, text, attributes, computed styles, ...), one query per selector. No match returns found:false; a bad selector adds error:\"SyntaxError…\" without failing the other queries.",
       schema: {
-        url: z.string().optional().describe("URL to navigate to before querying. Optional when session_id is provided (use the session's current page); required when ephemeral"),
-        session_id: z.string().optional().describe("Reuse an open_session. Avoids the per-call browser launch — one launch + one navigate, then many dom_query calls"),
-        tab_id: z.string().optional().describe("Which tab in the session to query. Defaults to the session's active tab"),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720})"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        url: z.string().optional().describe(urlOptionalDesc),
+        session_id: z.string().optional().describe(sessionIdDesc),
+        tab_id: z.string().optional().describe(tabIdDesc),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        actions: z.array(actionSchema).optional().describe("Actions to run before querying. Selector-based actions support optional and timeout params"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle when navigating (default: true)"),
-        delay: z.number().optional().describe("Extra delay in ms before querying (default: 0)"),
-        queries: z.array(domQuerySchema).describe("Array of per-element queries. Empty array errors out"),
-        profile: z.enum(["walker"]).optional().describe('Named bundle of defaults. "walker" sets per-query fields to ["rect","tag","id","classes","text"] when the caller does not supply fields explicitly. Per-query `fields` always wins over profile defaults'),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        delay: z.number().optional().describe("Extra ms before querying (default 0)"),
+        queries: z.array(domQuerySchema).describe("Must not be empty"),
+        profile: z.enum(["walker"]).optional().describe('"walker" defaults fields to ["rect","tag","id","classes","text"]; per-query fields win'),
         ...useSchemaField,
       },
       handler: async (params) => (await domQueryTool({
@@ -519,29 +504,24 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "hit_test",
       description:
-        "Geometric reachability probe: if a user tapped/clicked at a point, what element actually receives it? " +
-        "Computes a viewport point (an element's center via `selector`, or explicit `x`/`y`) and reads " +
-        "document.elementFromPoint + elementsFromPoint (the full z-ordered stack) there. " +
-        "Primary use: the iOS-Safari file-picker class of bug — a transparent <input type=file> sitting BELOW its trigger button (lower z-index) or mispositioned, so a genuine tap never lands on it and the picker never opens. " +
-        "Pass `selector` (the upload control) + `expect_selector` (e.g. `input[type=file]`): the result's `verdict.tapWouldHitFileInput` tells you whether a real tap there would reach the input. " +
-        "This is the ONE part of that bug verifiable on a REAL iOS device — it's pure DOM hit-testing, needs no file chooser, so it works where click_to_upload cannot. " +
-        "Also general-purpose: detect overlays covering a control (`verdict.coveredBy`), confirm a button is actually clickable, etc. Session-aware: pass `session_id` to test the session's current page (e.g. a persistent real-iOS BrowserStack session) without re-navigating." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Which element would receive a real tap/click at a point (an element's center, or x/y)? Returns the z-ordered element stack there and a verdict: " +
+        "reachesTarget, coveredBy (an overlay on top), tapWouldHitFileInput (plus expect.reachesExpected with expect_selector). Checks whether a control is really clickable, e.g. a file input hidden under its button. " +
+        "Works on real iOS devices, where click_to_upload can't.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser for ephemeral calls (default: "chromium")'),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
-        selector: z.string().optional().describe("Element whose CENTER is tested — and the intended hit target when expect_selector is omitted. Provide this or both x/y."),
-        x: z.number().optional().describe("Explicit viewport X coordinate (alternative to selector's center). Requires y."),
-        y: z.number().optional().describe("Explicit viewport Y coordinate (alternative to selector's center). Requires x."),
-        expect_selector: z.string().optional().describe("Selector the tap is expected to resolve to (e.g. `input[type=file]`). Defaults to `selector`. Drives verdict.tapWouldHitFileInput / reachesExpected."),
-        stack_depth: z.number().optional().describe("Max elements to report from the z-ordered hit stack (default: 8)"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before probing (e.g. open the upload widget). Selector-based actions support optional and timeout params"),
-        waitForNetworkIdle: z.boolean().optional().describe("Wait for network idle when navigating (default: true)"),
-        delay: z.number().optional().describe("Extra delay in ms before probing (default: 0)"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack for ephemeral calls (default: false)"),
+        browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        selector: z.string().optional().describe("Element whose center is tested (and the expected target by default). Give this or x and y."),
+        x: z.number().optional().describe("Viewport X; needs y"),
+        y: z.number().optional().describe("Viewport Y; needs x"),
+        expect_selector: z.string().optional().describe("Element the tap should reach, e.g. `input[type=file]` (default: selector)"),
+        stack_depth: z.number().optional().describe("Default 8"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        waitForNetworkIdle: z.boolean().optional().describe("Default true"),
+        delay: z.number().optional().describe("Extra ms before probing (default 0)"),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
         ...useSchemaField,
       },
@@ -555,31 +535,22 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "style_check",
       description:
-        "Assert that an element's computed CSS properties match expected values. Pass a selector and a map of " +
-        "property names to their expected computed values. Returns pass/fail with the actual value for each mismatch. " +
-        "Use for verifying CSS implementation against design specs or a style guide: extract the expected values " +
-        "(font-size, font-weight, line-height, padding, border-radius, color, etc.) and check them in one call. " +
-        "Expected values must be in computed-style format (e.g. `rgb(0, 0, 0)` not `#000`, `16px` not `1rem`). " +
-        "Tip: use computed_styles({selector, properties:[...]}) first to discover the format the browser reports, " +
-        "then use those as your expected values. Session-aware: pass `session_id` to check the session's current page." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "Assert one element's computed CSS against expected values; returns pass/fail with the actual value of each mismatch. " +
+        "Values must be in computed form (`rgb(0, 0, 0)` not `#000`, `16px` not `1rem`); computed_styles shows the format.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        selector: z.string().describe("CSS selector of the element to check"),
+        selector: z.string().describe("CSS selector"),
         expected: z.record(z.string(), z.string()).describe(
-          "Map of CSS property names to their expected computed values. " +
-          'Example: {"font-size":"24px","font-weight":"400","border-radius":"4px 4px 4px 64px"}',
+          'e.g. {"font-size":"24px","font-weight":"400"}',
         ),
         tolerance_px: z.number().optional().describe(
-          "Tolerance for numeric CSS values in pixels (default: 0). When set, e.g. to 1, " +
-          '"24px" matches "25px" but not "26px". Units must still match (px≠rem). ' +
-          "Non-numeric values (colors, keywords) are always compared exactly.",
+          "px tolerance for numeric values (default 0); units must still match. Colors and keywords compare exactly.",
         ),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
-        actions: z.array(actionSchema).optional().describe("Actions to run before checking. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
         ...useSchemaField,
       },
@@ -593,13 +564,12 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "trace_start",
       description:
-        "Start Playwright tracing on a session's browser context. Records actions, DOM snapshots, network, and console output. " +
-        "Stop with trace_stop to get a trace.zip you can inspect with `npx playwright show-trace`. Per-session, one trace at a time.",
+        "Start Playwright tracing (actions, DOM snapshots, network, console) on a session; one trace per session. Save it with trace_stop.",
       schema: {
-        session_id: z.string().describe("Session id (from open_session) to trace"),
-        screenshots: z.boolean().optional().describe("Capture screenshots at each action (default: true)"),
-        snapshots: z.boolean().optional().describe("Capture DOM snapshots at each action (default: true)"),
-        sources: z.boolean().optional().describe("Include source JS in the trace (default: false)"),
+        session_id: z.string(),
+        screenshots: z.boolean().optional().describe("Default true"),
+        snapshots: z.boolean().optional().describe("DOM snapshots (default true)"),
+        sources: z.boolean().optional().describe("Include source JS (default false)"),
       },
       handler: async (p) => {
         sessionManager.touch(p.session_id);
@@ -620,11 +590,11 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "trace_stop",
       description:
-        "Stop Playwright tracing on a session and save the trace.zip. Returns the file path. Open with `npx playwright show-trace <file>`.",
+        "Stop tracing and save trace.zip; returns its path (open with `npx playwright show-trace <file>`).",
       schema: {
-        session_id: z.string().describe("Session id"),
-        output_path: z.string().optional().describe("Relative or absolute path. Defaults to <output_dir>/trace-<timestamp>.zip"),
-        output_dir: z.string().optional().describe(`Base directory when output_path is relative (default: "${defaultOutputDir}")`),
+        session_id: z.string(),
+        output_path: z.string().optional().describe("Default <output_dir>/trace-<timestamp>.zip"),
+        output_dir: z.string().optional().describe(`Base for a relative output_path (default "${defaultOutputDir}")`),
       },
       handler: async (p) => {
         sessionManager.touch(p.session_id);
@@ -647,28 +617,20 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "list_interactive_elements",
       description:
-        "Discover everything clickable / typable on the page in one call. Returns each interactive element " +
-        "(link, button, input, select, textarea, contenteditable, role=button|link|tab|option|combobox|checkbox|radio|menuitem|...) " +
-        "with its `tag`, `type`, `role`, accessible `name`, visible `text`, current `value` (for form fields), " +
-        "`rect`, `visible`, and a `selector_hint` you can paste directly into `click({ selector: ... })` or " +
-        "`type_text({ selector: ... })`. The selector_hint prefers `role=ROLE[name=\"NAME\"]` (most robust), " +
-        "falls back to `text=\"...\"` for short visible text, then to id/name attribute selectors, last " +
-        "to nth-of-type. **Use this before reaching for `evaluate_script`** to find clickables — it's typed, " +
-        "session-aware, and the selector_hint values are click-ready. " +
-        "Scope the scan with `scope` (default `body`). Hidden elements are filtered by default — pass " +
-        "`include_hidden: true` to surface them. Caps at 100 elements by default; pass `cap` to raise." +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        "List every clickable or typable element (links, buttons, form fields, contenteditable, interactive ARIA roles) with tag, type, role, " +
+        "accessible name, text, value, rect, visible, and a selector_hint ready for click or type_text " +
+        "(role=ROLE[name=\"NAME\"] when possible). Use before evaluate_script to find clickables.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        scope: z.string().optional().describe("CSS selector to scope the scan (default: \"body\")"),
-        cap: z.number().optional().describe("Max elements to return. Default 100. truncated:true in the response signals more were available."),
-        include_hidden: z.boolean().optional().describe("Include non-visible elements (hidden, off-screen). Default false."),
-        actions: z.array(actionSchema).optional().describe("Actions to run before listing. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        scope: z.string().optional().describe('CSS selector (default "body")'),
+        cap: z.number().optional().describe("Max elements (default 100); truncated:true if more exist"),
+        include_hidden: z.boolean().optional().describe("Include hidden and off-screen elements (default false)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (default: {width:1280, height:720}); ignored when session_id is provided"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
         ...useSchemaField,
       },
       handler: async (params) => (await listInteractiveElementsTool(withOptionalUrl(params))) as any,
@@ -678,16 +640,15 @@ const devPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "schema_extract",
       description:
-        'Parse and validate all <script type="application/ld+json"> structured-data blocks on the page. Returns the parsed JSON, detected schema.org @type values, and heuristic issue flags (json-parse-failed, whitespace-run, escape-chars-in-string, faq-question-in-answer, faq-empty-answer). Session-aware: pass `session_id` to extract from the session\'s current page without re-navigating.' +
-        (config.baseUrl ? ` Accepts relative URLs (base: ${config.baseUrl}).` : ""),
+        'Parse and check every JSON-LD (<script type="application/ld+json">) block: parsed JSON, schema.org @types, and issue flags (json-parse-failed, whitespace-run, escape-chars-in-string, faq-question-in-answer, faq-empty-answer).',
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        actions: z.array(actionSchema).optional().describe("Actions to run before extracting. Selector-based actions support optional and timeout params"),
-        useBrowserStack: z.boolean().optional().describe("Use BrowserStack (default: false)"),
+        actions: z.array(actionSchema).optional().describe(actionsDesc),
+        useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,
-        summaryOnly: z.boolean().optional().describe("Compact response: drops `parsed` (full JSON-LD body) and `rawPreview` from each block; keeps summary, types, issues, parse errors. Re-run without to inspect parsed bodies (default: false)"),
+        summaryOnly: z.boolean().optional().describe("Drop parsed bodies and rawPreview; keep summary, types, issues, errors (default false)"),
         ...useSchemaField,
       },
       handler: async (params) => (await schemaExtractTool(withOptionalUrl(params))) as any,

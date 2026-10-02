@@ -69,41 +69,31 @@ const targetField = {
   session_id: z
     .string()
     .optional()
-    .describe(
-      "Attach to an existing persistent session from open_session. Without it the tool opens an ephemeral context for this call only.",
-    ),
-  tab_id: z.string().optional().describe("Which tab in the session to target. Defaults to the session's active tab."),
+    .describe("open_session id. Omit for a one-shot ephemeral browser."),
+  tab_id: z.string().optional().describe("Session tab (default: active)"),
   browser: z
     .enum(["chromium", "firefox", "webkit"])
     .optional()
-    .describe('Browser to use for ephemeral calls (ignored when session_id is set). Default: "chromium"'),
-  viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport for ephemeral calls (ignored when session_id is set)"),
-  useBrowserStack: z.boolean().optional().describe("Use BrowserStack for ephemeral calls (default: false)"),
+    .describe('Ephemeral only (default "chromium")'),
+  viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
+  useBrowserStack: z.boolean().optional().describe("Ephemeral only (default false)"),
   ...browserStackFields,
 };
 
 const selectorField = {
   selector: z.string().describe(
-    "Selector for the target element. Accepts: " +
-    "CSS (e.g. `#id`, `.btn.primary`, `nav > a:first-child`); " +
-    "Playwright role+name (e.g. `role=button[name=\"Submit\"]`, `role=link[name=\"Sign in\"]`); " +
-    "Playwright text (e.g. `text=\"Save\"` exact, `text=Save` substring); " +
-    "CSS:has-text (e.g. `button:has-text(\"Save\")`). " +
-    "Role-by-name is the most robust default — survives CSS-module hash mangling, ad-hoc class renames, and re-layouts. " +
-    "Use `text=` only within a single locale (breaks on i18n). " +
-    "Do NOT invent CSS like `.MuiButton-root.css-1g2hf83` — build-hashed class names break on every release. " +
-    "Cross-frame piercing: join an iframe selector and the inner selector with whitespace-padded ` >>> ` " +
-    "(works for same-origin frames AND cross-origin OOPIFs). " +
-    "Example: `iframe[src*=\"octadesk\"] >>> #sendButton`. Nest multiple times for nested frames: `iframe.outer >>> iframe.inner >>> #btn`.",
+    "CSS (`#id`, `nav > a`), Playwright role (`role=button[name=\"Submit\"]`, preferred: survives class and layout changes), " +
+    "text (`text=\"Save\"` exact, `text=Save` substring; breaks across locales), or `button:has-text(\"Save\")`. " +
+    "Avoid build-hashed classes like `.css-1g2hf83`. " +
+    "Pierce iframes, cross-origin too, with ` >>> `: `iframe[src*=\"chat\"] >>> #send` (nestable).",
   ),
 };
 const timeoutField = {
-  timeout: z.number().optional().describe("Action timeout in ms (default: 30000)"),
+  timeout: z.number().optional().describe("ms (default 30000)"),
 };
 const downloadDirField = z.string().optional();
 const DOWNLOAD_DIR_FORMS =
-  "Accepts an absolute or relative Linux/WSL path or ~/..., and on WSL also a Windows path " +
-  "(C:\\... or \\\\wsl.localhost\\<distro>\\...). Created if missing.";
+  "Linux path (absolute, relative, or ~/...); on WSL also C:\\... or \\\\wsl.localhost\\<distro>\\.... Created if missing.";
 
 // ---------------------------------------------------------------------------
 // Session lifecycle tools
@@ -112,35 +102,28 @@ const DOWNLOAD_DIR_FORMS =
 export const sessionPrimitives: Record<string, PrimitiveDef> = {
   open_session: {
     description:
-      "Open a persistent browser session the agent can reuse across multiple tool calls. " +
-      "Returns a session_id that other primitives accept. Sessions self-close on idle (default 5 min), " +
-      "on hard wall-clock cap (30 min; 2 min if record_video is enabled), or when the MCP server exits. " +
-      "Enable record_video to capture a webm of the session — Playwright records the whole context, so " +
-      "the session lifetime is clamped short to prevent runaway recordings.",
+      "Open a persistent browser session; returns a session_id that other tools accept. " +
+      "Closes after idle_ttl_ms without a tool call, at wall_ttl_ms, or when the server exits. " +
+      "Default launches Playwright; attach_cdp drives a Chromium-channel browser (edge/chrome) instead, " +
+      "with user_data_dir for a real profile; useBrowserStack runs it on BrowserStack.",
     schema: {
-      browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Browser (default: "chromium")'),
-      viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280,height:720})"),
-      url: z.string().optional().describe("Initial URL to load (optional)"),
-      user_agent: z.string().optional().describe("Custom user-agent string"),
-      locale: z.string().optional().describe("Locale (e.g. \"en-US\")"),
-      timezone: z.string().optional().describe("IANA timezone id (e.g. \"America/New_York\")"),
+      browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Default "chromium"'),
+      viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280,height:720}"),
+      url: z.string().optional().describe("Initial URL"),
+      user_agent: z.string().optional(),
+      locale: z.string().optional().describe("e.g. \"en-US\""),
+      timezone: z.string().optional().describe("IANA id, e.g. \"America/New_York\""),
       record_video: z.boolean().optional().describe(
-        "Record video of the session. When true, wall-clock TTL is clamped to 10 min max (default 2 min). webm files land in <output_dir>/videos/<session_id>/",
+        "Record webm to <output_dir>/videos/<session_id>/. Limits wall_ttl_ms to 10 min (default 2 min)",
       ),
-      idle_ttl_ms: z.number().optional().describe("Close when no tool touches the session for this many ms (default: 300000)"),
+      idle_ttl_ms: z.number().optional().describe("Close after this many ms without a tool call (default 300000)"),
       wall_ttl_ms: z.number().optional().describe(
-        "Wall-clock time-to-live in ms. Default 1800000 (30 min). " +
-          "**No server-side cap for non-recording sessions** — pass any value you need " +
-          "(e.g. 28800000 for 8h, 86400000 for 24h) when you need a long-lived session " +
-          "like a human-driven support chat or interactive debug. `idle_ttl_ms` still " +
-          "guards against zombie sessions independently. " +
-          "Video-recording sessions: default 120000 (2 min), hard max 600000 (10 min) — " +
-          "videos grow fast and a long-running recording is almost always a bug.",
+        "Max lifetime in ms (default 1800000). No cap unless recording, so pass e.g. 86400000 for 24h. " +
+          "Recording: default 120000, max 600000.",
       ),
-      output_dir: z.string().optional().describe('Directory for video artifacts (default: ".browser")'),
+      output_dir: z.string().optional(),
       headless: z.boolean().optional().describe(
-        "When false, opens a visible browser window. Useful for human-in-the-loop captcha/login flows. " +
-          "On WSL, the Linux Chromium window renders directly into the Windows desktop via WSLg. Default: true.",
+        "false opens a visible window (for human captcha/login; on WSL it shows on the Windows desktop). Default true.",
       ),
       // attach_cdp accepts boolean OR endpoint URL string. Some MCP clients
       // string-coerce booleans (true → "true") on the wire; without the
@@ -155,61 +138,44 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
           z.string().regex(/^https?:\/\//i, "attach_cdp string must be an http(s) endpoint URL like http://localhost:9222"),
         ]),
       ).optional().describe(
-        "Attach to a CDP-speaking browser instead of launching Playwright Chromium. Pass `true` to auto-launch " +
-          "an isolated Chromium-channel browser (edge/chrome/brave/vivaldi/opera — selected via the " +
-          "BROWSER_MCP_PRODUCT env var, default edge on Windows/WSL or chrome on macOS/Linux) using the " +
-          "configured executable_path; or pass an http endpoint URL like \"http://localhost:9222\" to attach to " +
-          "a user-managed browser. Chromium-only. Cannot record video. On WSL, auto-launch transparently spawns " +
-          "a Windows-side TCP relay so the browser CDP endpoint is reachable across the WSL2 NAT.",
+        "true: auto-launch an isolated Chromium-channel browser (BROWSER_MCP_PRODUCT: edge/chrome/brave/vivaldi/opera; " +
+          "default edge on Windows/WSL, chrome elsewhere). Or an http endpoint (\"http://localhost:9222\") to attach " +
+          "to a browser you run. Chromium only, no video.",
       ),
       auto_launch: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Override config-default auto_launch behavior for this attach_cdp session. When true (and attach_cdp is " +
-          "true), spawns a fresh isolated browser instance of the configured product. Ignored when attach_cdp " +
-          "is a string endpoint.",
+        "Override the configured auto_launch for attach_cdp:true (true spawns a fresh browser). Ignored with an endpoint URL.",
       ),
       executable_path: z.string().optional().describe(
-        "Override config executable_path for attach_cdp auto-launch. Windows path on WSL.",
+        "Override the configured browser path for attach_cdp auto-launch (Windows path on WSL)",
       ),
       user_data_dir: z.string().optional().describe(
-        "Override config user_data_dir for attach_cdp auto-launch. Windows path on WSL. When omitted, an " +
-          "isolated session-scoped temp profile is used.",
+        "Profile dir for attach_cdp auto-launch (Windows path on WSL). Default: a temp profile per session.",
       ),
       restore_previous_tabs: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "When attaching to a profile that has saved session-restore state from a prior run, Chromium " +
-          "reopens every previous tab by default — leaking them into the agent's view. Default `false` " +
-          "closes every restored tab on attach and keeps one clean page (about:blank when no `url` is " +
-          "given). Pass `true` to opt into Chromium's default restore-tabs behavior. attach_cdp only.",
+        "attach_cdp only. Default false closes tabs the profile restores from its last run, leaving one page. true keeps them.",
       ),
       ignore_https_errors: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Accept self-signed, expired, or otherwise invalid TLS certificates without error (default: false). " +
-          "Set true for local dev servers with self-signed certs (e.g. https://localhost, https://*.local). " +
-          "Without this, HTTPS pages with invalid certificates show a browser error screen instead of the page content.",
+        "Accept invalid TLS certs, e.g. self-signed local dev (default false; otherwise the page shows a browser error)",
       ),
       download_dir: downloadDirField.describe(
-        "Folder this session's downloads are saved into. " + DOWNLOAD_DIR_FORMS +
-          " Default: the browser's own download folder for attach_cdp sessions (its Downloads setting), " +
-          "<output_dir>/downloads for the rest. Change it later with set_download_dir.",
+        "Downloads folder. " + DOWNLOAD_DIR_FORMS +
+          " Default: the browser's own Downloads setting for attach_cdp, <output_dir>/downloads otherwise.",
       ),
       useBrowserStack: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Run this persistent session on BrowserStack's cloud grid instead of a locally-launched browser. " +
-          "The returned session_id is reusable across calls exactly like a local one. Set browserStackDevice " +
-          "to run on a REAL mobile device (real iOS Safari). Mutually exclusive with attach_cdp; cannot record " +
-          "video. CEILING: BrowserStack force-closes the remote session after 300s (5 min) of inactivity (its " +
-          "max server-side idle timeout) — keep the session active with a tool call within ~5 min or it is torn " +
-          "down BrowserStack-side and the next call surfaces a disconnect. Requires BROWSERSTACK_USERNAME / " +
-          "BROWSERSTACK_ACCESS_KEY env vars.",
+        "Run on BrowserStack. Not with attach_cdp, no video. BrowserStack closes the session after 5 min " +
+          "without a tool call. Needs BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY.",
       ),
       ...browserStackFields,
     },
@@ -218,31 +184,24 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
 
   close_session: {
     description:
-      "Close a persistent session opened via open_session. Returns any video file paths produced while the session was open. " +
-      "If the server exits while the session is still open, it's closed automatically on SIGINT/SIGTERM. " +
-      "On attach_cdp sessions sharing a profile with other browser-mcp servers, this only closes OUR session — the browser " +
-      "stays running as long as other sessions are attached (last-out auto-kills via sidecar refcount).",
+      "Close a session; returns any video paths. On a shared attach_cdp browser, the browser stays up until the last attached server closes.",
     schema: {
-      session_id: z.string().describe("Session id returned by open_session"),
+      session_id: z.string(),
     },
     handler: async (p) => json(await sessionManager.close(p.session_id)),
   },
 
   close_browser: {
     description:
-      "Force-nuke an attach_cdp browser tree, including the shared profile if multi-server. Polite default " +
-      "(`force:false`) refuses if other browser-mcp servers are attached and tells the caller to use plain " +
-      "close_session (last-out auto-kills via sidecar refcount). With `force:true`, taskkills the browser tree " +
-      "anyway — other servers' sessions become abandoned-but-running (their next tool call discovers the CDP " +
-      "disconnect). Use force for recovery when the browser is in a weird state; plain close_session is the right " +
-      "move 99% of the time.",
+      "Kill an attach_cdp browser process tree. Refuses while other browser-mcp servers are attached unless force:true. " +
+      "For recovery from a stuck browser; use close_session normally.",
     schema: {
-      session_id: z.string().describe("Session id (any attach_cdp session attached to the browser you want to kill)"),
+      session_id: z.string().describe("Any attach_cdp session on that browser"),
       force: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Override the polite refusal when other browser-mcp servers are still attached. Their sessions are abandoned (CDP disconnects on next tool call).",
+        "Kill even with other servers attached; their sessions disconnect on their next call.",
       ),
     },
     handler: async (p) => json(await sessionManager.closeBrowser(p.session_id, p.force)),
@@ -250,65 +209,48 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
 
   browser_status: {
     description:
-      "Read-only introspection of the shared-profile coordination state for an attach_cdp session. Returns " +
-      "sidecar view (cdp_port, relay_port, root_pid, process_name, spawned_at, full attached_sessions list) " +
-      "plus this agent's perspective: how it attached (\"spawn\" vs \"existing\"), tab counts (own / orphan), " +
-      "and peer count (other browser-mcp servers attached to this same browser). Use to debug multi-agent " +
-      "scenarios — \"who owns this tab?\", \"is the sidecar consistent?\", \"how many peers are attached?\". " +
-      "Non-attach_cdp sessions get a minimal response (is_attach_cdp:false + own_tabs_count).",
+      "Read-only state of a shared attach_cdp browser, for debugging multi-agent setups: ports, root pid, attached sessions, " +
+      "how this server attached (spawn/existing), own and orphan tab counts, peer count. Other sessions get is_attach_cdp:false + own_tabs_count.",
     schema: {
-      session_id: z.string().describe("Session id to introspect"),
+      session_id: z.string(),
     },
     handler: async (p) => json(await sessionManager.browserStatus(p.session_id)),
   },
 
   claim_tab: {
     description:
-      "Take ownership of an unowned tab in the shared browser context. Use case: a popup opened with " +
-      "`rel=\"noopener\"` has `opener === null` and the opener-filter doesn't auto-claim it; or you want to grab " +
-      "a tab that pre-existed before your session attached. Matches the first unowned page whose URL matches " +
-      "`url_pattern` (substring by default; wrap in `/.../flags` for regex). Throws if no unowned page matches.",
+      "Take ownership of an unowned tab in the shared browser (e.g. a rel=\"noopener\" popup, or a tab open before attach). " +
+      "Errors if no unowned page's URL matches.",
     schema: {
-      session_id: z.string().describe("Session that will own the claimed tab"),
-      url_pattern: z.string().describe(
-        "URL pattern to match against. Substring by default (`example.com`). " +
-        "Wrap in `/.../flags` for regex (e.g. `/checkout-[0-9]+/i`).",
-      ),
-      target_index: z.number().optional().describe("When multiple unowned pages match, pick the Nth (0-indexed). Default 0."),
+      session_id: z.string().describe("Session that will own the tab"),
+      url_pattern: z.string().describe("Substring, or `/regex/flags` (e.g. `/checkout-[0-9]+/i`)"),
+      target_index: z.number().optional().describe("Pick the Nth match, 0-based (default 0)"),
     },
     handler: async (p) => json(await sessionManager.claimTab(p)),
   },
 
   list_sessions: {
     description:
-      "List all open persistent sessions with their tabs, TTLs, and next expiry timestamp. " +
-      "Useful for cleaning up stragglers or seeing what's live.",
+      "List open sessions with their tabs, TTLs, and next expiry.",
     schema: {},
     handler: async () => json(sessionManager.list()),
   },
 
   pause_session: {
     description:
-      "Snapshot a session's storage state (cookies + localStorage + sessionStorage) and active-tab URL, " +
-      "then close the session. The returned `snapshot` object is opaque-ish JSON the caller persists and " +
-      "later hands to `resume_session` to reopen with the same auth state. Use case: a step in an automated " +
-      "flow needs human input (captcha, MFA prompt) — pause the headless session, the human solves it in a " +
-      "separately-launched headed session against the snapshot, then the automation resumes with updated " +
-      "cookies. NOT supported on attach_cdp sessions (their state is in the underlying browser profile, not " +
-      "in a Playwright-managed context). NOT preserved across pause/resume: in-page JS state, scroll, " +
-      "in-progress form data, dynamic SPA state, secondary tabs.",
+      "Save a session's cookies, localStorage, sessionStorage, and active-tab URL as a `snapshot`, then close it. " +
+      "Pass the snapshot to resume_session later (e.g. after a human solves a captcha). Not for attach_cdp sessions. " +
+      "Lost: in-page JS state, scroll, unsaved form input, other tabs.",
     schema: {
-      session_id: z.string().describe("Session id returned by open_session"),
+      session_id: z.string(),
     },
     handler: async (p) => json(await sessionManager.pauseSession(p.session_id)),
   },
 
   resume_session: {
     description:
-      "Reopen a session from a `snapshot` produced by `pause_session`. Returns a NEW session_id (the resumed " +
-      "session inherits storage state but is fresh — it isn't the \"same\" session). The browser engine is " +
-      "locked to the snapshot's value; per-call overrides for headless / idle_ttl_ms / wall_ttl_ms / " +
-      "output_dir are honored. Navigates to the snapshot's saved URL on open.",
+      "Reopen a pause_session snapshot as a NEW session_id with the saved storage, navigated to the saved URL. " +
+      "Browser engine comes from the snapshot.",
     schema: {
       snapshot: z.object({
         storage_state: z.any(),
@@ -319,11 +261,11 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         timezone: z.string().optional(),
         browser: z.enum(["chromium", "firefox", "webkit"]),
         paused_at: z.string(),
-      }).describe("The snapshot object returned by pause_session, passed through verbatim."),
-      headless: z.boolean().optional().describe("Override headless mode on the resumed session"),
-      idle_ttl_ms: z.number().optional().describe("Override idle timeout"),
-      wall_ttl_ms: z.number().optional().describe("Override wall-clock timeout"),
-      output_dir: z.string().optional().describe("Override output_dir for video artifacts (resumed sessions get their own dir)"),
+      }).describe("pause_session's snapshot, unchanged"),
+      headless: z.boolean().optional(),
+      idle_ttl_ms: z.number().optional(),
+      wall_ttl_ms: z.number().optional(),
+      output_dir: z.string().optional().describe('Downloads go to <output_dir>/downloads (default ".browser")'),
     },
     handler: async (p) => json(await sessionManager.resumeSession(p)),
   },
@@ -336,15 +278,15 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
 const waitUntilEnum = z
   .enum(["load", "domcontentloaded", "networkidle", "commit"])
   .optional()
-  .describe('Lifecycle event to wait for (default: "load")');
+  .describe('Default "load"');
 
 export const navigationPrimitives: Record<string, PrimitiveDef> = {
   navigate: {
-    description: "Navigate to a URL. Uses the session's active tab when session_id is provided, otherwise runs in a one-shot browser context. Returns an error with actionable diagnostics if the page cannot be loaded (certificate errors, DNS failures, connection refused, HTTP 5xx).",
+    description: "Navigate to a URL; returns url, status, title. Errors with diagnostics if the page can't load (TLS, DNS, refused, HTTP 5xx).",
     schema: {
-      url: z.string().describe("Absolute URL to navigate to"),
+      url: z.string().describe("Absolute URL"),
       wait_until: waitUntilEnum,
-      timeout: z.number().optional().describe("Navigation timeout in ms (default: 30000)"),
+      timeout: z.number().optional().describe("ms (default 30000)"),
       ...targetField,
       ...useSchemaField,
     },
@@ -388,9 +330,9 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
   },
 
   go_back: {
-    description: "Navigate back in the session's history. Requires session_id.",
+    description: "Go back in the session's history.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
       wait_until: waitUntilEnum,
     },
@@ -401,9 +343,9 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
   },
 
   go_forward: {
-    description: "Navigate forward in the session's history. Requires session_id.",
+    description: "Go forward in the session's history.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
       wait_until: waitUntilEnum,
     },
@@ -433,19 +375,16 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
 export const interactionPrimitives: Record<string, PrimitiveDef> = {
   click: {
     description:
-      "Click an element and report what happened. Returns the element's metadata (tag, role, href, form action) and " +
-      "any side effects: navigation (new URL + title), page errors after navigation, or warnings for disabled elements. " +
-      "Use button and click_count for right-click, double-click, etc.",
+      "Click an element. Returns its tag, role, href, and form action, plus any navigation (new URL, title, page error) " +
+      "or a warning for a disabled element.",
     schema: {
       ...selectorField,
-      button: z.enum(["left", "right", "middle"]).optional().describe('Mouse button (default: "left")'),
-      click_count: z.number().optional().describe("Number of consecutive clicks (default: 1; set 2 for double-click)"),
+      button: z.enum(["left", "right", "middle"]).optional().describe('Default "left"'),
+      click_count: z.number().optional().describe("Default 1; 2 = double-click"),
       force: z.boolean().optional().describe(
-        "Skip actionability checks (visible, enabled, stable) and click immediately. " +
-          "WARNING: a force:true click does NOT prove the element is reachable by a real user — " +
-          "it bypasses the checks that would fail. Use hit_test to verify reachability.",
+        "Skip actionability checks (visible, enabled, stable). Doesn't prove a real user can reach it; use hit_test for that.",
       ),
-      position: z.object({ x: z.number(), y: z.number() }).optional().describe("Offset from the element's top-left to click at (pixels)"),
+      position: z.object({ x: z.number(), y: z.number() }).optional().describe("px offset from the element's top-left"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -524,12 +463,12 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
   },
 
   type_text: {
-    description: "Fill a text input or textarea. Clears the field first unless clear:false.",
+    description: "Fill a text input or textarea.",
     schema: {
       ...selectorField,
-      text: z.string().describe("Text to type"),
-      clear: z.boolean().optional().describe("Clear the field before typing (default: true)"),
-      press_enter: z.boolean().optional().describe("Press Enter after typing (default: false)"),
+      text: z.string(),
+      clear: z.boolean().optional().describe("Replace the value (default true); false types key by key without clearing"),
+      press_enter: z.boolean().optional().describe("Default false"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -549,11 +488,10 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
   press_key: {
     description:
-      "Press a keyboard key or key combo. Examples: \"Enter\", \"Tab\", \"Escape\", \"Control+A\", \"Shift+Tab\". " +
-      "Targets a specific element when selector is provided, otherwise fires on the currently-focused element.",
+      "Press a key or combo on the focused element, or on selector if given.",
     schema: {
-      key: z.string().describe("Key or combo (e.g. \"Enter\", \"Control+A\", \"ArrowDown\")"),
-      selector: z.string().optional().describe("Element to focus before the key press"),
+      key: z.string().describe("e.g. \"Enter\", \"Escape\", \"Control+A\", \"Shift+Tab\", \"ArrowDown\""),
+      selector: z.string().optional(),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -585,12 +523,12 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
   scroll: {
     description:
-      "Scroll the page. Provide selector to scroll an element into view, or x/y deltas to scroll the window by pixels, or to:\"top\"|\"bottom\" to jump.",
+      "Scroll the page: selector into view, to top/bottom, or by x/y pixels.",
     schema: {
       selector: z.string().optional().describe("Scroll this element into view"),
-      to: z.enum(["top", "bottom"]).optional().describe('Jump to "top" or "bottom" of the page'),
-      x: z.number().optional().describe("Horizontal scroll delta in pixels"),
-      y: z.number().optional().describe("Vertical scroll delta in pixels"),
+      to: z.enum(["top", "bottom"]).optional(),
+      x: z.number().optional().describe("Horizontal delta, px"),
+      y: z.number().optional().describe("Vertical delta, px"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -616,10 +554,10 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
   },
 
   drag: {
-    description: "Drag one element onto another. Both selectors are required.",
+    description: "Drag one element onto another.",
     schema: {
-      from_selector: z.string().describe("Element to drag from"),
-      to_selector: z.string().describe("Element to drop onto"),
+      from_selector: z.string(),
+      to_selector: z.string(),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -637,8 +575,8 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     schema: {
       ...selectorField,
       value: z.string().optional().describe("Option value attribute"),
-      label: z.string().optional().describe("Option visible label"),
-      index: z.number().optional().describe("0-based option index"),
+      label: z.string().optional().describe("Visible label"),
+      index: z.number().optional().describe("0-based"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -672,10 +610,10 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
   },
 
   upload_file: {
-    description: "Set files on a file input. Accepts one or more absolute paths.",
+    description: "Set files directly on an <input type=file> (no click, no file chooser). Works on real iOS devices.",
     schema: {
       ...selectorField,
-      paths: z.array(z.string()).describe("Absolute paths to the files to upload"),
+      paths: z.array(z.string()).describe("Absolute file paths"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -688,16 +626,14 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
   click_to_upload: {
     description:
-      "Upload file(s) the way a human does: perform a GENUINE click that opens the browser's native file chooser, then hand the files to that chooser — instead of injecting them straight into an <input> like upload_file. " +
-      "Use this when the page wires uploads through a button or label that programmatically opens the picker (a hidden or synthetic <input type=file>, e.g. plupload/dropzone widgets), or when the site only accepts the user-activated click path. " +
-      "Clicks `trigger_selector`, waits for the file-chooser event, and sets `paths` on it. " +
-      "Unlike upload_file (Playwright setInputFiles, which never clicks and never triggers user activation), this exercises the real click→chooser flow. " +
-      "PLATFORM: works on desktop browsers (chromium/firefox/webkit). Does NOT work on real iOS Safari via BrowserStack — that platform does not surface a file-chooser event to automation (the iOS picker is native OS UI the bridge can't intercept); the click resolves but no chooser arrives. On real iOS use upload_file to inject the file, or a human tap in BrowserStack Live.",
+      "Upload via a real click that opens the native file chooser, then set the files on it. " +
+      "Use when a button or label opens the picker (hidden/synthetic input, e.g. plupload) or the site needs a user-activated click; " +
+      "upload_file never clicks. Desktop browsers only: fails on real iOS devices (use upload_file there).",
     schema: {
       trigger_selector: z.string().describe(
-        "Selector for the element to CLICK to open the file chooser — usually the visible \"Upload\"/\"Choose files\" button or label, not necessarily the <input> itself.",
+        "Element to click to open the chooser, usually the visible Upload button or label",
       ),
-      paths: z.array(z.string()).describe("Absolute paths to the files to set on the chooser."),
+      paths: z.array(z.string()).describe("Absolute file paths"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -732,13 +668,11 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
   drop_to_upload: {
     description:
-      "Upload file(s) by simulating a drag-and-drop onto a dropzone — for uploaders that accept dropped files and have no usable <input> to target (dropzone.js, react-dropzone, and similar). " +
-      "Reads each file locally, constructs real File objects inside the page, attaches them to a DataTransfer, and dispatches the dragenter→dragover→drop sequence on `target_selector`. " +
-      "Use this when upload_file has no input to set and click_to_upload has no button that opens a chooser. " +
-      "Desktop pattern (chromium/firefox/webkit) — drag-and-drop file upload is not how mobile Safari/Chrome upload; on real mobile devices use upload_file.",
+      "Upload by dispatching dragenter/dragover/drop with real File objects on a dropzone (dropzone.js, react-dropzone). " +
+      "Use when there is no input for upload_file and no chooser button for click_to_upload. Desktop only; on real mobile devices use upload_file.",
     schema: {
-      target_selector: z.string().describe("Selector for the dropzone element that accepts dropped files."),
-      paths: z.array(z.string()).describe("Absolute paths to the files to drop."),
+      target_selector: z.string().describe("Dropzone element"),
+      paths: z.array(z.string()).describe("Absolute file paths"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -800,7 +734,7 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
     description: "Wait for an element to reach a given visibility state.",
     schema: {
       ...selectorField,
-      state: z.enum(["attached", "detached", "visible", "hidden"]).optional().describe('Target state (default: "visible")'),
+      state: z.enum(["attached", "detached", "visible", "hidden"]).optional().describe('Default "visible"'),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
@@ -812,11 +746,11 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
   },
 
   wait_for_url: {
-    description: "Wait until the page URL matches the given pattern. Pattern can be a substring or a regex literal.",
+    description: "Wait until the session page's URL matches a pattern.",
     schema: {
-      url_pattern: z.string().describe("Substring or /regex/flags the URL must match"),
+      url_pattern: z.string().describe("Substring or /regex/flags"),
       ...timeoutField,
-      session_id: z.string().describe("Session id (waits against the session's active page)"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
     },
     handler: async (p) => withPage(p, async (page) => {
@@ -830,9 +764,9 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
   wait_for_load_state: {
     description: "Wait for a page lifecycle event.",
     schema: {
-      state: z.enum(["load", "domcontentloaded", "networkidle"]).describe("Event to wait for"),
+      state: z.enum(["load", "domcontentloaded", "networkidle"]),
       ...timeoutField,
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
     },
     handler: async (p) => withPage(p, async (page) => {
@@ -842,9 +776,9 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
   },
 
   wait: {
-    description: "Sleep for a given number of ms. Prefer wait_for_selector when you know what you're waiting on.",
+    description: "Sleep. Prefer wait_for_selector when you know what to wait for.",
     schema: {
-      ms: z.number().describe("Duration in ms"),
+      ms: z.number(),
     },
     handler: async (p) => {
       await new Promise((r) => setTimeout(r, p.ms));
@@ -859,9 +793,9 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
 
 export const readPrimitives: Record<string, PrimitiveDef> = {
   get_text: {
-    description: "Return the visible text content of an element (or the whole page body when selector is omitted).",
+    description: "Return the visible text (innerText) of the first match, or the page body.",
     schema: {
-      selector: z.string().optional().describe('CSS selector (default: "body")'),
+      selector: z.string().optional().describe('Same syntax as click (default "body")'),
       ...targetField,
       ...useSchemaField,
     },
@@ -873,10 +807,10 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
   },
 
   get_attribute: {
-    description: "Return the value of an attribute on an element. Returns null if the attribute is absent.",
+    description: "Return an attribute's value on the first match, or null if absent.",
     schema: {
       ...selectorField,
-      attribute: z.string().describe("Attribute name (e.g. \"href\", \"data-id\")"),
+      attribute: z.string(),
       ...targetField,
       ...useSchemaField,
     },
@@ -887,9 +821,9 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
   },
 
   get_html: {
-    description: "Return the outerHTML of an element or the full <html> when selector is omitted.",
+    description: "Return an element's outerHTML, or the whole document without selector.",
     schema: {
-      selector: z.string().optional().describe('CSS selector (default: whole document)'),
+      selector: z.string().optional().describe("Same syntax as click"),
       ...targetField,
       ...useSchemaField,
     },
@@ -903,9 +837,9 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
   },
 
   get_url: {
-    description: "Return the current URL of a session's active (or named) tab.",
+    description: "Return a session tab's current URL and title.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
     },
     handler: async (p) => {
@@ -922,20 +856,20 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
 
 export const tabPrimitives: Record<string, PrimitiveDef> = {
   open_tab: {
-    description: "Open a new tab in an existing session and make it the active tab.",
+    description: "Open a tab in a session and make it active.",
     schema: {
-      session_id: z.string().describe("Session id"),
-      url: z.string().optional().describe("Initial URL to load in the new tab"),
-      tab_id: z.string().optional().describe("Custom tab id (default: auto-assigned like \"tab2\", \"tab3\")"),
+      session_id: z.string(),
+      url: z.string().optional(),
+      tab_id: z.string().optional().describe("Custom id (default \"tab2\", \"tab3\", ...)"),
     },
     handler: async (p) => json(await sessionManager.addTab(p.session_id, p.tab_id, p.url)),
   },
 
   switch_tab: {
-    description: "Make a given tab the active tab for subsequent primitives.",
+    description: "Make a tab the session's active tab for later calls.",
     schema: {
-      session_id: z.string().describe("Session id"),
-      tab_id: z.string().describe("Target tab id"),
+      session_id: z.string(),
+      tab_id: z.string(),
     },
     handler: async (p) => {
       await sessionManager.switchTab(p.session_id, p.tab_id);
@@ -945,19 +879,15 @@ export const tabPrimitives: Record<string, PrimitiveDef> = {
 
   list_tabs: {
     description:
-      "List all tabs in a session (url + which is active). With `include_other_agents:true` on a " +
-      "multi-server shared profile (attach_cdp), also reports pages in the shared browser context that " +
-      "aren't owned by this Node — each with `owner: \"self\" | \"orphan\"`. \"self\" entries carry a " +
-      "tab_id you can pass to switch_tab/close_tab; orphans don't (use claim_tab to take ownership first).",
+      "List a session's tabs (url, active). Each has owner \"self\" (with a tab_id) or \"orphan\" " +
+      "(no tab_id; claim_tab it first).",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       include_other_agents: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Also list pages in the shared browser context that aren't owned by this Node's SessionManager. " +
-        "Useful for debugging multi-agent scenarios — see what other browser-mcp servers (or pre-existing " +
-        "tabs) have open in the same browser. Default false.",
+        "Also list pages in the shared browser that this server doesn't own, as orphans (default false)",
       ),
     },
     handler: async (p) => {
@@ -994,10 +924,10 @@ export const tabPrimitives: Record<string, PrimitiveDef> = {
   },
 
   close_tab: {
-    description: "Close a tab in a session. Can't close the last tab — close the session instead.",
+    description: "Close a session tab. The last tab can't be closed; close the session instead.",
     schema: {
-      session_id: z.string().describe("Session id"),
-      tab_id: z.string().describe("Tab id to close"),
+      session_id: z.string(),
+      tab_id: z.string(),
     },
     handler: async (p) => {
       await sessionManager.closeTab(p.session_id, p.tab_id);
@@ -1012,10 +942,10 @@ export const tabPrimitives: Record<string, PrimitiveDef> = {
 
 export const cookiePrimitives: Record<string, PrimitiveDef> = {
   get_cookies: {
-    description: "Return cookies from the session's context. Filter to a single URL to get only cookies sent to it.",
+    description: "Return the session's cookies.",
     schema: {
-      session_id: z.string().describe("Session id"),
-      url: z.string().optional().describe("Return only cookies that would be sent to this URL"),
+      session_id: z.string(),
+      url: z.string().optional().describe("Only cookies sent to this URL"),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1026,9 +956,9 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
   },
 
   set_cookies: {
-    description: "Add cookies to the session's context. Accepts Playwright's cookie shape.",
+    description: "Add cookies to the session (Playwright cookie shape).",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       cookies: z.array(z.object({
         name: z.string(),
         value: z.string(),
@@ -1049,8 +979,8 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
   },
 
   clear_cookies: {
-    description: "Clear all cookies in the session's context.",
-    schema: { session_id: z.string().describe("Session id") },
+    description: "Clear all of the session's cookies.",
+    schema: { session_id: z.string() },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
       await sessionManager.get(p.session_id).context.clearCookies();
@@ -1059,11 +989,11 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
   },
 
   get_storage: {
-    description: "Return the contents of localStorage or sessionStorage on the active (or named) tab.",
+    description: "Return localStorage or sessionStorage of a session tab.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
-      area: z.enum(["local", "session"]).optional().describe('Storage area (default: "local")'),
+      area: z.enum(["local", "session"]).optional().describe('Default "local"'),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1083,13 +1013,13 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
   },
 
   set_storage: {
-    description: "Set a key/value pair in localStorage or sessionStorage on the active (or named) tab.",
+    description: "Set a key in localStorage or sessionStorage of a session tab.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
-      key: z.string().describe("Storage key"),
-      value: z.string().describe("Storage value (string)"),
-      area: z.enum(["local", "session"]).optional().describe('Storage area (default: "local")'),
+      key: z.string(),
+      value: z.string(),
+      area: z.enum(["local", "session"]).optional().describe('Default "local"'),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1107,11 +1037,11 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
   },
 
   clear_storage: {
-    description: "Clear localStorage or sessionStorage on the active (or named) tab.",
+    description: "Clear localStorage or sessionStorage of a session tab.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
-      area: z.enum(["local", "session"]).optional().describe('Storage area (default: "local")'),
+      area: z.enum(["local", "session"]).optional().describe('Default "local"'),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1133,16 +1063,15 @@ export const cookiePrimitives: Record<string, PrimitiveDef> = {
 export const capturePrimitives: Record<string, PrimitiveDef> = {
   screenshot: {
     description:
-      "Take a PNG screenshot of a session's active (or named) tab. Optionally crop to an element by selector, " +
-      "or capture the full scrollable page with full_page:true. Returns the current page URL and title alongside " +
-      "the file path. For ephemeral multi-browser / multi-viewport captures use `multi_screenshot` instead.",
+      "PNG screenshot of a session tab (viewport, full page, or one element); writes a file and returns its path, url, title. " +
+      "Without a session use multi_screenshot or element_screenshot.",
     schema: {
-      session_id: z.string().describe("Session id (use open_session to create one, or use `multi_screenshot` for ephemeral captures)"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
-      selector: z.string().optional().describe("CSS selector to crop to. Omit for viewport/full-page capture"),
-      full_page: z.boolean().optional().describe("Capture the full scrollable page (default: false)"),
-      output_path: z.string().optional().describe("Relative or absolute path. Defaults to <output_dir>/capture-<timestamp>.png"),
-      output_dir: z.string().optional().describe('Base directory when output_path is relative (default: ".browser")'),
+      selector: z.string().optional().describe("Crop to this element (same syntax as click)"),
+      full_page: z.boolean().optional().describe("Default false"),
+      output_path: z.string().optional().describe("Default <output_dir>/capture-<timestamp>.png"),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1178,13 +1107,13 @@ async function ensureOutput(filePath: string): Promise<void> {
 export const savePrimitives: Record<string, PrimitiveDef> = {
   save_pdf: {
     description:
-      "Save the current page as a PDF. Chromium only. The resulting file is written under output_dir.",
+      "Save the page as a PDF file; returns its path. Chromium only.",
     schema: {
-      output_path: z.string().optional().describe("Relative or absolute path. Defaults to <output_dir>/<session>-<timestamp>.pdf"),
-      output_dir: z.string().optional().describe('Base directory when output_path is relative (default: ".browser")'),
-      format: z.string().optional().describe('Paper format (e.g. "A4", "Letter"). Default: Letter'),
+      output_path: z.string().optional().describe("Default <output_dir>/page-<timestamp>.pdf"),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
+      format: z.string().optional().describe('Paper format, e.g. "A4" (default "Letter")'),
       landscape: z.boolean().optional(),
-      print_background: z.boolean().optional().describe("Include CSS backgrounds (default: true)"),
+      print_background: z.boolean().optional().describe("Default true"),
       ...targetField,
       ...useSchemaField,
     },
@@ -1209,10 +1138,10 @@ export const savePrimitives: Record<string, PrimitiveDef> = {
   },
 
   save_html: {
-    description: "Save the page's full HTML content to a file.",
+    description: "Save the page's full HTML to a file; returns path and bytes. To read HTML inline use get_html.",
     schema: {
-      output_path: z.string().optional().describe("Relative or absolute path. Defaults to <output_dir>/<timestamp>.html"),
-      output_dir: z.string().optional().describe('Base directory when output_path is relative (default: ".browser")'),
+      output_path: z.string().optional().describe("Default <output_dir>/page-<timestamp>.html"),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
       ...targetField,
       ...useSchemaField,
     },
@@ -1236,13 +1165,12 @@ export const savePrimitives: Record<string, PrimitiveDef> = {
 export const dialogPrimitives: Record<string, PrimitiveDef> = {
   handle_next_dialog: {
     description:
-      "Pre-arm a one-shot dialog handler for the session's active tab. The next native alert/confirm/prompt is auto-handled. " +
-      "Call this before triggering the action that raises the dialog (e.g. before clicking a button that calls window.confirm).",
+      "Handle the next native alert/confirm/prompt on a session tab, once. Call before the action that opens the dialog.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       tab_id: z.string().optional(),
-      action: z.enum(["accept", "dismiss"]).describe("What to do with the dialog"),
-      text: z.string().optional().describe("Text to type into a prompt() before accepting"),
+      action: z.enum(["accept", "dismiss"]),
+      text: z.string().optional().describe("Text for a prompt() when accepting"),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1270,17 +1198,14 @@ export const dialogPrimitives: Record<string, PrimitiveDef> = {
 export const downloadPrimitives: Record<string, PrimitiveDef> = {
   wait_for_download: {
     description:
-      "Wait for a file download in the session to finish and return where it was saved. Returns the oldest download " +
-      "this tool hasn't returned yet, so call it after the click that starts the download; one that already finished " +
-      "comes back immediately. `path` is a path this server can open (on WSL, a Windows browser's C:\\... path comes " +
-      "back as /mnt/c/..., with the original in `browser_path`). If the download is still running at `timeout`, it " +
-      "comes back with state \"in_progress\" and the next call waits for it again. attach_cdp sessions save into the " +
-      "browser's own download folder unless download_dir is set; if that profile asks where to save each file, the " +
-      "browser shows its Save dialog and the download stays in progress until someone answers it.",
+      "Wait for a session download to finish and return where it was saved. Returns the oldest download not yet returned " +
+      "(an already finished one comes back at once), so call it after the click that starts it. `path` is openable by this " +
+      "server (on WSL, C:\\... becomes /mnt/c/...; original in `browser_path`). Still running at timeout: state \"in_progress\", " +
+      "and the next call waits again. If an attach_cdp profile asks where to save, the download waits on its Save dialog.",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
       timeout: z.number().optional().describe(
-        "Max ms to wait (default: 30000). Keep it under the server's tool timeout (BROWSER_MCP_TOOL_TIMEOUT, default 90000).",
+        "Max ms (default 30000). Keep under BROWSER_MCP_TOOL_TIMEOUT (default 90000).",
       ),
     },
     handler: async (p) => {
@@ -1295,10 +1220,9 @@ export const downloadPrimitives: Record<string, PrimitiveDef> = {
 
   list_downloads: {
     description:
-      "List every download in the session (newest last) with its state, saved path, and size, plus the folder new " +
-      "downloads go to (null = the browser's own download folder).",
+      "List the session's downloads (newest last) with state, path, size, plus download_dir (null = the browser's own folder).",
     schema: {
-      session_id: z.string().describe("Session id"),
+      session_id: z.string(),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1309,12 +1233,10 @@ export const downloadPrimitives: Record<string, PrimitiveDef> = {
 
   set_download_dir: {
     description:
-      "Set the folder this session's downloads are saved into, for downloads that start after this call. " +
-      "Omit `path` to go back to the default. On attach_cdp sessions the browser still saves into its own download " +
-      "folder and the file is then moved here.",
+      "Set the session's downloads folder for downloads started after this call (attach_cdp: saved by the browser, then moved here).",
     schema: {
-      session_id: z.string().describe("Session id"),
-      path: downloadDirField.describe(`Folder for downloads. ${DOWNLOAD_DIR_FORMS} Omit to restore the default.`),
+      session_id: z.string(),
+      path: downloadDirField.describe(`${DOWNLOAD_DIR_FORMS} Omit to restore the default.`),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);

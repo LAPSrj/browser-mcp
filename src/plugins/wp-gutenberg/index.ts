@@ -35,9 +35,9 @@ type InnerBlockNode = {
 };
 const innerBlockSchema: z.ZodType<InnerBlockNode> = z.lazy(() =>
   z.object({
-    name: z.string().describe('Block name (e.g. "core/paragraph")'),
-    attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes"),
-    innerBlocks: z.array(innerBlockSchema).optional().describe("Nested children"),
+    name: z.string().describe('e.g. "core/paragraph"'),
+    attributes: z.record(z.string(), z.unknown()).optional(),
+    innerBlocks: z.array(innerBlockSchema).optional(),
   }),
 );
 
@@ -76,52 +76,38 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     // flows (clear → block_html → check) share editor state instead of each
     // tool re-navigating from scratch.
     const sessionIdSchema = z.string().optional().describe(
-      "Persistent session id from open_session(). When provided, the tool runs " +
-      "on that session's active page and the caller owns lifecycle (close via " +
-      "close_session). When omitted, an ephemeral session is launched for this " +
-      "call only.",
+      "open_session id; runs on its active page. Omit for a one-call ephemeral session.",
     );
 
     const siteSchema = z.string().optional().describe(
-      `WordPress site to use, by name (case-insensitive): ${siteNames}. ` +
-      "Default: the site of the session_id page when it's on a configured site, otherwise the first site.",
+      `Site name (case-insensitive): ${siteNames}. ` +
+      "Default: the session_id page's site if configured, else the first site.",
     );
 
     const allowWriteSchema = z.boolean().optional().describe(
-      "Allow saving the post on a site with WP_REQUIRE_ALLOW_WRITE_<NAME> set (default: false). " +
-      "Has no effect on other sites, which allow saves.",
+      "Required (true) to save on a site with WP_REQUIRE_ALLOW_WRITE set; other sites always allow saves. Default false.",
     );
 
     ctx.registerTool({
       name: "insert_block",
       description:
-        "Insert a Gutenberg block into the WordPress editor. " +
-        "Opens the post editor, inserts the block via wp.data, and returns the block state. " +
-        "Use inner_blocks to seed nested children (parent + items) in a single call. " +
-        "By default the insert is in-memory only — the change is discarded when the call returns. " +
-        "Pass save: true to persist via wp.data.dispatch('core/editor').savePost(). " +
-        "Optionally takes a screenshot of the editor after insertion. " +
-        "On template-locked FSE posts (WP 6.5+ block themes) the editor's top level is the locked " +
-        "template canvas — inserting there is silently rejected — so the block is inserted into the " +
-        "editable post body (the core/post-content inner-block list) instead; pass root_client_id to override.",
+        "Insert a block into a post in the Gutenberg editor and return the block state. In memory only unless save:true. " +
+        "On template-locked FSE posts it goes into the post body (core/post-content) instead of the locked template.",
       schema: {
-        post_id: z.number().describe("WordPress post ID to edit"),
-        block_name: z.string().describe('Block name (e.g. "core/paragraph", "my-plugin/my-block")'),
-        attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes to set"),
+        post_id: z.number(),
+        block_name: z.string().describe('e.g. "core/paragraph"'),
+        attributes: z.record(z.string(), z.unknown()).optional(),
         inner_blocks: z.array(innerBlockSchema).optional().describe(
-          "Children to seed under this block (recursive). Each node: { name, attributes?, innerBlocks? }. " +
-          "Required for InnerBlocks parents whose items carry meaningful attributes (e.g. social-links).",
+          "Nested children to create in the same call; needed when items carry attributes (e.g. social-links)",
         ),
-        index: z.number().optional().describe("Position to insert at within the parent (default: append to end)"),
+        index: z.number().optional().describe("Position in the parent (default: end)"),
         root_client_id: z.string().optional().describe(
-          "Parent block's clientId for nested insertion. When omitted on a template-locked FSE post, " +
-          "defaults to the core/post-content block so the insert lands in the editable post body rather " +
-          "than the locked template canvas root.",
+          "Parent clientId for nested insertion (default: core/post-content on template-locked FSE posts)",
         ),
-        save: z.boolean().optional().describe("Persist the insert via savePost() before returning (default: false)"),
-        screenshot: z.boolean().optional().describe("Take a screenshot of the editor after insertion (default: true)"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        save: z.boolean().optional().describe("Save the post (default false)"),
+        screenshot: z.boolean().optional().describe("Editor screenshot after insert (default true)"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -132,12 +118,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "get_blocks",
       description:
-        "Get the list of all blocks in a WordPress post's editor. " +
-        "Returns each block's clientId, name, attributes, validity, and inner block count. " +
-        "Set include_inner: true to recursively include the nested block tree.",
+        "List a post's blocks in the editor: clientId, name, attributes, validity, inner block count.",
       schema: {
-        post_id: z.number().describe("WordPress post ID to inspect"),
-        include_inner: z.boolean().optional().describe("Include each block's innerBlocks recursively (default: false)"),
+        post_id: z.number(),
+        include_inner: z.boolean().optional().describe("Include nested blocks recursively (default false)"),
         session_id: sessionIdSchema,
         site: siteSchema,
       },
@@ -147,21 +131,20 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "screenshot_block",
       description:
-        "Screenshot a specific block in the WordPress editor and/or its frontend rendering. " +
-        "Target a block by index (0-based top-level), clientId, or block_path (nested).",
+        "Screenshot one block in the editor and/or on the frontend.",
       schema: {
-        post_id: z.number().describe("WordPress post ID"),
-        block_index: z.number().optional().describe("Top-level block index, 0-based (default: 0)"),
-        client_id: z.string().optional().describe("Block clientId (alternative to block_index/block_path)"),
-        block_path: z.array(z.number()).optional().describe("Path to a nested block, e.g. [0, 1]"),
-        context: z.enum(["editor", "frontend", "both"]).optional().describe('What to screenshot (default: "editor")'),
-        save_before_frontend: z.boolean().optional().describe("Publish + save the post before capturing the frontend (default: true)"),
-        hide_editor_chrome: z.boolean().optional().describe("Deselect blocks and hide editor UI before capturing (default: false)"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
-        frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
-        frontend_padding: z.number().optional().describe("Pixels of padding around the block bbox (default: 0)"),
-        frontend_crop: z.boolean().optional().describe("Clip the frontend screenshot to the block bbox (default: true)"),
+        post_id: z.number(),
+        block_index: z.number().optional().describe("Top-level index, 0-based (default 0)"),
+        client_id: z.string().optional(),
+        block_path: z.array(z.number()).optional().describe("Nested block path, e.g. [0, 1]"),
+        context: z.enum(["editor", "frontend", "both"]).optional().describe('Default "editor"'),
+        save_before_frontend: z.boolean().optional().describe("Publish and save before the frontend capture (default true)"),
+        hide_editor_chrome: z.boolean().optional().describe("Deselect and hide editor UI (default false)"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+        frontend_selector: z.string().optional().describe("CSS selector for the block on the frontend"),
+        frontend_padding: z.number().optional().describe("px around the block (default 0)"),
+        frontend_crop: z.boolean().optional().describe("Clip to the block (default true)"),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -172,13 +155,12 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "inspect_toolbar",
       description:
-        "Select a block and return a structured list of the buttons in its block toolbar. " +
-        "Returns each button's label, aria-label, pressed/expanded state, disabled state, and icon presence.",
+        "Select a block and list its toolbar buttons: label, aria-label, pressed, expanded, disabled, icon.",
       schema: {
-        post_id: z.number().describe("WordPress post ID"),
-        block_index: z.number().optional().describe("Top-level block index, 0-based"),
-        client_id: z.string().optional().describe("Block clientId"),
-        block_path: z.array(z.number()).optional().describe("Path to a nested block, e.g. [0, 1]"),
+        post_id: z.number(),
+        block_index: z.number().optional().describe("Top-level index, 0-based"),
+        client_id: z.string().optional(),
+        block_path: z.array(z.number()).optional().describe("Nested block path, e.g. [0, 1]"),
         session_id: sessionIdSchema,
         site: siteSchema,
       },
@@ -188,24 +170,22 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "compare_block",
       description:
-        "All-in-one block visual regression: resolves a block on the frontend, scrolls it into view, " +
-        "clips to its bounding box, and pixel-compares against a reference image. " +
-        "Supports block_anchor for stable identification on multi-block test pages.",
+        "Pixel-compare a block's frontend rendering, clipped to its box, with a reference PNG.",
       schema: {
-        post_id: z.number().describe("WordPress post ID"),
-        referenceImage: z.string().describe("Path to the reference PNG image"),
-        block_index: z.number().optional().describe("Top-level block index, 0-based"),
-        client_id: z.string().optional().describe("Block clientId"),
-        block_path: z.array(z.number()).optional().describe("Nested path, e.g. [0, 1]"),
-        block_anchor: z.string().optional().describe("Block's anchor attribute — stable id for multi-block test pages"),
-        frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
-        frontend_padding: z.number().optional().describe("Pixels of padding around the block bbox (default: 0)"),
-        save_before_frontend: z.boolean().optional().describe("Publish + save before reading the frontend (default: true)"),
-        mode: z.enum(["precise", "design"]).optional().describe('Comparison mode (default: "design")'),
-        threshold: z.number().optional().describe("Pixel diff threshold 0-1"),
-        maxDiffPercent: z.number().optional().describe("Maximum diff % to still match (default: 5)"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        post_id: z.number(),
+        referenceImage: z.string().describe("Reference PNG path"),
+        block_index: z.number().optional().describe("Top-level index, 0-based"),
+        client_id: z.string().optional(),
+        block_path: z.array(z.number()).optional().describe("Nested block path, e.g. [0, 1]"),
+        block_anchor: z.string().optional().describe("Block anchor attribute; stable on multi-block pages"),
+        frontend_selector: z.string().optional().describe("CSS selector for the block on the frontend"),
+        frontend_padding: z.number().optional().describe("px around the block (default 0)"),
+        save_before_frontend: z.boolean().optional().describe("Publish and save first (default true)"),
+        mode: z.enum(["precise", "design"]).optional().describe('Default "design"'),
+        threshold: z.number().optional().describe("Per-pixel threshold 0-1"),
+        maxDiffPercent: z.number().optional().describe("Default 5"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional(),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -216,13 +196,12 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "evaluate",
       description:
-        "Run JavaScript inside an authenticated Gutenberg editor page and return the value. " +
-        "Uses the cached WP session cookie, waits for wp.data + editor canvas readiness, and wraps the script in an IIFE.",
+        "Run JS in a post's logged-in Gutenberg editor and return the value.",
       schema: {
-        post_id: z.number().describe("WordPress post ID of the editor to evaluate in"),
-        script: z.string().describe("JavaScript body. Use `return value` to yield a result"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size (default: {width:1280, height:720})"),
-        waitForEditor: z.boolean().optional().describe("Wait for wp.data + editor-canvas readiness (default: true)"),
+        post_id: z.number(),
+        script: z.string().describe("Wrapped in an IIFE; use `return` to yield a value"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
+        waitForEditor: z.boolean().optional().describe("Wait for wp.data and the editor canvas (default true)"),
         session_id: sessionIdSchema,
         site: siteSchema,
       },
@@ -232,22 +211,16 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "check_block",
       description:
-        "Comprehensive block validation. Inserts a block (optionally with inner_blocks), " +
-        "checks registration and validity, captures console errors, takes editor + frontend screenshots, " +
-        "extracts frontend HTML, and runs an accessibility check. Saves the post before reading the frontend. " +
-        "Returns all results in one call. On template-locked FSE posts the block is inserted into the editable " +
-        "post body (core/post-content), not the locked template canvas root, so the validity verdict reflects " +
-        "the real block instead of a false negative.",
+        "Insert a block, save the post, and return registration, validity, console errors, editor and frontend screenshots, " +
+        "frontend HTML, and an accessibility check. On template-locked FSE posts it inserts into core/post-content.",
       schema: {
-        post_id: z.number().describe("WordPress post ID to use for testing"),
-        block_name: z.string().describe('Block name (e.g. "my-plugin/my-block")'),
-        attributes: z.record(z.string(), z.unknown()).optional().describe("Block attributes to set"),
-        inner_blocks: z.array(innerBlockSchema).optional().describe(
-          "Children to seed under this block (recursive). Each node: { name, attributes?, innerBlocks? }.",
-        ),
-        frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
-        viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Viewport size"),
-        outputDir: z.string().optional().describe(`Output directory (default: "${defaultOutputDir}")`),
+        post_id: z.number(),
+        block_name: z.string().describe('e.g. "my-plugin/my-block"'),
+        attributes: z.record(z.string(), z.unknown()).optional(),
+        inner_blocks: z.array(innerBlockSchema).optional(),
+        frontend_selector: z.string().optional().describe("CSS selector for the block on the frontend"),
+        viewport: z.object({ width: z.number(), height: z.number() }).optional(),
+        outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -259,8 +232,8 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       name: "publish",
       description: "Save or publish a WordPress post via the Gutenberg editor.",
       schema: {
-        post_id: z.number().describe("WordPress post ID"),
-        status: z.enum(["publish", "draft", "pending", "private"]).optional().describe('Post status (default: "publish")'),
+        post_id: z.number(),
+        status: z.enum(["publish", "draft", "pending", "private"]).optional().describe('Default "publish"'),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -271,52 +244,30 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "block_html",
       description:
-        "Return normalized HTML for a specific block in both editor and frontend contexts. " +
-        "Strips editor-only noise (Gutenberg internals, RichText UX, components-* chrome, " +
-        "InnerBlocks appender chrome, useBlockProps decoration, default classes for " +
-        "supports.className:false blocks) so the two strings can be compared structurally. " +
-        "Project-specific runtime artifacts (intersection-observer markers, scroll listeners, " +
-        "hydration flags) can be passed via strip_attributes / strip_classes / strip_css_vars / " +
-        "strip_subtrees — strips are applied symmetrically to both editor and frontend HTML. " +
-        "On block-theme posts the editor wraps the post body in a canvas template tree where " +
-        "core/post-content is a leaf; the default source:\"auto\" detects this and resolves the " +
-        "target block against the parsed post body instead. Pass source:\"template\" to force " +
-        "the canvas-tree resolution or source:\"post_content\" to force the parsed-post-body path.",
+        "Return a block's editor and frontend HTML, normalized for structural comparison (Gutenberg editor-only markup removed). " +
+        "The strip_* params remove project-specific runtime markup from both sides.",
       schema: {
-        post_id: z.number().describe("WordPress post ID"),
-        block_index: z.number().optional().describe("Top-level block index, 0-based (default: 0)"),
+        post_id: z.number(),
+        block_index: z.number().optional().describe("Top-level index, 0-based (default 0)"),
         client_id: z.string().optional().describe(
-          "Block clientId. Not usable with source: \"post_content\" — parsed-post-body blocks " +
-          "have synthetic clientIds that don't match the inner BlockEditor store; pass " +
-          "block_name, block_path, or block_index instead.",
+          "Not usable with source \"post_content\"; use block_name, block_path, or block_index there",
         ),
-        block_path: z.array(z.number()).optional().describe("Path to a nested block"),
-        block_name: z.string().optional().describe("Block name — auto-detected from the editor when omitted"),
-        frontend_selector: z.string().optional().describe("Custom CSS selector to locate the block on the frontend"),
-        save_before_frontend: z.boolean().optional().describe("Publish + save before reading the frontend (default: true)"),
+        block_path: z.array(z.number()).optional().describe("Nested block path"),
+        block_name: z.string().optional().describe("Default: detected from the editor"),
+        frontend_selector: z.string().optional().describe("CSS selector for the block on the frontend"),
+        save_before_frontend: z.boolean().optional().describe("Publish and save first (default true)"),
         source: z.enum(["auto", "template", "post_content"]).optional().describe(
-          "Which block tree to resolve the target in. " +
-          "\"auto\" (default): if the canvas tree contains a core/post-content leaf, parse " +
-          "wp.data.select(\"core/editor\").getEditedPostContent() and resolve there; otherwise " +
-          "resolve against the canvas tree. Behaviorally identical to \"template\" on classic-theme " +
-          "posts (no leaf). " +
-          "\"template\": always resolve against wp.data.select(\"core/block-editor\").getBlocks() — " +
-          "on block-theme posts this is the template-wrapped view (core/post-content shows as a stub). " +
-          "\"post_content\": always parse getEditedPostContent() into a block tree and resolve there. " +
-          "Use when the inserted block lives in post body on a block-theme post.",
+          "Block tree to find the target in. \"auto\" (default): the parsed post body on block-theme posts, else the editor tree. " +
+          "\"template\": the editor tree (template-wrapped on block themes). \"post_content\": the parsed post body.",
         ),
         strip_attributes: z.array(z.string()).optional().describe(
-          'Project-specific attributes to strip globally on every element. Each entry is either an exact name (e.g. "data-scroll-rotate-ready") or a trailing-* prefix pattern (e.g. "data-scroll-rotate-*").',
+          'Attribute names, exact or trailing-* prefix (e.g. "data-scroll-*")',
         ),
-        strip_classes: z.array(z.string()).optional().describe(
-          "Project-specific class names to strip from class lists on every element (exact match).",
-        ),
+        strip_classes: z.array(z.string()).optional().describe("Exact class names"),
         strip_css_vars: z.array(z.string()).optional().describe(
-          'CSS custom property names to remove from inline style attributes on every element. Include the leading -- (e.g. "--scroll-rotate"). Other declarations on the same element are preserved.',
+          'Custom properties to drop from inline styles, with the leading -- (e.g. "--scroll-rotate")',
         ),
-        strip_subtrees: z.array(z.string()).optional().describe(
-          "Class names that mark project-specific editor chrome. Any element bearing one of these classes is removed entirely with its subtree.",
-        ),
+        strip_subtrees: z.array(z.string()).optional().describe("Elements with any of these classes are removed with their subtree"),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
@@ -328,13 +279,10 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "clear_blocks",
       description:
-        "Reset a WordPress post's block list to empty and save. " +
-        "Useful for deterministic flows that wipe and rebuild the page each run. " +
-        "On template-locked FSE posts it empties only the core/post-content inner blocks, leaving the " +
-        "surrounding template intact; on classic / post-only posts it resets the whole list.",
+        "Remove all blocks from a post and save. On template-locked FSE posts only core/post-content is emptied; the template stays.",
       schema: {
-        post_id: z.number().describe("WordPress post ID to clear"),
-        skip_save: z.boolean().optional().describe("Clear in memory but don't save (default: false)"),
+        post_id: z.number(),
+        skip_save: z.boolean().optional().describe("Don't save (default false)"),
         session_id: sessionIdSchema,
         site: siteSchema,
         allow_write: allowWriteSchema,
