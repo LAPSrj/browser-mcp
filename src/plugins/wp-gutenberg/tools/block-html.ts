@@ -1,7 +1,13 @@
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
-import { navigateToEditor, getEditorFrame, checkEditorError } from "../utils/editor.js";
+import {
+  navigateToEditor,
+  checkEditorError,
+  trackBlockRendererRequests,
+  waitForBlockToSettle,
+  type EditorBlockLocator,
+} from "../utils/editor.js";
 import {
   getBlockClientIdByIndex,
   getBlockClientIdByPath,
@@ -73,6 +79,25 @@ export function createBlockHtmlHandler(
       sessionHooks: [siteAuthHook(site)],
     });
 
+    // Count ServerSideRender requests from the first editor paint on, so the
+    // settle wait below knows when the block's server markup has arrived.
+    const rendererTracker = trackBlockRendererRequests(resolved.page);
+
+    // The editor first paints server-rendered blocks without their markup
+    // and template-locked post content in a disabled state, then re-renders
+    // both; reading before that makes two calls return different HTML.
+    const settle = async (locator: EditorBlockLocator): Promise<ToolResponse | null> => {
+      try {
+        await waitForBlockToSettle(resolved.page, locator, rendererTracker);
+        return null;
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: (e as Error).message }],
+          isError: true,
+        };
+      }
+    };
+
     try {
       await navigateToEditor(resolved.page, post_id, site, sites);
 
@@ -143,11 +168,15 @@ export function createBlockHtmlHandler(
           };
         }
 
+        const anchor = (target.attributes.anchor as string | undefined) ?? null;
+        const settleError = await settle({ name: target.name, sameNameIndex: target.sameNameIndex, anchor });
+        if (settleError) return settleError;
+
         const located = await locatePostContentBlockElement(
           resolved.page,
           target.name,
           target.sameNameIndex,
-          (target.attributes.anchor as string | undefined) ?? null,
+          anchor,
         );
         if (!located) {
           return {
@@ -190,6 +219,9 @@ export function createBlockHtmlHandler(
             isError: true,
           };
         }
+
+        const settleError = await settle({ clientId: targetClientId });
+        if (settleError) return settleError;
 
         const editorInfo = await resolved.page.evaluate((cid) => {
           const wp = (window as any).wp;
@@ -343,6 +375,7 @@ export function createBlockHtmlHandler(
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      rendererTracker.dispose();
       await resolved.cleanup();
     }
   };

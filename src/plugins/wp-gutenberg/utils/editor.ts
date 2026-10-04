@@ -45,6 +45,156 @@ export async function waitForEditor(page: Page): Promise<void> {
   }
 }
 
+/** How to find one block's element in the editor canvas. */
+export type EditorBlockLocator =
+  | { clientId: string }
+  | { name: string; sameNameIndex: number; anchor: string | null };
+
+export interface BlockRendererTracker {
+  inFlight(): number;
+  dispose(): void;
+}
+
+const isBlockRendererUrl = (url: string): boolean =>
+  url.includes("/wp/v2/block-renderer/") || url.includes("wp%2Fv2%2Fblock-renderer%2F");
+
+/**
+ * Count the page's in-flight /wp/v2/block-renderer/ requests (ServerSideRender).
+ * Attach before navigating to the editor so the first renders are counted.
+ * Tracks request objects, not a counter, so a request that started before
+ * attaching can't drive the count below zero.
+ */
+export function trackBlockRendererRequests(page: Page): BlockRendererTracker {
+  const pending = new Set<unknown>();
+  const onRequest = (r: { url(): string }) => {
+    if (isBlockRendererUrl(r.url())) pending.add(r);
+  };
+  const onDone = (r: unknown) => { pending.delete(r); };
+  page.on("request", onRequest);
+  page.on("requestfinished", onDone);
+  page.on("requestfailed", onDone);
+  return {
+    inFlight: () => pending.size,
+    dispose: () => {
+      page.off("request", onRequest);
+      page.off("requestfinished", onDone);
+      page.off("requestfailed", onDone);
+    },
+  };
+}
+
+/**
+ * Wait until a block's editor markup is final, so one read matches the next:
+ *
+ *   - no pending server render: no [data-not-ready="true"] under
+ *     #filtered-server-side-render-root (FilteredServerSideRender's hidden
+ *     node) in the page or canvas document, and no in-flight
+ *     /wp/v2/block-renderer/ request;
+ *   - no stale disabled markup: in template-locked mode the editor first
+ *     paints post-content blocks as is-editing-disabled and re-renders them
+ *     after the store's editing mode settles, so an is-editing-disabled
+ *     wrapper whose store mode isn't "disabled" is still waiting for that
+ *     re-render;
+ *   - the block's outerHTML has been unchanged for `quietMs`.
+ *
+ * Throws on timeout with the conditions that were still unmet.
+ */
+export async function waitForBlockToSettle(
+  page: Page,
+  locator: EditorBlockLocator,
+  tracker: BlockRendererTracker | null,
+  opts: { quietMs?: number; timeoutMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  const quietMs = opts.quietMs ?? 400;
+  const timeoutMs = opts.timeoutMs ?? 15000;
+  const pollMs = opts.pollMs ?? 50;
+  const start = Date.now();
+  let lastHtml: string | null | undefined;
+  let stableSince = start;
+
+  for (;;) {
+    const probe = await page.evaluate((loc) => {
+      const iframe = document.querySelector('iframe[name="editor-canvas"]') as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument || document;
+      const docs = doc === document ? [document] : [document, doc];
+      let pendingFssr = 0;
+      for (const d of docs) {
+        pendingFssr += d.querySelectorAll('#filtered-server-side-render-root [data-not-ready="true"]').length;
+      }
+
+      let el: Element | null = null;
+      if ("clientId" in loc) {
+        el = doc.querySelector(`[data-block="${CSS.escape(loc.clientId)}"]`);
+      } else {
+        if (loc.anchor) el = doc.getElementById(loc.anchor);
+        if (!el) {
+          const wrapper = doc.querySelector('[data-type="core/post-content"]');
+          const same = wrapper
+            ? Array.from(wrapper.querySelectorAll(`[data-type="${CSS.escape(loc.name)}"]`))
+            : [];
+          el = same[loc.sameNameIndex] ?? null;
+        }
+      }
+      if (!el) return { html: null as string | null, pendingFssr, staleDisabled: 0 };
+
+      let staleDisabled = 0;
+      const be = (window as any).wp?.data?.select?.("core/block-editor");
+      if (be && typeof be.getBlockEditingMode === "function") {
+        const wrappers = [el, ...Array.from(el.querySelectorAll("[data-block]"))];
+        for (const w of wrappers) {
+          if (!w.classList.contains("is-editing-disabled")) continue;
+          const cid = w.getAttribute("data-block");
+          if (!cid || !be.getBlock?.(cid)) continue;
+          if (be.getBlockEditingMode(cid) !== "disabled") staleDisabled++;
+        }
+      }
+      return { html: el.outerHTML, pendingFssr, staleDisabled };
+    }, locator);
+
+    const now = Date.now();
+    if (probe.html !== lastHtml) {
+      lastHtml = probe.html;
+      stableSince = now;
+    }
+    const inFlight = tracker?.inFlight() ?? 0;
+    const quietFor = now - stableSince;
+    if (
+      probe.html !== null &&
+      probe.pendingFssr === 0 &&
+      inFlight === 0 &&
+      probe.staleDisabled === 0 &&
+      quietFor >= quietMs
+    ) {
+      return;
+    }
+
+    if (now - start >= timeoutMs) {
+      const unmet: string[] = [];
+      if (probe.html === null) unmet.push("the block's element is not in the editor canvas");
+      if (probe.pendingFssr > 0) {
+        unmet.push(
+          `${probe.pendingFssr} server-side render(s) still pending ` +
+          `(#filtered-server-side-render-root [data-not-ready="true"])`,
+        );
+      }
+      if (inFlight > 0) unmet.push(`${inFlight} /wp/v2/block-renderer/ request(s) still in flight`);
+      if (probe.staleDisabled > 0) {
+        unmet.push(
+          `${probe.staleDisabled} block wrapper(s) still show is-editing-disabled ` +
+          `while the block-editor store's editing mode is not "disabled"`,
+        );
+      }
+      if (probe.html !== null && quietFor < quietMs) {
+        unmet.push(`the block's DOM changed ${quietFor} ms ago (needs ${quietMs} ms without changes)`);
+      }
+      throw new Error(
+        `Timed out after ${timeoutMs} ms waiting for the block's editor markup to settle: ${unmet.join("; ")}.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
 /**
  * Get the editor canvas frame. WP 6.x+ renders blocks inside an iframe.
  * Returns the iframe Frame if present, otherwise the main page (WP < 6.0).
