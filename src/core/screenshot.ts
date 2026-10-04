@@ -6,6 +6,7 @@ import { navigateTo } from "../utils/navigate.js";
 import { formatDiagnostic } from "../utils/page-diagnostics.js";
 import { saveFile, generateFilename } from "../utils/file.js";
 import { createPreviewBuffer } from "../utils/resize.js";
+import { settlePageForCapture, formatSettleWarning } from "../utils/settle-element.js";
 
 export interface ScreenshotParams extends BrowserStackTarget {
   url: string;
@@ -56,7 +57,7 @@ export async function screenshotTool(params: ScreenshotParams) {
     endX,
   } = params;
 
-  const tasks: Promise<{ result: ScreenshotResult; consoleLogs: ConsoleEntry[]; actionStop?: ActionStopResult; assertions: AssertionResult[]; pageError?: string }>[] = [];
+  const tasks: Promise<{ result: ScreenshotResult; consoleLogs: ConsoleEntry[]; actionStop?: ActionStopResult; assertions: AssertionResult[]; pageError?: string; settleWarning?: string }>[] = [];
 
   for (const browserName of browsers) {
     for (const vp of viewports) {
@@ -111,7 +112,13 @@ export async function screenshotTool(params: ScreenshotParams) {
               type: "png",
             };
 
-            if (startY !== undefined || endY !== undefined || startX !== undefined || endX !== undefined) {
+            const clipped = startY !== undefined || endY !== undefined || startX !== undefined || endX !== undefined;
+            // Full-page and clipped captures show content below the viewport,
+            // which scroll-reveal pages keep hidden until it's scrolled to.
+            const settle = await settlePageForCapture(session.page, { scrollThrough: fullPage || clipped });
+            const settleWarning = settle.settled ? undefined : formatSettleWarning(settle, "The page");
+
+            if (clipped) {
               const clipX = startX ?? 0;
               const clipY = startY ?? 0;
               const clipWidth = (endX ?? vp.width) - clipX;
@@ -148,6 +155,7 @@ export async function screenshotTool(params: ScreenshotParams) {
               consoleLogs,
               actionStop,
               assertions,
+              settleWarning: settleWarning ? `${browserName} ${vpLabel}: ${settleWarning}` : undefined,
             };
           } finally {
             await closeSession(session);
@@ -185,6 +193,10 @@ export async function screenshotTool(params: ScreenshotParams) {
 
   if (actionStop) {
     content.push({ type: "text", text: formatActionStop(actionStop) });
+  }
+
+  for (const r of results) {
+    if (r.settleWarning) content.push({ type: "text", text: r.settleWarning });
   }
 
   const assertionsMsg = formatAssertions(allAssertions);

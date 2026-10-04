@@ -18,6 +18,7 @@ import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { findDiffClusters, formatClusters } from "../../../utils/diff-clusters.js";
 import { annotateClusters } from "../../../utils/cluster-dom-hints.js";
 import { resolveGutenbergSession } from "../utils/session.js";
+import { settleElementForCapture, formatSettleWarning } from "../../../utils/settle-element.js";
 
 /**
  * Composite: (post_id, block identifier, referenceImage) → (score, diff PNG,
@@ -170,7 +171,7 @@ export function createCompareBlockHandler(
 
       const matchedSelector = lookup.matches[0].matchedBy;
       const locator = resolved.page.locator(matchedSelector).first();
-      await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
+      const settle = await settleElementForCapture(locator);
       const box = await locator.boundingBox();
       if (!box) {
         return {
@@ -266,7 +267,9 @@ export function createCompareBlockHandler(
           { type: "text", text: formatClusters(clusters, clipX, clipY, clusterAnnotations).join("\n") || "(no significant diff clusters)" },
         ],
       };
-      if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
+      const warnings = [...resolved.warnings];
+      if (!settle.settled) warnings.push(formatSettleWarning(settle, "The frontend block"));
+      if (warnings.length > 0) response._warnings = warnings;
       return response;
     } finally {
       await resolved.cleanup();

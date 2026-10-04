@@ -14,6 +14,7 @@ import {
 } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
 import { resolveGutenbergSession } from "../utils/session.js";
+import { settleElementForCapture, settlePageForCapture, formatSettleWarning } from "../../../utils/settle-element.js";
 
 export function createScreenshotBlockHandler(
   core: CoreUtils,
@@ -222,7 +223,8 @@ export function createScreenshotBlockHandler(
               const matchedSelector = lookup.matches[0].matchedBy;
               const locator = resolved.page.locator(matchedSelector).first();
               try {
-                await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
+                const settle = await settleElementForCapture(locator);
+                if (!settle.settled) content.push({ type: "text", text: formatSettleWarning(settle, "The frontend block") });
                 const box = await locator.boundingBox();
                 if (box) {
                   if (frontend_padding > 0) {
@@ -256,6 +258,8 @@ export function createScreenshotBlockHandler(
           }
 
           if (!frontendBuffer) {
+            const settle = await settlePageForCapture(resolved.page, { scrollThrough: true });
+            if (!settle.settled) content.push({ type: "text", text: formatSettleWarning(settle, "The frontend page") });
             frontendBuffer = await resolved.page.screenshot({ type: "png", fullPage: true });
           }
 

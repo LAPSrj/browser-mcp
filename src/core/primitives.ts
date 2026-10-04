@@ -12,6 +12,12 @@ import { sessionManager } from "./sessions.js";
 import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator } from "../utils/locator.js";
 import { diagnosePageErrors } from "../utils/page-diagnostics.js";
+import {
+  settleElementForCapture,
+  settlePageForCapture,
+  formatSettleWarning,
+  type SettleResult,
+} from "../utils/settle-element.js";
 
 // All the user-replicable browser primitives — the things a human can do
 // in a browser without opening DevTools. Each primitive accepts an
@@ -1081,9 +1087,16 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
         ? (path.isAbsolute(p.output_path) ? p.output_path : path.join(outputDir, p.output_path))
         : path.join(outputDir, `capture-${Date.now()}.png`);
       await ensureOutput(filePath);
-      const buf = p.selector
-        ? await resolveLocator(page, p.selector).first().screenshot({ type: "png" })
-        : await page.screenshot({ type: "png", fullPage: p.full_page === true });
+      let settle: SettleResult | null = null;
+      let buf: Buffer;
+      if (p.selector) {
+        const target = resolveLocator(page, p.selector).first();
+        settle = await settleElementForCapture(target);
+        buf = await target.screenshot({ type: "png" });
+      } else {
+        settle = await settlePageForCapture(page, { scrollThrough: p.full_page === true });
+        buf = await page.screenshot({ type: "png", fullPage: p.full_page === true });
+      }
       await fs.writeFile(filePath, buf);
       return json({
         path: filePath,
@@ -1091,6 +1104,9 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
         selector: p.selector ?? null,
         url: page.url(),
         title: await page.title().catch(() => ""),
+        ...(settle && !settle.settled
+          ? { warning: formatSettleWarning(settle, p.selector ? "The element" : "The page") }
+          : {}),
       });
     },
   },

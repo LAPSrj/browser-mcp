@@ -5,6 +5,7 @@ import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget,
 import { navigateTo } from "../utils/navigate.js";
 import { formatDiagnostic } from "../utils/page-diagnostics.js";
 import { saveFile, generateFilename } from "../utils/file.js";
+import { settleElementForCapture, formatSettleWarning } from "../utils/settle-element.js";
 
 export interface ElementScreenshotParams extends BrowserStackTarget {
   url: string;
@@ -55,6 +56,7 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
     const element = session.page.locator(selector);
     await element.waitFor({ state: "visible", timeout: 10000 });
 
+    const settle = await settleElementForCapture(element);
     const screenshotBuffer = await element.screenshot({ type: "png" });
 
     const filename = generateFilename({
@@ -70,6 +72,9 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
     }
     if (assertionsMsg) {
       content.push({ type: "text", text: assertionsMsg });
+    }
+    if (!settle.settled) {
+      content.push({ type: "text", text: formatSettleWarning(settle) });
     }
     content.push(
       {
