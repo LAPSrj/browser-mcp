@@ -16,11 +16,7 @@ import { saveFile } from "./file.js";
  * inline. Error results stay inline and write no file, so the caller sees the
  * error directly.
  */
-export async function applyResultPath(
-  result: any,
-  resultPath: string | undefined,
-  outputDir: string,
-): Promise<any> {
+export async function applyResultPath(result: any, resultPath: string | undefined): Promise<any> {
   if (!result || !Array.isArray(result.content)) return result;
   const { _summary: summary, ...rest } = result;
   if (!resultPath || rest.isError) return rest;
@@ -37,8 +33,8 @@ export async function applyResultPath(
   }
 
   const body = texts.map((c: { text: string }) => c.text).join("\n");
-  const filePath = path.isAbsolute(resultPath) ? resultPath : path.join(outputDir, resultPath);
-  const absPath = await saveFile(filePath, body);
+  // Relative to the working directory, like output_dir / outputDir.
+  const absPath = await saveFile(path.resolve(resultPath), body);
   const bytes = Buffer.byteLength(body);
   const sha256 = createHash("sha256").update(body).digest("hex");
   const line =

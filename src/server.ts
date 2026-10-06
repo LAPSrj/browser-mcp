@@ -39,9 +39,59 @@ function appendModeWarning(result: any, use: UseParam): any {
   return result;
 }
 
+const toCamel = (k: string) => k.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+/**
+ * Check a call's arguments against the tool's schema keys. Tools are
+ * registered with loose schemas, so arguments the schema doesn't define
+ * reach here instead of being dropped by zod. An argument that differs from
+ * a defined one only in snake_case vs camelCase (outputDir for output_dir)
+ * is renamed; any other unknown argument is an error, so a misspelled
+ * destination never falls back to the default folder.
+ *
+ * Also fills an omitted output_dir / outputDir with the server's default
+ * (BROWSER_MCP_OUTPUT_DIR), so every tool that writes files uses the same
+ * folder.
+ */
+export function normalizeArgs(
+  toolName: string,
+  known: Set<string>,
+  params: Record<string, unknown>,
+  outputDir: string,
+): { params: Record<string, unknown> } | { error: string } {
+  const out: Record<string, unknown> = {};
+  const unknown: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (known.has(key)) {
+      out[key] = value;
+      continue;
+    }
+    const target = [toCamel(key), toSnake(key)].find((k) => k !== key && known.has(k));
+    if (!target) {
+      unknown.push(key);
+      continue;
+    }
+    if (target in params && JSON.stringify(params[target]) !== JSON.stringify(value)) {
+      return { error: `${toolName}: ${key} and ${target} are the same argument but have different values.` };
+    }
+    out[target] = value;
+  }
+  if (unknown.length > 0) {
+    return {
+      error:
+        `${toolName} doesn't accept ${unknown.join(", ")}. Nothing was run. ` +
+        `Accepted arguments: ${[...known].join(", ")}.`,
+    };
+  }
+  for (const key of ["output_dir", "outputDir"]) {
+    if (known.has(key) && out[key] === undefined) out[key] = outputDir;
+  }
+  return { params: out };
+}
+
 function withTimeout<T extends { use?: UseParam }>(
   timeoutMs: number,
-  outputDir: string,
   fn: (params: Omit<T, "use">) => Promise<any>,
   registry?: PluginRegistry,
 ): (params: T) => Promise<any> {
@@ -58,7 +108,7 @@ function withTimeout<T extends { use?: UseParam }>(
     const rawUrl = (params as { url?: unknown }).url;
     const ctx = createToolContext(sessionHooks, typeof rawUrl === "string" ? rawUrl : undefined);
     // result_path only reaches here for tools registered with resultFile
-    // (zod drops it from every other schema); the tool itself never sees it.
+    // (normalizeArgs rejects it for every other tool); the tool itself never sees it.
     // stripUse returns a copy, so deleting from it leaves `params` intact.
     const toolParams = stripUse(params) as Omit<T, "use"> & { result_path?: string };
     const resultPath = toolParams.result_path;
@@ -80,7 +130,6 @@ function withTimeout<T extends { use?: UseParam }>(
         const result = await applyResultPath(
           await Promise.race([fn(toolParams), timeoutPromise]),
           resultPath,
-          outputDir,
         );
         // Fail-loud on a dropped mode: `use:` resolved hooks but no code path
         // consumed them (e.g. a mode passed to open_session / a session_id
@@ -118,7 +167,30 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   const defaultOutputDir = config.outputDir ?? ".browser";
 
   const wrap = <T extends { use?: UseParam }>(fn: (params: Omit<T, "use">) => Promise<any>) =>
-    withTimeout<T>(toolTimeout, defaultOutputDir, fn, registry);
+    withTimeout<T>(toolTimeout, fn, registry);
+
+  // Every tool goes through here: a loose schema keeps unknown arguments so
+  // normalizeArgs can rename or reject them instead of zod dropping them.
+  const register = (
+    name: string,
+    description: string,
+    shape: Record<string, unknown>,
+    handler: (params: any) => Promise<any>,
+  ) => {
+    const known = new Set(Object.keys(shape));
+    const run = wrap(handler);
+    server.registerTool(
+      name,
+      { description, inputSchema: z.object(shape as z.ZodRawShape).loose() } as any,
+      (async (params: Record<string, unknown>) => {
+        const n = normalizeArgs(name, known, params ?? {}, defaultOutputDir);
+        if ("error" in n) {
+          return { content: [{ type: "text" as const, text: `Error: ${n.error}` }], isError: true };
+        }
+        return run(n.params as any);
+      }) as any,
+    );
+  };
 
   const urlDescription = config.baseUrl
     ? `Absolute URL or path relative to ${config.baseUrl}`
@@ -135,7 +207,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   }
 
   // ---------- multi_screenshot ----------
-  server.tool(
+  register(
     "multi_screenshot",
     "Screenshot a URL across several browsers and viewports in one call, in fresh ephemeral browsers (no cookies, auth, or state). " +
       "For a page in an existing session use screenshot({session_id}); for one element use element_screenshot. " +
@@ -171,11 +243,11 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       endX: z.number().optional().describe("Clip right, px (default viewport width)"),
       ...useSchemaField,
     },
-    wrap(async (params) => screenshotTool(resolveParams(params)) as any),
+    async (params) => screenshotTool(resolveParams(params)) as any,
   );
 
   // ---------- element_screenshot ----------
-  server.tool(
+  register(
     "element_screenshot",
     "Screenshot one element (CSS selector) of a URL in a fresh ephemeral browser (no cookies or auth). " +
       "For an element in an existing session use screenshot({session_id, selector}). " +
@@ -191,7 +263,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       ...browserStackFields,
       ...useSchemaField,
     },
-    wrap(async (params) => elementScreenshotTool(resolveParams(params)) as any),
+    async (params) => elementScreenshotTool(resolveParams(params)) as any,
   );
 
   // ---------- list_modes ----------
@@ -225,7 +297,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- Core primitives (sessions, navigation, interaction, waits, reads, tabs, cookies/storage, capture, save, dialogs) ----------
   const primitives = allPrimitives();
   for (const [name, def] of Object.entries(primitives)) {
-    server.tool(name, def.description, def.schema, wrap(def.handler));
+    register(name, def.description, def.schema, def.handler);
   }
 
   // Sessions outlive a single tool call; make sure process exit closes them.
@@ -234,10 +306,8 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
   // ---------- Plugin-registered tools ----------
   if (registry) {
     for (const tool of registry.getTools()) {
-      const schema = tool.resultFile
-        ? { ...tool.schema, ...resultPathField(defaultOutputDir) }
-        : tool.schema;
-      server.tool(tool.name, tool.description, schema, wrap(tool.handler));
+      const schema = tool.resultFile ? { ...tool.schema, ...resultPathField() } : tool.schema;
+      register(tool.name, tool.description, schema, tool.handler);
     }
   }
 

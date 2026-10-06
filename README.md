@@ -469,10 +469,18 @@ Result written to /abs/path/audit.json (14128 bytes, sha256 96af…f6f6). elemen
 
 The file holds exactly the text the tool would have returned inline
 (several text parts joined by newlines), so its sha256 identifies the result
-and a consumer can parse it the same way. Relative paths resolve under
-`BROWSER_MCP_OUTPUT_DIR`; an existing file is overwritten. Errors and images
-are still returned inline. A plugin opts a tool in with `resultFile: true` and
-can return a `_summary` string for the line.
+and a consumer can parse it the same way. Relative paths resolve against the
+working directory, like `output_dir`; an existing file is overwritten. Errors
+and images are still returned inline. A plugin opts a tool in with
+`resultFile: true` and can return a `_summary` string for the line.
+
+### Tool arguments
+
+An argument that differs from one the tool defines only in snake_case vs
+camelCase is renamed (`outputDir` works on `screenshot`, `output_dir` on
+`multi_screenshot`). Any other argument the tool doesn't define is an error
+and the tool doesn't run, so a misspelled destination never falls back to the
+default folder.
 
 ## Actions
 
@@ -574,7 +582,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | Variable | Default | Description |
 |---|---|---|
 | `BROWSER_MCP_BASE_URL` | — | Prefix for relative URLs in tool params. |
-| `BROWSER_MCP_OUTPUT_DIR` | `.browser` | Artifacts directory (screenshots, videos, traces). |
+| `BROWSER_MCP_OUTPUT_DIR` | `.browser` | Artifacts directory (screenshots, videos, traces, downloads) for any call that doesn't pass `output_dir` / `outputDir`. |
 | `BROWSER_MCP_PLUGINS` | — | Comma-separated plugin names to load (e.g. `dev,wp,wp-gutenberg`). |
 | `BROWSER_MCP_MAX_BROWSERS` | `3` | Max concurrent ephemeral browser launches. `0` = unlimited. |
 | `BROWSER_MCP_MAX_SESSIONS` | `5` | Max persistent sessions open at once. `0` = unlimited. |

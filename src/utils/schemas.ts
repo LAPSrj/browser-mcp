@@ -119,13 +119,13 @@ export const useSchemaField = {
 // should be able to keep them out of its context. Added by the server to
 // every plugin tool registered with `resultFile: true`; applied by
 // applyResultPath (utils/result-file.ts).
-export function resultPathField(outputDir: string) {
+export function resultPathField() {
   return {
     result_path: z
       .string()
       .optional()
       .describe(
-        `Write the text result to this file (relative to "${outputDir}", overwrites) instead of inline. ` +
+        "Write the text result to this file (relative to the working directory, overwrites) instead of inline. " +
           "The response becomes \"Result written to <path> (<bytes> bytes, sha256 <hex>).\" plus a short summary. " +
           "Images and errors stay inline.",
       ),

@@ -5,7 +5,7 @@
 // 1. applyResultPath on hand-built results (no browser).
 // 2. The MCP server end to end over an in-memory transport, with a fake
 //    plugin: the schema field appears only on flagged tools, the file holds
-//    exactly the inline text, and unflagged tools ignore result_path.
+//    exactly the inline text, and unflagged tools reject result_path.
 // 3. design_audit through the server against a local fixture page (launches
 //    Chromium).
 import fs from "node:fs";
@@ -50,26 +50,29 @@ console.log("1. applyResultPath");
   const r = await applyResultPath(
     { content: [{ type: "text", text: "inline" }], _summary: "s" },
     undefined,
-    tmp,
   );
   check(r.content[0].text === "inline" && !("_summary" in r), "no path: inline, _summary dropped", r);
 }
 
 {
   const img = { type: "image", data: "AAAA", mimeType: "image/png" };
+  // A relative result_path resolves against the working directory, like
+  // output_dir does, so ".tmp/x" lands in <cwd>/.tmp/x.
+  const cwd = process.cwd();
+  process.chdir(tmp);
   const r = await applyResultPath(
     {
       content: [{ type: "text", text: "first" }, img, { type: "text", text: '{"a":1}' }],
       _summary: "two parts",
       _warnings: ["w"],
     },
-    "nested/out.txt",
-    tmp,
+    ".tmp/nested/out.txt",
   );
+  process.chdir(cwd);
   const m = r.content[0].text.match(LINE_RE);
-  const expectedPath = path.join(tmp, "nested/out.txt");
+  const expectedPath = path.join(fs.realpathSync(tmp), ".tmp/nested/out.txt");
   check(!!m, "summary line has the documented format", r.content[0].text);
-  check(m?.[1] === expectedPath, "relative path resolves under outputDir", m?.[1]);
+  check(m?.[1] === expectedPath, "relative path resolves under the working directory", m?.[1]);
   const body = fs.readFileSync(expectedPath, "utf-8");
   check(body === 'first\n{"a":1}', "text parts joined by newline", body);
   check(m?.[2] === String(Buffer.byteLength(body)), "byte count matches the file");
@@ -84,7 +87,6 @@ console.log("1. applyResultPath");
   const r = await applyResultPath(
     { content: [{ type: "text", text: "Error: boom" }], isError: true, _summary: "x" },
     abs,
-    tmp,
   );
   check(r.content[0].text === "Error: boom" && r.isError, "error stays inline");
   check(!fs.existsSync(abs), "error writes no file");
@@ -94,7 +96,6 @@ console.log("1. applyResultPath");
   const r = await applyResultPath(
     { content: [{ type: "image", data: "AAAA", mimeType: "image/png" }] },
     path.join(tmp, "img.txt"),
-    tmp,
   );
   check(
     r.content.length === 2 && /result_path ignored/.test(r.content[1].text),
@@ -172,7 +173,11 @@ try {
 
   const smallOut = path.join(tmp, "small.txt");
   const small = await client.callTool({ name: "fake_small", arguments: { result_path: smallOut } });
-  check(small.content[0].text === "small result" && !fs.existsSync(smallOut), "unflagged tool ignores result_path");
+  check(
+    small.isError && /doesn't accept result_path/.test(small.content[0].text) && !fs.existsSync(smallOut),
+    "unflagged tool rejects result_path",
+    small.content,
+  );
 
   // -------------------------------------------------------------------------
   console.log("3. design_audit through the server (Chromium)");

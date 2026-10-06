@@ -271,7 +271,7 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
       headless: z.boolean().optional(),
       idle_ttl_ms: z.number().optional(),
       wall_ttl_ms: z.number().optional(),
-      output_dir: z.string().optional().describe('Downloads go to <output_dir>/downloads (default ".browser")'),
+      output_dir: z.string().optional().describe('Downloads go to <output_dir>/downloads (default $BROWSER_MCP_OUTPUT_DIR, else ".browser")'),
     },
     handler: async (p) => json(await sessionManager.resumeSession(p)),
   },
@@ -1077,7 +1077,7 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
       selector: z.string().optional().describe("Crop to this element (same syntax as click)"),
       full_page: z.boolean().optional().describe("Default false"),
       output_path: z.string().optional().describe("Default <output_dir>/capture-<timestamp>.png"),
-      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default $BROWSER_MCP_OUTPUT_DIR, else ".browser")'),
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
@@ -1126,7 +1126,7 @@ export const savePrimitives: Record<string, PrimitiveDef> = {
       "Save the page as a PDF file; returns its path. Chromium only.",
     schema: {
       output_path: z.string().optional().describe("Default <output_dir>/page-<timestamp>.pdf"),
-      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default $BROWSER_MCP_OUTPUT_DIR, else ".browser")'),
       format: z.string().optional().describe('Paper format, e.g. "A4" (default "Letter")'),
       landscape: z.boolean().optional(),
       print_background: z.boolean().optional().describe("Default true"),
@@ -1157,7 +1157,7 @@ export const savePrimitives: Record<string, PrimitiveDef> = {
     description: "Save the page's full HTML to a file; returns path and bytes. To read HTML inline use get_html.",
     schema: {
       output_path: z.string().optional().describe("Default <output_dir>/page-<timestamp>.html"),
-      output_dir: z.string().optional().describe('Base for a relative output_path (default ".browser")'),
+      output_dir: z.string().optional().describe('Base for a relative output_path (default $BROWSER_MCP_OUTPUT_DIR, else ".browser")'),
       ...targetField,
       ...useSchemaField,
     },

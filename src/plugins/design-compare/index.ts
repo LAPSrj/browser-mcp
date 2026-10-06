@@ -172,7 +172,7 @@ const designComparePlugin: ScreenshotPlugin = {
         outputDir: z
           .string()
           .optional()
-          .describe('Default ".browser"'),
+          .describe(`Default "${config.outputDir ?? ".browser"}"`),
         useBrowserStack: z
           .boolean()
           .optional()

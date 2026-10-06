@@ -123,8 +123,7 @@ function parseArgs(args: string[]): Record<string, unknown> {
   return result;
 }
 
-export async function runCli(args: string[], registry?: PluginRegistry, outputDir = ".browser"): Promise<void> {
-  const toolName = args[0];
+export async function runCli(args: string[], registry?: PluginRegistry, outputDir = ".browser"): Promise<void> {  const toolName = args[0];
   const pluginToolNames = registry?.getTools().map((t) => t.name) ?? [];
 
   if (toolName === "--help" || toolName === "-h" || toolName === "help") {
@@ -156,6 +155,14 @@ export async function runCli(args: string[], registry?: PluginRegistry, outputDi
     params as { use?: UseParam },
   );
   if (toolName === "list_modes") toolParams._registry = registry;
+  // Same default folder as the server (BROWSER_MCP_OUTPUT_DIR). Tools without
+  // a schema here (multi_screenshot, element_screenshot) take outputDir.
+  const schema = PRIMITIVE_NAMES.includes(toolName)
+    ? primitiveDefs[toolName].schema
+    : registry?.getTools().find((t) => t.name === toolName)?.schema;
+  for (const key of schema ? ["output_dir", "outputDir"].filter((k) => k in schema) : ["outputDir"]) {
+    toolParams[key] ??= outputDir;
+  }
   const ctx = createToolContext(
     sessionHooks,
     typeof toolParams.url === "string" ? toolParams.url : undefined,
@@ -167,7 +174,6 @@ export async function runCli(args: string[], registry?: PluginRegistry, outputDi
         isCore ? runCoreTool(toolName, toolParams) : runPluginTool(toolName, toolParams, registry!),
       ),
       typeof resultPath === "string" ? resultPath : undefined,
-      outputDir,
     );
 
     for (const item of result.content) {
