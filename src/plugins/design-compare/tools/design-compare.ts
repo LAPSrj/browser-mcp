@@ -225,6 +225,7 @@ interface BrowserElementData {
   fontChecks: BrowserFontCheck[];
   tag: string;
   textContent: string;
+  direction: string;
 }
 
 interface BrowserBboxData {
@@ -335,6 +336,7 @@ export async function designCompareTool(params: DesignCompareParams) {
             fontChecks: [] as Array<{ property: string; font: string; loaded: boolean }>,
             tag: "",
             textContent: "",
+            direction: "ltr",
           };
 
           let all: NodeListOf<Element>;
@@ -425,6 +427,7 @@ export async function designCompareTool(params: DesignCompareParams) {
             fontChecks,
             tag: el.tagName.toLowerCase(),
             textContent: (el.textContent ?? "").trim().slice(0, 200),
+            direction: computed.getPropertyValue("direction"),
           };
         });
       },
@@ -469,7 +472,7 @@ export async function designCompareTool(params: DesignCompareParams) {
           const actualValue = browser.styles[property] ?? "";
           const resolvedExpected = browser.resolvedExpected[property] ?? expectedValue;
           totalProperties++;
-          const match = compareValues(property, resolvedExpected, actualValue, tolerance);
+          const match = compareValues(property, resolvedExpected, actualValue, tolerance, browser.direction);
           if (match) {
             elMatches++;
             totalMatches++;
@@ -494,6 +497,7 @@ export async function designCompareTool(params: DesignCompareParams) {
           browser.resolvedPseudoBefore,
           browser.pseudoBeforeExists,
           tolerance,
+          browser.direction,
         );
         pseudoResults.push(pr);
         totalProperties += pr.results.length;
@@ -511,6 +515,7 @@ export async function designCompareTool(params: DesignCompareParams) {
           browser.resolvedPseudoAfter,
           browser.pseudoAfterExists,
           tolerance,
+          browser.direction,
         );
         pseudoResults.push(pr);
         totalProperties += pr.results.length;
@@ -782,6 +787,7 @@ function comparePseudoElement(
   resolved: Record<string, string> | null,
   exists: boolean,
   tolerance: number,
+  direction: string,
 ): PseudoElementResult {
   if (!exists) {
     return {
@@ -803,7 +809,7 @@ function comparePseudoElement(
   const results: PropertyResult[] = Object.entries(expected).map(([property, expectedValue]) => {
     const actualValue = actual[property] ?? "";
     const resolvedExpected = resolved?.[property] ?? expectedValue;
-    const match = compareValues(property, resolvedExpected, actualValue, tolerance);
+    const match = compareValues(property, resolvedExpected, actualValue, tolerance, direction);
     if (match) {
       matches++;
       return { property, expected: expectedValue, actual: actualValue, match: true };
@@ -822,6 +828,7 @@ function compareValues(
   expected: string,
   actual: string,
   tolerance: number,
+  direction: string,
 ): boolean {
   const normExpected = expected.trim().toLowerCase();
   const normActual = actual.trim().toLowerCase();
@@ -833,7 +840,11 @@ function compareValues(
   }
 
   if (COLOR_PROPERTIES.has(property)) {
-    return normalizeColor(normExpected) === normalizeColor(normActual);
+    return colorsMatch(normExpected, normActual);
+  }
+
+  if (property === "text-align") {
+    return normalizeTextAlign(normExpected, direction) === normalizeTextAlign(normActual, direction);
   }
 
   if (KEYWORD_PROPERTIES.has(property)) {
@@ -881,20 +892,40 @@ function parseNumericValue(
   return { value: parseFloat(match[1]), unit: match[2] ?? "" };
 }
 
-function normalizeColor(color: string): string {
-  const hex = parseHexColor(color);
-  if (hex) return hex;
-
-  const rgb = parseRgbColor(color);
-  if (rgb) return `rgb(${rgb.r},${rgb.g},${rgb.b})`;
-
-  const named = NAMED_COLORS[color];
-  if (named) return named;
-
-  return color;
+/** start/end mean left/right in a left-to-right element and right/left in a right-to-left one. */
+function normalizeTextAlign(value: string, direction: string): string {
+  const rtl = direction.trim().toLowerCase() === "rtl";
+  if (value === "start") return rtl ? "right" : "left";
+  if (value === "end") return rtl ? "left" : "right";
+  return value;
 }
 
-function parseHexColor(color: string): string | null {
+interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+const ALPHA_TOLERANCE = 0.02;
+
+function colorsMatch(expected: string, actual: string): boolean {
+  const exp = parseColor(expected);
+  const act = parseColor(actual);
+  if (!exp || !act) return expected === actual;
+  return (
+    exp.r === act.r &&
+    exp.g === act.g &&
+    exp.b === act.b &&
+    Math.abs(exp.a - act.a) <= ALPHA_TOLERANCE
+  );
+}
+
+function parseColor(color: string): Rgba | null {
+  return parseHexColor(color) ?? parseRgbColor(color) ?? parseRgbColor(NAMED_COLORS[color] ?? "");
+}
+
+function parseHexColor(color: string): Rgba | null {
   const match = color.match(/^#([0-9a-f]{3,8})$/);
   if (!match) return null;
   let hex = match[1];
@@ -908,15 +939,17 @@ function parseHexColor(color: string): string | null {
   const r = parseInt(hex.slice(0, 2), 16);
   const g = parseInt(hex.slice(2, 4), 16);
   const b = parseInt(hex.slice(4, 6), 16);
-  return `rgb(${r},${g},${b})`;
+  const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+  return { r, g, b, a };
 }
 
-function parseRgbColor(color: string): { r: number; g: number; b: number } | null {
+function parseRgbColor(color: string): Rgba | null {
   const match = color.match(
-    /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)$/,
+    /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/,
   );
   if (!match) return null;
-  return { r: parseInt(match[1]), g: parseInt(match[2]), b: parseInt(match[3]) };
+  const a = match[4] !== undefined ? parseFloat(match[4]) : 1;
+  return { r: parseInt(match[1]), g: parseInt(match[2]), b: parseInt(match[3]), a };
 }
 
 const NAMED_COLORS: Record<string, string> = {
