@@ -14,6 +14,8 @@ export interface BrowserStackCaps {
    *  machine (e.g. http://clw.localhost/). Starts a shared tunnel daemon on
    *  demand and injects the `browserstack.local` caps. */
   local?: boolean;
+  /** Log file for the Local tunnel (see resolveLocalLogFile for the default). */
+  localLog?: string;
 }
 
 /**
@@ -121,7 +123,7 @@ export async function connectBrowserStack(caps: BrowserStackCaps): Promise<Brows
   // this session's browser disconnects (close_session, idle-reap, or crash).
   let localAcquired = false;
   if (caps.local) {
-    const localIdentifier = await browserStackLocalTunnel.acquire();
+    const localIdentifier = await browserStackLocalTunnel.acquire(caps.localLog);
     localAcquired = true;
     // String values throughout the caps payload, matching realMobile/idleTimeout.
     capsPayload["browserstack.local"] = "true";

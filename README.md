@@ -86,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`, `browserStackLocalLog`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -525,6 +525,7 @@ Per-call targeting:
 | `browserStackOsVersion` | desktop + device | `"11"` / `"Sequoia"` for desktop, or the iOS version (e.g. `"17"`) for a device. Desktop default `"11"`. |
 | `browserStackDevice` | real device | Real device name, e.g. `"iPhone 15 Pro Max"`. Routes the call to a **real iOS device running Apple Safari**. |
 | `browserStackLocal` | any | `true` opens a BrowserStack Local tunnel so the session can reach private / localhost URLs served from the MCP host. Needs `BROWSERSTACK_ACCESS_KEY`. See [Local URLs](#local-urls-browserstack-local) below. |
+| `browserStackLocalLog` | any | Tunnel log file. Default `$BROWSER_MCP_BROWSERSTACK_LOCAL_LOG`, else `<$BROWSER_MCP_OUTPUT_DIR or .browser>/browserstack-local.log`. Only applies to the call that starts the tunnel. |
 
 ```bash
 # Desktop WebKit on macOS Sonoma (NOT Safari — Playwright-WebKit on a Mac host)
@@ -561,6 +562,13 @@ reach URLs served from the machine running the MCP — `localhost`, a dev vhost,
 an internal-only host. The tunnel is a shared, ref-counted singleton: it comes
 up on the first tunneled session and tears down when the last one closes. Only
 `BROWSERSTACK_ACCESS_KEY` is required.
+
+The tunnel writes its log to `.browser/browserstack-local.log` (inside
+`BROWSER_MCP_OUTPUT_DIR` when set) instead of the `browserstack-local`
+package's default `local.log` in the working directory. Set
+`BROWSER_MCP_BROWSERSTACK_LOCAL_LOG` or pass `browserStackLocalLog` to put it
+elsewhere. The path is fixed when the tunnel starts, so a call that joins an
+already-running tunnel doesn't move its log.
 
 The URL you navigate to is not constrained by the MCP — you pass any host in
 `url` / `navigate`. Two things determine whether it actually resolves:
@@ -601,6 +609,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `WP_SESSION_TTL` | `3600` | Seconds to cache the WP login session. Also the default for `WP_SESSION_TTL_<NAME>`. |
 | `WP_REQUIRE_ALLOW_WRITE` | off | When `1`/`true`/`yes`/`on`, `wp-gutenberg` tools refuse to save posts on the site unless the call passes `allow_write: true`. |
 | `BROWSERSTACK_USERNAME` / `BROWSERSTACK_ACCESS_KEY` | — | Required when any tool is called with `useBrowserStack: true`. The access key also authenticates the `browserStackLocal` tunnel. See [BrowserStack](#browserstack). |
+| `BROWSER_MCP_BROWSERSTACK_LOCAL_LOG` | `<BROWSER_MCP_OUTPUT_DIR>/browserstack-local.log` | Log file for the `browserStackLocal` tunnel. A call's `browserStackLocalLog` overrides it. |
 
 ## Writing a plugin
 

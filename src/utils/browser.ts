@@ -245,6 +245,8 @@ export interface LaunchOptions {
   browserStackDevice?: string;
   /** Route the BrowserStack session through a Local tunnel to reach localhost/private URLs served from this machine. */
   browserStackLocal?: boolean;
+  /** Log file for the Local tunnel. Default <output dir>/browserstack-local.log. */
+  browserStackLocalLog?: string;
   /** Playwright storageState to inject auth cookies/localStorage into the context. */
   storageState?: object;
   /** Session hooks to run after context creation (e.g. plugin auth). */
@@ -263,6 +265,7 @@ export interface BrowserStackTarget {
   browserStackOsVersion?: string;
   browserStackDevice?: string;
   browserStackLocal?: boolean;
+  browserStackLocalLog?: string;
 }
 
 export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
@@ -271,6 +274,7 @@ export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
     browserStackOsVersion: p.browserStackOsVersion,
     browserStackDevice: p.browserStackDevice,
     browserStackLocal: p.browserStackLocal,
+    browserStackLocalLog: p.browserStackLocalLog,
   };
 }
 
@@ -305,7 +309,7 @@ interface LaunchResult {
 async function launchBrowserWithRetry(
   browserName: BrowserName,
   useBrowserStack: boolean,
-  browserStack?: { os?: string; osVersion?: string; device?: string; local?: boolean },
+  browserStack?: { os?: string; osVersion?: string; device?: string; local?: boolean; localLog?: string },
 ): Promise<LaunchResult> {
   let lastError: Error | undefined;
 
@@ -320,6 +324,7 @@ async function launchBrowserWithRetry(
           osVersion: browserStack?.osVersion,
           device: browserStack?.device,
           local: browserStack?.local,
+          localLog: browserStack?.localLog,
         };
         const browser = await connectBrowserStack(caps);
         return { browser };
@@ -368,6 +373,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       browserStackOsVersion,
       browserStackDevice,
       browserStackLocal,
+      browserStackLocalLog,
       storageState,
       sessionHooks,
       toolName = "",
@@ -378,6 +384,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       osVersion: browserStackOsVersion,
       device: browserStackDevice,
       local: browserStackLocal,
+      localLog: browserStackLocalLog,
     });
     server = launchResult.server;
     browser = launchResult.browser;

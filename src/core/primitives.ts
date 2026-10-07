@@ -36,6 +36,7 @@ interface CommonTarget {
   browserStackOsVersion?: string;
   browserStackDevice?: string;
   browserStackLocal?: boolean;
+  browserStackLocalLog?: string;
 }
 
 async function withPage<T>(

@@ -162,6 +162,12 @@ export const browserStackFields = {
     .describe(
       "Tunnel so BrowserStack can reach localhost/private URLs of the host running this server (on WSL, the WSL side). Needs useBrowserStack.",
     ),
+  browserStackLocalLog: z
+    .string()
+    .optional()
+    .describe(
+      'Tunnel log file (default $BROWSER_MCP_BROWSERSTACK_LOCAL_LOG, else <$BROWSER_MCP_OUTPUT_DIR or ".browser">/browserstack-local.log). Only applies when this call starts the tunnel.',
+    ),
 };
 
 export const sessionIdField = {

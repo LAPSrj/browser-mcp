@@ -1,5 +1,22 @@
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { getBrowserStackCredentials } from "./browserstack.js";
+
+/**
+ * Where the tunnel binary writes its log. Without an explicit path the
+ * browserstack-local package writes `local.log` into process.cwd(), which is
+ * usually the project the agent is working in. Order: the call's
+ * browserStackLocalLog, then BROWSER_MCP_BROWSERSTACK_LOCAL_LOG, then
+ * <BROWSER_MCP_OUTPUT_DIR or ".browser">/browserstack-local.log.
+ */
+export function resolveLocalLogFile(logFile?: string): string {
+  const chosen =
+    logFile ||
+    process.env.BROWSER_MCP_BROWSERSTACK_LOCAL_LOG ||
+    path.join(process.env.BROWSER_MCP_OUTPUT_DIR || ".browser", "browserstack-local.log");
+  return path.resolve(chosen);
+}
 
 // browserstack-local is a CommonJS package that wraps the BrowserStackLocal
 // binary (downloaded on first start). Load it lazily via createRequire so the
@@ -32,9 +49,10 @@ class BrowserStackLocalTunnel {
   /**
    * Ensure the tunnel is up and register interest in it. Returns the
    * localIdentifier to inject into the session caps. Callers MUST pair every
-   * successful acquire() with exactly one release().
+   * successful acquire() with exactly one release(). `logFile` only applies
+   * when this call starts the tunnel; a running tunnel keeps its log.
    */
-  async acquire(): Promise<string> {
+  async acquire(logFile?: string): Promise<string> {
     this.refs++;
     // If a teardown is mid-flight, let it settle before deciding to restart —
     // otherwise we could spawn a second binary while the first is still exiting.
@@ -42,7 +60,7 @@ class BrowserStackLocalTunnel {
       try { await this.stopPromise; } catch { /* ignore — we're about to (re)start */ }
     }
     if (this.local?.isRunning()) return this.identifier;
-    if (!this.startPromise) this.startPromise = this.start();
+    if (!this.startPromise) this.startPromise = this.start(logFile);
     try {
       return await this.startPromise;
     } catch (err) {
@@ -54,8 +72,11 @@ class BrowserStackLocalTunnel {
     }
   }
 
-  private start(): Promise<string> {
+  private start(logFile?: string): Promise<string> {
     const { accessKey } = getBrowserStackCredentials();
+    const resolvedLog = resolveLocalLogFile(logFile);
+    // The package truncates the log with writeFileSync, which fails if the folder is missing.
+    mkdirSync(path.dirname(resolvedLog), { recursive: true });
     const require = createRequire(import.meta.url);
     const { Local } = require("browserstack-local") as { Local: new () => LocalInstance };
     const local = new Local();
@@ -67,6 +88,7 @@ class BrowserStackLocalTunnel {
           localIdentifier: this.identifier,
           // Skip Live/App-Live plumbing we don't use.
           onlyAutomate: true,
+          logFile: resolvedLog,
           // Deliberately NOT force:true — that kills any other BrowserStackLocal
           // daemon on the machine (e.g. a tunnel started by hand). A unique
           // localIdentifier is what lets tunnels coexist.

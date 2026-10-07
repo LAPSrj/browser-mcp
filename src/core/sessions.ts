@@ -184,6 +184,8 @@ export interface OpenSessionOptions {
    * tunneled session closes. Requires BROWSERSTACK_ACCESS_KEY.
    */
   browserStackLocal?: boolean;
+  /** Log file for the Local tunnel. Default <output dir>/browserstack-local.log. */
+  browserStackLocalLog?: string;
   /**
    * Accept self-signed, expired, or otherwise invalid TLS certificates without
    * error. Set true for local dev servers with self-signed certs. Without this,
@@ -439,6 +441,7 @@ class SessionManager {
         osVersion: opts.browserStackOsVersion,
         device: opts.browserStackDevice,
         local: opts.browserStackLocal,
+        localLog: opts.browserStackLocalLog,
       });
     } else {
       const bt = getBrowserType(browserName);
