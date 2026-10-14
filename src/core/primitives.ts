@@ -266,6 +266,7 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         user_agent: z.string().optional(),
         locale: z.string().optional(),
         timezone: z.string().optional(),
+        has_touch: z.boolean().optional(),
         browser: z.enum(["chromium", "firefox", "webkit"]),
         paused_at: z.string(),
       }).describe("pause_session's snapshot, unchanged"),

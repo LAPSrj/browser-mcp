@@ -193,6 +193,13 @@ export interface OpenSessionOptions {
    */
   ignore_https_errors?: boolean;
   /**
+   * Emulate a touchscreen (Playwright hasTouch), so (pointer: coarse),
+   * (any-pointer: coarse) and (hover: none) match. Not with attach_cdp, which
+   * reuses the profile's existing context. Ignored on a real BrowserStack
+   * device, which is already touch.
+   */
+  has_touch?: boolean;
+  /**
    * Folder this session's downloads are saved into. Linux/WSL path, ~/...,
    * or (on WSL) a Windows path. Default: the browser's own download folder
    * for attach_cdp, <output_dir>/downloads otherwise.
@@ -250,6 +257,7 @@ export interface SessionSnapshot {
   user_agent?: string;
   locale?: string;
   timezone?: string;
+  has_touch?: boolean;
   /** Browser engine. resume_session refuses if the consumer requests a different engine. */
   browser: BrowserName;
   /** ISO timestamp the snapshot was taken — for debugging stale snapshots. */
@@ -293,6 +301,7 @@ interface Session {
     user_agent?: string;
     locale?: string;
     timezone?: string;
+    has_touch?: boolean;
   };
 }
 
@@ -342,6 +351,11 @@ class SessionManager {
     if (opts.useBrowserStack && opts.attach_cdp) {
       throw new Error(
         "useBrowserStack and attach_cdp are mutually exclusive — BrowserStack runs a remote cloud browser, attach_cdp attaches to a local Chromium-channel browser. Pick one.",
+      );
+    }
+    if (opts.has_touch && opts.attach_cdp) {
+      throw new Error(
+        "has_touch is not supported with attach_cdp: the session reuses the profile's existing browser context, and touch can only be set on a new one. Open a session without attach_cdp.",
       );
     }
 
@@ -532,6 +546,7 @@ class SessionManager {
       if (viewport) contextOpts.viewport = viewport;
       if (opts.storageState) contextOpts.storageState = opts.storageState;
       if (opts.ignore_https_errors) contextOpts.ignoreHTTPSErrors = true;
+      if (opts.has_touch && !opts.browserStackDevice) contextOpts.hasTouch = true;
       context = await browser.newContext(contextOpts as any);
       // Real devices boot slowly — first navigation can far exceed a local
       // browser, so give the context a generous default (matches ephemeral).
@@ -545,6 +560,7 @@ class SessionManager {
         timezoneId: opts.timezone,
         storageState: opts.storageState,
         ...(opts.ignore_https_errors ? { ignoreHTTPSErrors: true } : {}),
+        ...(opts.has_touch ? { hasTouch: true } : {}),
       };
       if (recordVideo && videoDir) {
         contextOpts.recordVideo = { dir: videoDir, size: viewport };
@@ -593,6 +609,7 @@ class SessionManager {
         user_agent: opts.user_agent,
         locale: opts.locale,
         timezone: opts.timezone,
+        has_touch: opts.has_touch,
       },
     };
     this.sessions.set(id, session);
@@ -1006,6 +1023,7 @@ class SessionManager {
       user_agent: s.pauseFields.user_agent,
       locale: s.pauseFields.locale,
       timezone: s.pauseFields.timezone,
+      has_touch: s.pauseFields.has_touch,
       browser: s.browserName,
       paused_at: new Date().toISOString(),
     };
@@ -1053,6 +1071,7 @@ class SessionManager {
       user_agent: snap.user_agent,
       locale: snap.locale,
       timezone: snap.timezone,
+      has_touch: snap.has_touch,
       storageState: snap.storage_state,
       headless: opts.headless,
       idle_ttl_ms: opts.idle_ttl_ms,

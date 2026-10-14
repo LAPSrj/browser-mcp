@@ -133,11 +133,20 @@ export function resultPathField() {
 }
 
 // BrowserStack targeting fields, shared across every tool that exposes
-// `useBrowserStack`. They select which BrowserStack platform the remote browser
-// runs on. Only meaningful when `useBrowserStack: true` on an ephemeral call
-// (no session_id); ignored for local browsers and for existing sessions.
-// Desktop default (no device) is Windows 11.
+// `useBrowserStack` and by open_session. They select which BrowserStack
+// platform the remote browser runs on. Only meaningful when
+// `useBrowserStack: true` on an ephemeral call (no session_id); ignored for
+// local browsers and for existing sessions. Desktop default (no device) is
+// Windows 11.
+// has_touch is here too because every ephemeral tool spreads these fields; it
+// applies to local and BrowserStack browsers alike, and to a new context only.
 export const browserStackFields = {
+  has_touch: z
+    .preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean())
+    .optional()
+    .describe(
+      "Emulate a touchscreen: (pointer: coarse), (any-pointer: coarse) and (hover: none) match. Ignored with session_id. Default false.",
+    ),
   browserStackOs: z
     .string()
     .optional()

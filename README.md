@@ -86,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`, `browserStackLocalLog`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `has_touch`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`, `browserStackLocalLog`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |
@@ -95,6 +95,18 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 Every interactive primitive accepts an optional `session_id` (plus `tab_id`
 for multi-tab sessions). Without `session_id`, the primitive runs against a
 throwaway ephemeral context.
+
+#### Touch devices (`has_touch`)
+
+Without it, every page is a desktop with a fine pointer and hover, at any
+viewport width, so CSS inside `@media (pointer: coarse)`,
+`(any-pointer: coarse)` or `(hover: none)` never applies. `has_touch: true`
+emulates a touchscreen so those queries match, for example to measure
+touch-target sizes at a phone viewport. It's accepted by `open_session` and by
+every tool that runs a one-shot browser (any tool with `useBrowserStack`), in
+Chromium, Firefox and WebKit, and `pause_session` keeps it. It sets up a new
+browser context, so it's ignored with `session_id` and rejected with
+`attach_cdp`. A real BrowserStack device is already touch and ignores it.
 
 #### Sessions + video
 

@@ -247,6 +247,8 @@ export interface LaunchOptions {
   browserStackLocal?: boolean;
   /** Log file for the Local tunnel. Default <output dir>/browserstack-local.log. */
   browserStackLocalLog?: string;
+  /** Emulate a touchscreen (Playwright hasTouch): coarse-pointer and hover:none media queries match. Ignored on a real BrowserStack device, which is already touch. */
+  has_touch?: boolean;
   /** Playwright storageState to inject auth cookies/localStorage into the context. */
   storageState?: object;
   /** Session hooks to run after context creation (e.g. plugin auth). */
@@ -257,8 +259,9 @@ export interface LaunchOptions {
 
 /**
  * The per-call BrowserStack targeting fields a tool receives (from
- * `browserStackFields` in its schema). Tool param interfaces can mix this in,
- * and `pickBrowserStack` forwards them into `launchSession` in one shot.
+ * `browserStackFields` in its schema), plus has_touch, which shares that
+ * fragment. Tool param interfaces can mix this in, and `pickBrowserStack`
+ * forwards them into `launchSession` in one shot.
  */
 export interface BrowserStackTarget {
   browserStackOs?: string;
@@ -266,6 +269,7 @@ export interface BrowserStackTarget {
   browserStackDevice?: string;
   browserStackLocal?: boolean;
   browserStackLocalLog?: string;
+  has_touch?: boolean;
 }
 
 export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
@@ -275,6 +279,7 @@ export function pickBrowserStack(p: BrowserStackTarget): BrowserStackTarget {
     browserStackDevice: p.browserStackDevice,
     browserStackLocal: p.browserStackLocal,
     browserStackLocalLog: p.browserStackLocalLog,
+    has_touch: p.has_touch,
   };
 }
 
@@ -374,6 +379,7 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
       browserStackDevice,
       browserStackLocal,
       browserStackLocalLog,
+      has_touch,
       storageState,
       sessionHooks,
       toolName = "",
@@ -406,6 +412,9 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     }
     if (storageState) {
       contextOptions.storageState = storageState;
+    }
+    if (has_touch && !browserStackDevice) {
+      contextOptions.hasTouch = true;
     }
     if (!useBrowserStack) {
       const ua = realisticUserAgent(browserName, browser);
