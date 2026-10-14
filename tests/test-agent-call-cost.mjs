@@ -3,6 +3,7 @@
 // MCP server over an in-memory transport. Launches Playwright Chromium.
 //
 // 1. element_screenshot inline_image:false returns only the saved path.
+// 2. A selector matching several elements gives a short strict-mode error.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -52,6 +53,18 @@ try {
     const saved = text.match(/Saved: (.+\.png)/)?.[1];
     check(!pathOnly.isError && pathOnly.content.every((c) => c.type === "text"), "inline_image:false returns text only", pathOnly.content);
     check(saved && fs.existsSync(saved), "the PNG is still saved", text);
+  }
+
+  // -------------------------------------------------------------------------
+  console.log("2. strict-mode error is short");
+  {
+    const links = Array.from({ length: 8 }, (_, i) => `<a href="#">${"long text ".repeat(40)}${i}</a>`).join("");
+    const url = html(links);
+    const shot = await client.callTool({ name: "element_screenshot", arguments: { url, selector: "a" } });
+    const text = shot.content[0]?.text ?? "";
+    check(shot.isError && /resolved to 8 elements/.test(text), "error names the match count", text);
+    check(/… 5 more/.test(text) && /nth=0/.test(text), "lists 3 matches, the rest as a count, and a hint", text);
+    check(text.length < 900 && !/\x1b\[/.test(text), `error is short (${text.length} chars) with no ANSI codes`, text);
   }
 } finally {
   await client.close();

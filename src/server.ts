@@ -14,6 +14,7 @@ import type { PluginRegistry } from "./plugins/registry.js";
 import { resolveModes, stripUse, type UseParam } from "./utils/resolve-modes.js";
 import { actionSchema, actionsDesc, useSchemaField, browserStackFields, resultPathField } from "./utils/schemas.js";
 import { applyResultPath } from "./utils/result-file.js";
+import { compactErrorMessage } from "./utils/errors.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
 
@@ -141,7 +142,7 @@ function withTimeout<T extends { use?: UseParam }>(
         return result;
       } catch (error) {
         return {
-          content: [{ type: "text" as const, text: `Error: ${(error as Error).message}` }],
+          content: [{ type: "text" as const, text: `Error: ${compactErrorMessage((error as Error).message)}` }],
           isError: true,
         };
       } finally {

@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
 import type { CustomActionHandler } from "../plugins/types.js";
 import { resolveLocator } from "./locator.js";
+import { compactErrorMessage } from "./errors.js";
 
 // Module-level custom action handlers from plugins.
 // Set once at startup by the server after loading plugins.
@@ -243,7 +244,7 @@ export async function runActions(
           stoppedAt: {
             index: i,
             action: act as Action,
-            error: (error as Error).message,
+            error: compactErrorMessage((error as Error).message),
           },
           assertions,
         };
