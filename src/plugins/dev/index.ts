@@ -444,7 +444,7 @@ const devPlugin: ScreenshotPlugin = {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        script: z.string().describe("Wrapped in an IIFE; use `return` to yield a value"),
+        script: z.string().describe("Body of an async function: `await` works, use `return` to yield a value"),
         browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
         actions: z.array(actionSchema).optional().describe(actionsDesc),

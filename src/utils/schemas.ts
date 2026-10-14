@@ -43,7 +43,7 @@ export const coreActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("evaluate"),
     script: z.string().describe(
-      "Runs in an IIFE; the return value is discarded (use evaluate_script to get it)",
+      "Runs in an async function (await works); the return value is discarded (use evaluate_script to get it)",
     ),
   }),
   z.object({

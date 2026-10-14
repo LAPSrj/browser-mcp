@@ -259,12 +259,14 @@ export async function runActions(
  *
  * Playwright's page.evaluate with a string evaluates it as a top-level
  * expression, so `return` throws a SyntaxError. Wrapping the body in an
- * IIFE lets `return` work naturally AND keeps existing statement-style
- * scripts working (they simply return undefined).
+ * async IIFE lets `return` and `await` work naturally AND keeps existing
+ * statement-style scripts working (they simply return undefined).
+ * page.evaluate awaits the returned promise.
  */
 export async function evaluateScript(page: Page, script: string): Promise<unknown> {
-  const wrapped = `(() => { ${script} })()`;
-  return page.evaluate(wrapped);
+  // The newline keeps a trailing `// comment` in the script from swallowing
+  // the closing brace.
+  return page.evaluate(`(async () => { ${script}\n})()`);
 }
 
 async function runAssertion(page: Page, index: number, act: Action): Promise<AssertionResult> {

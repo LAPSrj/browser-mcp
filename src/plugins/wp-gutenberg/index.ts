@@ -199,7 +199,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         "Run JS in a post's logged-in Gutenberg editor and return the value.",
       schema: {
         post_id: z.number(),
-        script: z.string().describe("Wrapped in an IIFE; use `return` to yield a value"),
+        script: z.string().describe("Body of an async function: `await` works, use `return` to yield a value"),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
         waitForEditor: z.boolean().optional().describe("Wait for wp.data and the editor canvas (default true)"),
         session_id: sessionIdSchema,

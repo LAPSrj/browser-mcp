@@ -163,5 +163,28 @@ console.log("\n=== Test 6: undefined / non-JSON results still produce string tex
   check(/use `return`/.test(parseText(res)), "missing-return hint included", parseText(res));
 }
 
+// ===========================================================================
+// 7. Top-level await works in the script and in an `evaluate` action, and a
+//    trailing line comment doesn't break the wrapper.
+// ===========================================================================
+console.log("\n=== Test 7: top-level await ===");
+{
+  const res = await evaluateScriptTool({
+    url: URL_A,
+    script: "const x = await Promise.resolve(5); return x;",
+  });
+  check(!res.isError && parseText(res) === "5", "await in script returns 5", parseText(res));
+
+  const withAction = await evaluateScriptTool({
+    url: URL_A,
+    actions: [{ action: "evaluate", script: "await new Promise((r) => setTimeout(r, 50)); window.__v = 7;" }],
+    script: "return window.__v",
+  });
+  check(!withAction.isError && parseText(withAction) === "7", "await in an evaluate action", parseText(withAction));
+
+  const commented = await evaluateScriptTool({ url: URL_A, script: "return 1 // trailing comment" });
+  check(!commented.isError && parseText(commented) === "1", "trailing line comment", parseText(commented));
+}
+
 console.log(`\n=== Total: ${pass} passed, ${fail} failed ===`);
 process.exit(fail > 0 ? 1 : 0);

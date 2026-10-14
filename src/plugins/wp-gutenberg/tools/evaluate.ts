@@ -3,6 +3,7 @@ import { siteAuthHook, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { resolveGutenbergSession } from "../utils/session.js";
+import { evaluateScript } from "../../../utils/actions.js";
 
 /**
  * Run arbitrary JS inside an authenticated Gutenberg editor page and return
@@ -83,13 +84,10 @@ export function createEvaluateHandler(
         ).catch(() => { /* tolerate — iframe may not exist on older WP */ });
       }
 
-      // Wrap in IIFE so top-level `return` works, matching evaluate_script.
-      const wrapped = `(() => { ${script} })()`;
-
       let value: unknown = undefined;
       let scriptError: string | undefined;
       try {
-        value = await resolved.page.evaluate(wrapped);
+        value = await evaluateScript(resolved.page, script);
       } catch (err) {
         scriptError = (err as Error).message;
       }
