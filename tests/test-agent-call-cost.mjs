@@ -4,6 +4,8 @@
 //
 // 1. element_screenshot inline_image:false returns only the saved path.
 // 2. A selector matching several elements gives a short strict-mode error.
+// 3. A click on a covered element fails in ~5 s and names the cover; a slow
+//    element still gets clicked, once.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +19,9 @@ const load = (p) => import(pathToFileURL(path.join(dist, p)).href);
 
 const { createServer } = await load("server.js");
 const { sessionManager } = await load("core/sessions.js");
+const { PluginRegistry } = await load("plugins/registry.js");
+const { resolveUrl } = await load("utils/url.js");
+const devPlugin = (await load("plugins/dev/index.js")).default;
 
 let failures = 0;
 function check(cond, label, detail) {
@@ -29,7 +34,10 @@ function check(cond, label, detail) {
 }
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "browser-mcp-call-cost-")));
-const server = createServer({ outputDir: tmp });
+const registry = new PluginRegistry();
+await registry.load(devPlugin, {}, { resolveUrl });
+registry.seal();
+const server = createServer({ outputDir: tmp }, registry);
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 await server.connect(serverTransport);
 const client = new Client({ name: "test", version: "0.0.0" });
@@ -66,10 +74,57 @@ try {
     check(/… 5 more/.test(text) && /nth=0/.test(text), "lists 3 matches, the rest as a count, and a hint", text);
     check(text.length < 900 && !/\x1b\[/.test(text), `error is short (${text.length} chars) with no ANSI codes`, text);
   }
+
+  // -------------------------------------------------------------------------
+  console.log("3. click on a covered element fails fast");
+  {
+    const covered = html(
+      '<button id="b" onclick="window.clicked=(window.clicked||0)+1">Go</button>' +
+        '<div id="veil" style="position:fixed;inset:0"></div>',
+    );
+    const open = await client.callTool({ name: "open_session", arguments: { url: covered } });
+    const sid = JSON.parse(open.content[0].text).session_id;
+    const read = async (expr) => {
+      const r = await client.callTool({ name: "evaluate_script", arguments: { session_id: sid, script: `return ${expr}` } });
+      return JSON.parse(r.content[0].text);
+    };
+
+    let t0 = Date.now();
+    const blocked = await client.callTool({ name: "click", arguments: { session_id: sid, selector: "#b" } });
+    const blockedMs = Date.now() - t0;
+    const text = blocked.content[0]?.text ?? "";
+    check(blocked.isError && /<div id="veil"><\/div> covers it/.test(text), "error names the covering element", text);
+    check(blockedMs < 9000, `fails in ${blockedMs} ms instead of 30 s`);
+
+    // An overlay that goes away within the 5 s window doesn't fail the click.
+    await client.callTool({
+      name: "evaluate_script",
+      arguments: { session_id: sid, script: "setTimeout(() => document.getElementById('veil').remove(), 1000)" },
+    });
+    const later = await client.callTool({ name: "click", arguments: { session_id: sid, selector: "#b" } });
+    check(!later.isError && (await read("window.clicked")) === 1, "click goes through once the overlay is removed", later.content);
+
+    // An element that shows up after the 5 s window still gets clicked once.
+    await client.callTool({
+      name: "evaluate_script",
+      arguments: {
+        session_id: sid,
+        script:
+          "document.getElementById('b').style.display='none';" +
+          "setTimeout(() => { document.getElementById('b').style.display=''; }, 6000)",
+      },
+    });
+    t0 = Date.now();
+    const slow = await client.callTool({ name: "click", arguments: { session_id: sid, selector: "#b", timeout: 15000 } });
+    check(!slow.isError && (await read("window.clicked")) === 2, `slow element clicked once after ${Date.now() - t0} ms`, slow.content);
+
+    await client.callTool({ name: "close_session", arguments: { session_id: sid } });
+  }
 } finally {
   await client.close();
   await server.close();
   await sessionManager.closeAll?.("test").catch(() => {});
+  await registry.destroyAll();
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 

@@ -10,7 +10,7 @@ import {
 } from "../utils/browser.js";
 import { sessionManager } from "./sessions.js";
 import { useSchemaField, browserStackFields } from "../utils/schemas.js";
-import { resolveLocator } from "../utils/locator.js";
+import { resolveLocator, pointerActionFailingFastWhenCovered } from "../utils/locator.js";
 import { diagnosePageErrors } from "../utils/page-diagnostics.js";
 import {
   settleElementForCapture,
@@ -384,7 +384,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
   click: {
     description:
       "Click an element. Returns its tag, role, href, and form action, plus any navigation (new URL, title, page error) " +
-      "or a warning for a disabled element.",
+      "or a warning for a disabled element. Fails after 5 s, naming the covering element, if another element stays on top of it.",
     schema: {
       ...selectorField,
       button: z.enum(["left", "right", "middle"]).optional().describe('Default "left"'),
@@ -432,7 +432,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
       const urlBefore = page.url();
 
-      await locator.click({
+      await pointerActionFailingFastWhenCovered(locator, "click", p.selector, {
         button: p.button,
         clickCount: p.click_count,
         force: p.force,
@@ -524,7 +524,10 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).hover({ force: p.force, timeout: p.timeout });
+      await pointerActionFailingFastWhenCovered(resolveLocator(page, p.selector), "hover", p.selector, {
+        force: p.force,
+        timeout: p.timeout,
+      });
       return ok(`Hovered ${p.selector}`);
     }),
   },

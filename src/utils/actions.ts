@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { CustomActionHandler } from "../plugins/types.js";
-import { resolveLocator } from "./locator.js";
+import { resolveLocator, pointerActionFailingFastWhenCovered } from "./locator.js";
 import { compactErrorMessage } from "./errors.js";
 
 // Module-level custom action handlers from plugins.
@@ -165,7 +165,7 @@ export async function runActions(
           const opts: Record<string, unknown> = {};
           if (timeout !== undefined) opts.timeout = timeout;
           if (a.force) opts.force = true;
-          await resolveLocator(page, a.selector).click(opts);
+          await pointerActionFailingFastWhenCovered(resolveLocator(page, a.selector), "click", a.selector, opts);
           break;
         }
         case "type": {
@@ -203,7 +203,7 @@ export async function runActions(
           const opts: Record<string, unknown> = {};
           if (timeout !== undefined) opts.timeout = timeout;
           if (a.force) opts.force = true;
-          await resolveLocator(page, a.selector).hover(opts);
+          await pointerActionFailingFastWhenCovered(resolveLocator(page, a.selector), "hover", a.selector, opts);
           break;
         }
         case "select": {

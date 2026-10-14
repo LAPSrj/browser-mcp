@@ -32,12 +32,13 @@ function backgroundBrowserPid(attachCdp: AttachCdpHandle | undefined): number | 
 }
 
 /**
- * Open a page without the browser taking focus: a background tab in its own
- * window, then push that window behind the user's window. Playwright's
- * newPage() opens a foreground tab and Chromium activates the window to show
- * it (verified live: focus taken every time). A background tab in an existing
- * window can't be screenshotted (hidden tab), so each tab gets its own window,
- * where it is always the selected tab.
+ * Open a page without the browser taking focus: a background tab in the
+ * browser's existing window, then push the window behind the user's window.
+ * Playwright's newPage() opens a foreground tab and Chromium activates the
+ * window to show it (verified live: focus taken every time). A background tab
+ * isn't drawn, so its screenshots hang (verified live on Edge: 0/6); the
+ * screencast from keepPageRendering makes it draw. Falls back to a new window
+ * when the browser has no window to put the tab in.
  */
 async function openBackgroundPage(context: BrowserContext, browserPid: number): Promise<Page> {
   const browser = context.browser();
@@ -46,7 +47,11 @@ async function openBackgroundPage(context: BrowserContext, browserPid: number): 
   const cdp = await browser.newBrowserCDPSession();
   let targetId: string;
   try {
-    ({ targetId } = await cdp.send("Target.createTarget", { url: "about:blank", newWindow: true, background: true }));
+    try {
+      ({ targetId } = await cdp.send("Target.createTarget", { url: "about:blank", newWindow: false, background: true }));
+    } catch {
+      ({ targetId } = await cdp.send("Target.createTarget", { url: "about:blank", newWindow: true, background: true }));
+    }
   } finally {
     await cdp.detach().catch(() => {});
   }
@@ -75,6 +80,24 @@ async function openBackgroundPage(context: BrowserContext, browserPid: number): 
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(`openBackgroundPage: page for target ${targetId} did not appear within 15s`);
+}
+
+/**
+ * Keep a page drawing while it isn't the selected tab of its window, so
+ * screenshots of it work. Chromium draws a tab while a screencast captures
+ * it; frames are acknowledged and dropped. A full-size screencast is needed:
+ * at 16px, element screenshots still hung (verified live on Edge: 18/18
+ * Playwright viewport, fullPage and element screenshots of background tabs
+ * with a full-size screencast, 0/6 without, focus never left the user's
+ * window). The screencast sends frames only when the page changes and stops
+ * when the page closes or browser-mcp disconnects.
+ */
+async function keepPageRendering(page: Page): Promise<void> {
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on("Page.screencastFrame", (f) => {
+    cdp.send("Page.screencastFrameAck", { sessionId: f.sessionId }).catch(() => {});
+  });
+  await cdp.send("Page.startScreencast", { format: "jpeg", quality: 10 });
 }
 
 /**
@@ -677,6 +700,15 @@ class SessionManager {
    */
   private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
     session.downloads.watchPage(page);
+    // Windows attach_cdp tabs share one window behind the user's windows, so
+    // all but one are background tabs that Chromium doesn't draw.
+    if (backgroundBrowserPid(session.attachCdp)) {
+      keepPageRendering(page).catch((e) => {
+        if (!page.isClosed()) {
+          console.error(`[browser-mcp] could not keep tab "${tabId}" drawing in the background; its screenshots may hang (${(e as Error).message})`);
+        }
+      });
+    }
     page.on("close", () => {
       if (session.closing) return; // closeInternal handles its own teardown
       session.pages.delete(tabId);
@@ -1131,10 +1163,9 @@ class SessionManager {
     }
     s.activeTabId = tab_id;
     const page = s.pages.get(tab_id)!;
-    // Windows attach_cdp: tabs from open_tab are each the selected tab of their
-    // own window, so they already render, and bringToFront would take focus
-    // from the user (verified live). Only a hidden tab (a popup or restored
-    // tab sharing a window) still needs selecting.
+    // Windows attach_cdp: tracked tabs keep drawing through keepPageRendering,
+    // and bringToFront would take focus from the user (verified live). Only a
+    // tab reporting itself hidden still gets selected.
     if (backgroundBrowserPid(s.attachCdp)) {
       const visibility = await page.evaluate(() => document.visibilityState).catch(() => "hidden");
       if (visibility === "visible") {
