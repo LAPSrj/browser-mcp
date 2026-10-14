@@ -5,7 +5,7 @@ import { PNG } from "pngjs";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
-import { navigateToEditor, checkEditorError } from "../utils/editor.js";
+import { navigateToEditor, checkEditorError, editorReturn } from "../utils/editor.js";
 import {
   getBlocks,
   getBlockClientIdByIndex,
@@ -93,6 +93,7 @@ export function createCompareBlockHandler(
       sessionHooks: [siteAuthHook(site)],
       viewport: resolvedViewport,
     });
+    const editor = editorReturn(resolved.page, !!session_id);
 
     try {
       await navigateToEditor(resolved.page, post_id, site, sites);
@@ -152,6 +153,7 @@ export function createCompareBlockHandler(
         };
       }
 
+      await editor.leave();
       await core.navigateTo(resolved.page, frontendUrl);
 
       const lookup = await findBlockOnFrontend(resolved.page, frontendHints, frontend_selector);
@@ -269,9 +271,12 @@ export function createCompareBlockHandler(
       };
       const warnings = [...resolved.warnings];
       if (!settle.settled) warnings.push(formatSettleWarning(settle, "The frontend block"));
+      const backWarning = await editor.back();
+      if (backWarning) warnings.push(backWarning);
       if (warnings.length > 0) response._warnings = warnings;
       return response;
     } finally {
+      await editor.back();
       await resolved.cleanup();
     }
   };

@@ -76,7 +76,8 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     // flows (clear → block_html → check) share editor state instead of each
     // tool re-navigating from scratch.
     const sessionIdSchema = z.string().optional().describe(
-      "open_session id; runs on its active page. Omit for a one-call ephemeral session.",
+      "open_session id; runs on its active page. Omit for a one-call ephemeral session. " +
+      "A tool that visits the frontend brings the page back to the editor, in the rendering mode it had, before returning.",
     );
 
     const siteSchema = z.string().optional().describe(

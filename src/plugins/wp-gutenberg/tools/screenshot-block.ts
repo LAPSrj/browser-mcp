@@ -2,7 +2,7 @@ import path from "node:path";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
-import { navigateToEditor, getEditorFrame, checkEditorError } from "../utils/editor.js";
+import { navigateToEditor, getEditorFrame, checkEditorError, editorReturn } from "../utils/editor.js";
 import {
   getBlocks,
   selectBlock,
@@ -66,6 +66,7 @@ export function createScreenshotBlockHandler(
       sessionHooks: [siteAuthHook(site)],
       viewport,
     });
+    const editor = editorReturn(resolved.page, !!session_id);
 
     try {
       const content: Array<{ type: string; [key: string]: unknown }> = [];
@@ -213,6 +214,7 @@ export function createScreenshotBlockHandler(
             text: "Could not determine frontend URL. The post may not be published.",
           });
         } else {
+          await editor.leave();
           await core.navigateTo(resolved.page, frontendUrl);
 
           let frontendBuffer: Buffer | undefined;
@@ -282,9 +284,12 @@ export function createScreenshotBlockHandler(
       }
 
       const response: ToolResponse = { content };
+      const backWarning = await editor.back();
+      if (backWarning) resolved.warnings.push(backWarning);
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      await editor.back();
       await resolved.cleanup();
     }
   };

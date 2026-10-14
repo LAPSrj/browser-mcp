@@ -6,6 +6,7 @@ import {
   checkEditorError,
   trackBlockRendererRequests,
   waitForBlockToSettle,
+  editorReturn,
   type EditorBlockLocator,
 } from "../utils/editor.js";
 import {
@@ -82,6 +83,7 @@ export function createBlockHtmlHandler(
     // Count ServerSideRender requests from the first editor paint on, so the
     // settle wait below knows when the block's server markup has arrived.
     const rendererTracker = trackBlockRendererRequests(resolved.page);
+    const editor = editorReturn(resolved.page, !!session_id);
 
     // The editor first paints server-rendered blocks without their markup
     // and template-locked post content in a disabled state, then re-renders
@@ -331,6 +333,7 @@ export function createBlockHtmlHandler(
       } else if (!frontendHints) {
         diagnostics.frontend_error = "Could not gather frontend hints (block name unknown).";
       } else {
+        await editor.leave();
         await core.navigateTo(resolved.page, frontendUrl);
         const lookup = await findBlockOnFrontend(resolved.page, frontendHints, frontend_selector);
         if (lookup.matches.length > 0) {
@@ -372,10 +375,13 @@ export function createBlockHtmlHandler(
           `${blockName ?? "unknown block"} (source ${effectiveSource}): ` +
           `editor ${editorHtml.length} chars, ${frontendPart}.`,
       };
+      const backWarning = await editor.back();
+      if (backWarning) resolved.warnings.push(backWarning);
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
       rendererTracker.dispose();
+      await editor.back();
       await resolved.cleanup();
     }
   };

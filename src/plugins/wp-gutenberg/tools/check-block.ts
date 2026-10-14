@@ -2,7 +2,7 @@ import path from "node:path";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
-import { navigateToEditor, waitForBlockType, checkEditorError } from "../utils/editor.js";
+import { navigateToEditor, waitForBlockType, checkEditorError, editorReturn } from "../utils/editor.js";
 import {
   insertBlock, getBlockInfoById, getPostContentClientId, isBlockRegistered,
   savePost, editPostStatus, getBlockFrontendHints,
@@ -56,6 +56,7 @@ export function createCheckBlockHandler(
     });
 
     const consoleErrors: string[] = [];
+    const editor = editorReturn(resolved.page, !!session_id);
 
     try {
       // Capture errors
@@ -152,6 +153,7 @@ export function createCheckBlockHandler(
           clientId,
         );
 
+        await editor.leave();
         await core.navigateTo(resolved.page, postInfo.link);
 
         // Frontend screenshot
@@ -200,8 +202,11 @@ export function createCheckBlockHandler(
         }
       }
 
-      // 7. Console errors
-      results.console_errors = consoleErrors;
+      // 7. Console errors, read before going back to the editor so the
+      // editor reload doesn't add its own.
+      results.console_errors = [...consoleErrors];
+      const backWarning = await editor.back();
+      if (backWarning) resolved.warnings.push(backWarning);
 
       content.push({
         type: "text",
@@ -229,12 +234,13 @@ export function createCheckBlockHandler(
         content,
         _summary:
           `${block_name}: registered ${results.is_registered}, valid ${results.is_valid}, ${frontendPart}, ` +
-          `${consoleErrors.length} console error(s). Editor: ${editorPath}` +
+          `${(results.console_errors as string[]).length} console error(s). Editor: ${editorPath}` +
           (results.frontend_screenshot ? ` | Frontend: ${results.frontend_screenshot}` : ""),
       };
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      await editor.back();
       await resolved.cleanup();
     }
   };

@@ -277,6 +277,53 @@ export async function navigateToEditor(
   await waitForEditor(page);
 }
 
+export interface EditorReturn {
+  /** Remember the editor URL and rendering mode. Call right before leaving the editor. */
+  leave(): Promise<void>;
+  /** Go back to the remembered editor. Returns a warning if that failed. No-op if leave() wasn't called. */
+  back(): Promise<string | null>;
+}
+
+/**
+ * Bring a caller-owned session back to the editor after a tool visits the
+ * frontend, in the rendering mode (e.g. "post-only") it had before, so the
+ * caller's next editor call doesn't have to navigate back and set it again.
+ * Disabled for ephemeral sessions, which close anyway.
+ */
+export function editorReturn(page: Page, enabled: boolean): EditorReturn {
+  let state: { url: string; renderingMode: string | null } | null = null;
+  return {
+    async leave() {
+      if (!enabled) return;
+      const renderingMode = await page.evaluate(() => {
+        const editor = (window as any).wp?.data?.select("core/editor");
+        return typeof editor?.getRenderingMode === "function" ? (editor.getRenderingMode() as string) : null;
+      }).catch(() => null);
+      state = { url: page.url(), renderingMode };
+    },
+    async back() {
+      if (!state) return null;
+      const { url, renderingMode } = state;
+      state = null;
+      try {
+        await page.goto(url, { waitUntil: "load", timeout: 30000 });
+        await waitForEditor(page);
+        if (renderingMode) {
+          await page.evaluate((mode) => {
+            const wp = (window as any).wp;
+            if (wp.data.select("core/editor").getRenderingMode() !== mode) {
+              wp.data.dispatch("core/editor").setRenderingMode(mode);
+            }
+          }, renderingMode);
+        }
+        return null;
+      } catch (e) {
+        return `Couldn't return the session to the editor (${url}); it may still be on the frontend: ${(e as Error).message}`;
+      }
+    },
+  };
+}
+
 /**
  * Wait for a specific block type to be registered in the block editor.
  * Custom blocks loaded via wp_enqueue_script may register after the editor is "ready".
