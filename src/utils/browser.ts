@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserServer, type BrowserContext, type Page } from "playwright";
 import { connectBrowserStack, type BrowserStackCaps } from "./browserstack.js";
@@ -298,14 +297,6 @@ export function getBrowserType(name: BrowserName): BrowserType {
   return bt;
 }
 
-function killStaleBrowserProcesses(): void {
-  try {
-    execSync("pkill -f chrome-headless-shell 2>/dev/null || true", { timeout: 5000 });
-  } catch {
-    // ignore — no stale processes or pkill unavailable
-  }
-}
-
 interface LaunchResult {
   server?: BrowserServer;
   browser: Browser;
@@ -319,6 +310,7 @@ async function launchBrowserWithRetry(
   let lastError: Error | undefined;
 
   for (let attempt = 1; attempt <= LAUNCH_RETRIES; attempt++) {
+    let server: BrowserServer | undefined;
     try {
       if (useBrowserStack) {
         // os/osVersion/device left undefined → connectBrowserStack defaults to
@@ -337,14 +329,18 @@ async function launchBrowserWithRetry(
 
       const bt = getBrowserType(browserName);
       const gpu = gpuLaunchOverrides(browserName);
-      const server = await bt.launchServer({ headless: true, timeout: LAUNCH_TIMEOUT, args: gpu.args, env: gpu.env, firefoxUserPrefs: gpu.firefoxUserPrefs });
+      server = await bt.launchServer({ headless: true, timeout: LAUNCH_TIMEOUT, args: gpu.args, env: gpu.env, firefoxUserPrefs: gpu.firefoxUserPrefs });
       const browser = await bt.connect(server.wsEndpoint());
       return { server, browser };
     } catch (error) {
       lastError = error as Error;
+      // A failed launchServer already killed its own process (Playwright does
+      // that). Only a server that launched but couldn't be connected to is
+      // left, so kill that one. Never pkill by name: other browser-mcp servers
+      // on this machine run the same browser binaries.
+      if (server) await killServerSafely(server);
 
       if (attempt < LAUNCH_RETRIES) {
-        killStaleBrowserProcesses();
         const delay = 1000 * attempt;
         await new Promise((r) => setTimeout(r, delay));
       }
