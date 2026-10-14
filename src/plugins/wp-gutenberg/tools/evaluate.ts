@@ -66,22 +66,12 @@ export function createEvaluateHandler(
 
       if (waitForEditor) {
         // wp.data is the baseline — available once the editor JS has booted.
+        // navigateToEditor → waitForEditor already waits for it and for the
+        // canvas iframe's document, so this is a cheap second check.
         await resolved.page.waitForFunction(
           () => typeof (window as any).wp !== "undefined" && (window as any).wp.data,
           { timeout: 15000 },
         );
-        // The editor canvas iframe exists on modern WP; wait for its
-        // contentDocument to be parseable so iframe-reaching scripts don't
-        // race the iframe load. Best-effort — older WPs without the iframe
-        // still pass through after a short wait.
-        await resolved.page.waitForFunction(
-          () => {
-            const iframe = document.querySelector('iframe[name="editor-canvas"]') as HTMLIFrameElement | null;
-            if (!iframe) return true; // no iframe on this WP version
-            return iframe.contentDocument?.readyState === "complete";
-          },
-          { timeout: 10000 },
-        ).catch(() => { /* tolerate — iframe may not exist on older WP */ });
       }
 
       let value: unknown = undefined;

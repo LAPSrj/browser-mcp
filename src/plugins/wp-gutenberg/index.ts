@@ -197,7 +197,9 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
     ctx.registerTool({
       name: "evaluate",
       description:
-        "Run JS in a post's logged-in Gutenberg editor and return the value.",
+        "Run JS in a post's logged-in Gutenberg editor and return the value. " +
+        "Waits for wp.data and the editor-canvas iframe's document first; use it instead of navigate + evaluate_script, " +
+        "which can run before Gutenberg has added the iframe.",
       schema: {
         post_id: z.number(),
         script: z.string().describe("Body of an async function: `await` works, use `return` to yield a value"),

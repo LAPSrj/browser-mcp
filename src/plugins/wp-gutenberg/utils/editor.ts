@@ -35,6 +35,22 @@ export async function waitForEditor(page: Page): Promise<void> {
     { timeout: 10000 },
   );
 
+  // On WP 6.x+ the blocks render in the editor-canvas iframe, whose document
+  // loads after the iframe element appears; until then contentDocument is
+  // null or still loading, and scripts that read it fail. No iframe (older
+  // WP, or the classic-mode wrapper matched above): nothing to wait for.
+  await page.waitForFunction(
+    () => {
+      const iframe = document.querySelector('iframe[name="editor-canvas"]') as HTMLIFrameElement | null;
+      if (!iframe) return true;
+      const doc = iframe.contentDocument;
+      return !!doc && doc.readyState === "complete" && !!doc.body;
+    },
+    { timeout: 10000 },
+  ).catch(() => {
+    throw new Error("The editor canvas iframe's document didn't finish loading within 10 s.");
+  });
+
   // Wait for any loading overlays to disappear
   const loadingOverlay = await page.$(".edit-post-layout__loading");
   if (loadingOverlay) {
