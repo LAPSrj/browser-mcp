@@ -259,6 +259,9 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
       viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Default {width:1280, height:720}"),
       actions: z.array(actionSchema).optional().describe(actionsDesc),
       outputDir: z.string().optional().describe(`Default "${defaultOutputDir}"`),
+      inline_image: z.boolean().optional().describe(
+        "Return the PNG inline (default true). false returns only the saved path, e.g. when the file goes to visual_diff",
+      ),
       useBrowserStack: z.boolean().optional().describe("Default false"),
       ...browserStackFields,
       ...useSchemaField,

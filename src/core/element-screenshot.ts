@@ -15,6 +15,7 @@ export interface ElementScreenshotParams extends BrowserStackTarget {
   actions?: AnyAction[];
   outputDir?: string;
   useBrowserStack?: boolean;
+  inline_image?: boolean;
 }
 
 export async function elementScreenshotTool(params: ElementScreenshotParams) {
@@ -26,6 +27,7 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
     actions = [],
     outputDir = ".browser",
     useBrowserStack = false,
+    inline_image = true,
   } = params;
 
   const session = await launchSession({
@@ -76,17 +78,17 @@ export async function elementScreenshotTool(params: ElementScreenshotParams) {
     if (!settle.settled) {
       content.push({ type: "text", text: formatSettleWarning(settle) });
     }
-    content.push(
-      {
+    if (inline_image) {
+      content.push({
         type: "image",
         data: screenshotBuffer.toString("base64"),
         mimeType: "image/png",
-      },
-      {
-        type: "text",
-        text: `Element: ${selector} | Browser: ${browser} | Saved: ${filePath}`,
-      },
-    );
+      });
+    }
+    content.push({
+      type: "text",
+      text: `Element: ${selector} | Browser: ${browser} | Saved: ${filePath}`,
+    });
 
     return { content };
   } finally {
