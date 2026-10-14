@@ -496,22 +496,35 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
   press_key: {
     description:
-      "Press a key or combo on the focused element, or on selector if given.",
+      "Press a key or combo, or a sequence of them, on the focused element (or on selector first if given). " +
+      "Returns the focused element after each key, so a keyboard walk needs no extra calls.",
     schema: {
-      key: z.string().describe("e.g. \"Enter\", \"Escape\", \"Control+A\", \"Shift+Tab\", \"ArrowDown\""),
-      selector: z.string().optional(),
+      key: z.string().optional().describe("e.g. \"Enter\", \"Escape\", \"Control+A\", \"Shift+Tab\", \"ArrowDown\". This or keys"),
+      keys: z.array(z.string()).optional().describe(
+        "Keys pressed in order, e.g. [\"Tab\",\"Tab\",\"Enter\"]. This or key",
+      ),
+      selector: z.string().optional().describe("Focus this element and press the first key on it; the rest go to whatever has focus then"),
       ...timeoutField,
       ...targetField,
       ...useSchemaField,
     },
-    handler: async (p) => withPage(p, async (page) => {
-      if (p.selector) {
-        await resolveLocator(page, p.selector).press(p.key, { timeout: p.timeout });
-      } else {
-        await page.keyboard.press(p.key);
-      }
-      return ok(`Pressed ${p.key}`);
-    }),
+    handler: async (p) => {
+      if ((p.key === undefined) === (p.keys === undefined)) return err("press_key needs exactly one of key or keys.");
+      const keys: string[] = p.keys ?? [p.key];
+      if (keys.length === 0) return err("keys is empty.");
+      return withPage(p, async (page) => {
+        const lines: string[] = [];
+        for (const [i, key] of keys.entries()) {
+          if (i === 0 && p.selector) {
+            await resolveLocator(page, p.selector).press(key, { timeout: p.timeout });
+          } else {
+            await page.keyboard.press(key);
+          }
+          lines.push(`${key} → focus: ${await describeFocus(page)}`);
+        }
+        return ok(keys.length === 1 ? `Pressed ${lines[0]}` : `Pressed ${keys.length} keys:\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n")}`);
+      });
+    },
   },
 
   hover: {
@@ -720,6 +733,30 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     }),
   },
 };
+
+// One-line description of document.activeElement for press_key, e.g.
+// `a#home "Home"` or `button[role=tab] "Pricing"`. Focus inside an iframe
+// shows as the iframe element.
+async function describeFocus(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const el = document.activeElement as HTMLElement | null;
+    if (!el || el === document.body || el === document.documentElement) return "(page body)";
+    const role = el.getAttribute("role");
+    const label = (
+      el.getAttribute("aria-label") ||
+      el.innerText ||
+      (el as HTMLInputElement).value ||
+      el.getAttribute("placeholder") ||
+      ""
+    ).trim().replace(/\s+/g, " ");
+    return (
+      el.tagName.toLowerCase() +
+      (el.id ? `#${el.id}` : "") +
+      (role ? `[role=${role}]` : "") +
+      (label ? ` "${label.length > 60 ? `${label.slice(0, 60)}…` : label}"` : "")
+    );
+  }).catch(() => "(unknown: the page navigated)");
+}
 
 // Minimal extension→MIME map for drop_to_upload. Dropzones usually only read
 // file.name/.size, but a correct type avoids accept-filter rejections.

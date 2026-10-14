@@ -6,6 +6,7 @@
 // 2. A selector matching several elements gives a short strict-mode error.
 // 3. A click on a covered element fails in ~5 s and names the cover; a slow
 //    element still gets clicked, once.
+// 4. press_key takes a key sequence and reports focus after each key.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -117,6 +118,35 @@ try {
     t0 = Date.now();
     const slow = await client.callTool({ name: "click", arguments: { session_id: sid, selector: "#b", timeout: 15000 } });
     check(!slow.isError && (await read("window.clicked")) === 2, `slow element clicked once after ${Date.now() - t0} ms`, slow.content);
+
+    await client.callTool({ name: "close_session", arguments: { session_id: sid } });
+  }
+
+  // -------------------------------------------------------------------------
+  console.log("4. press_key sequence reports focus after each key");
+  {
+    const url = html('<a id="home" href="#">Home</a><button aria-label="Open menu">≡</button><input id="q" placeholder="Search">');
+    const open = await client.callTool({ name: "open_session", arguments: { url } });
+    const sid = JSON.parse(open.content[0].text).session_id;
+
+    const seq = await client.callTool({ name: "press_key", arguments: { session_id: sid, keys: ["Tab", "Tab", "Tab", "Shift+Tab"] } });
+    const text = seq.content[0]?.text ?? "";
+    check(
+      !seq.isError &&
+        /^Pressed 4 keys:/.test(text) &&
+        /1\. Tab → focus: a#home "Home"/.test(text) &&
+        /2\. Tab → focus: button "Open menu"/.test(text) &&
+        /3\. Tab → focus: input#q "Search"/.test(text) &&
+        /4\. Shift\+Tab → focus: button "Open menu"/.test(text),
+      "one call walks the focus order",
+      text,
+    );
+
+    const single = await client.callTool({ name: "press_key", arguments: { session_id: sid, key: "Tab", selector: "#home" } });
+    check(/^Pressed Tab → focus: button "Open menu"$/.test(single.content[0]?.text ?? ""), "single key still works, with focus", single.content);
+
+    const both = await client.callTool({ name: "press_key", arguments: { session_id: sid, key: "Tab", keys: ["Tab"] } });
+    check(both.isError && /exactly one of key or keys/.test(both.content[0].text), "key and keys together is an error", both.content);
 
     await client.callTool({ name: "close_session", arguments: { session_id: sid } });
   }
