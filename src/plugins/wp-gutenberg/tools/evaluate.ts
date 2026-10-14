@@ -1,3 +1,4 @@
+import type { ConsoleMessage } from "playwright";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
@@ -45,14 +46,18 @@ export function createEvaluateHandler(
 
     const consoleEntries: Array<{ type: string; text: string }> = [];
     const pageErrors: string[] = [];
+    // Removed in finally, or each call on a session would leave its
+    // listeners on the page.
+    const onConsole = (msg: ConsoleMessage) => {
+      consoleEntries.push({ type: msg.type(), text: msg.text() });
+    };
+    const onPageError = (err: Error) => {
+      pageErrors.push(err.message);
+    };
 
     try {
-      resolved.page.on("console", (msg) => {
-        consoleEntries.push({ type: msg.type(), text: msg.text() });
-      });
-      resolved.page.on("pageerror", (err) => {
-        pageErrors.push(err.message);
-      });
+      resolved.page.on("console", onConsole);
+      resolved.page.on("pageerror", onPageError);
 
       await navigateToEditor(resolved.page, post_id, site, sites);
 
@@ -112,6 +117,8 @@ export function createEvaluateHandler(
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      resolved.page.off("console", onConsole);
+      resolved.page.off("pageerror", onPageError);
       await resolved.cleanup();
     }
   };

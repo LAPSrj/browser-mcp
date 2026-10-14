@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Page, Request, Response } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
@@ -65,11 +65,12 @@ export async function networkLogTool(params: NetworkLogParams) {
   // reusing a session, requests from prior tool calls / the initial page
   // load are NOT captured (Playwright only delivers events emitted while a
   // listener is registered). To capture a fresh load, pass url to navigate.
-  page.on("request", (request) => {
+  // Removed in finally, or each call on a session would leave its listeners
+  // on the page for the session's lifetime.
+  const onRequest = (request: Request) => {
     requestTimings.set(request.url(), Date.now());
-  });
-
-  page.on("response", (response) => {
+  };
+  const onResponse = (response: Response) => {
     const reqUrl = response.url();
     const startTime = requestTimings.get(reqUrl);
     const duration = startTime ? Date.now() - startTime : null;
@@ -86,7 +87,9 @@ export async function networkLogTool(params: NetworkLogParams) {
       contentType: response.headers()["content-type"] || null,
       duration,
     });
-  });
+  };
+  page.on("request", onRequest);
+  page.on("response", onResponse);
 
   try {
     if (url) await navigateTo(page, url);
@@ -161,6 +164,8 @@ export async function networkLogTool(params: NetworkLogParams) {
 
     return { content };
   } finally {
+    page.off("request", onRequest);
+    page.off("response", onResponse);
     if (cleanup) await cleanup();
   }
 }

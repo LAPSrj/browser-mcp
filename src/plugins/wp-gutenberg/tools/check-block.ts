@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { ConsoleMessage } from "playwright";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
@@ -57,17 +58,20 @@ export function createCheckBlockHandler(
 
     const consoleErrors: string[] = [];
     const editor = editorReturn(resolved.page, !!session_id);
+    // Capture errors. Removed in finally, or each call on a session would
+    // leave its listeners on the page.
+    const onConsole = (msg: ConsoleMessage) => {
+      if (msg.type() === "error") {
+        consoleErrors.push(msg.text());
+      }
+    };
+    const onPageError = (error: Error) => {
+      consoleErrors.push(error.message);
+    };
 
     try {
-      // Capture errors
-      resolved.page.on("console", (msg) => {
-        if (msg.type() === "error") {
-          consoleErrors.push(msg.text());
-        }
-      });
-      resolved.page.on("pageerror", (error) => {
-        consoleErrors.push(error.message);
-      });
+      resolved.page.on("console", onConsole);
+      resolved.page.on("pageerror", onPageError);
 
       const content: Array<{ type: string; [key: string]: unknown }> = [];
       const results: Record<string, unknown> = {};
@@ -240,6 +244,8 @@ export function createCheckBlockHandler(
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      resolved.page.off("console", onConsole);
+      resolved.page.off("pageerror", onPageError);
       await editor.back();
       await resolved.cleanup();
     }

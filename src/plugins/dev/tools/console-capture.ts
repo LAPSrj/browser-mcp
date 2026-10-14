@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Page } from "playwright";
+import type { ConsoleMessage, Page } from "playwright";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
@@ -69,17 +69,20 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
   // reusing a session, any console events emitted during prior tool calls
   // or the initial page load are NOT captured (Playwright only delivers
   // events emitted while a listener is registered on the Page).
-  page.on("console", (msg) => {
+  // Removed in finally, or each call on a session would leave its listeners
+  // on the page for the session's lifetime.
+  const onConsole = (msg: ConsoleMessage) => {
     consoleLogs.push({
       type: msg.type(),
       text: msg.text(),
       timestamp: Date.now(),
     });
-  });
-
-  page.on("pageerror", (error) => {
+  };
+  const onPageError = (error: Error) => {
     pageErrors.push(error.message);
-  });
+  };
+  page.on("console", onConsole);
+  page.on("pageerror", onPageError);
 
   try {
     if (url) await navigateTo(page, url);
@@ -165,6 +168,8 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
 
     return { content };
   } finally {
+    page.off("console", onConsole);
+    page.off("pageerror", onPageError);
     if (cleanup) await cleanup();
   }
 }

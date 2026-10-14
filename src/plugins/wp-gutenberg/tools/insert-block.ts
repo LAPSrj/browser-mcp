@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { ConsoleMessage } from "playwright";
 import type { CoreUtils, ToolResponse } from "../../types.js";
 import { siteAuthHook, assertCanWrite, type WpSites } from "../../wp/sites.js";
 import { resolveToolSite } from "../utils/site.js";
@@ -52,17 +53,20 @@ export function createInsertBlockHandler(
     });
 
     const consoleLogs: string[] = [];
+    // Capture console errors during the call. Removed in finally, or each
+    // call on a session would leave its listeners on the page.
+    const onConsole = (msg: ConsoleMessage) => {
+      if (msg.type() === "error") {
+        consoleLogs.push(msg.text());
+      }
+    };
+    const onPageError = (error: Error) => {
+      consoleLogs.push(error.message);
+    };
 
     try {
-      // Capture console errors during the whole session
-      resolved.page.on("console", (msg) => {
-        if (msg.type() === "error") {
-          consoleLogs.push(msg.text());
-        }
-      });
-      resolved.page.on("pageerror", (error) => {
-        consoleLogs.push(error.message);
-      });
+      resolved.page.on("console", onConsole);
+      resolved.page.on("pageerror", onPageError);
 
       await navigateToEditor(resolved.page, post_id, site, sites);
 
@@ -177,6 +181,8 @@ export function createInsertBlockHandler(
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {
+      resolved.page.off("console", onConsole);
+      resolved.page.off("pageerror", onPageError);
       await resolved.cleanup();
     }
   };
