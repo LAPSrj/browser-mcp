@@ -127,6 +127,40 @@ try {
     try { shot = await p.screenshot({ timeout: 5000 }); } catch (e) { shot = e; }
     check(Buffer.isBuffer(shot), `screenshot of ${label} succeeds`, String(shot?.message ?? ""));
   }
+
+  console.log("\n=== open_tab tabs share one window and screenshot in the background ===");
+  const colors = ["0,200,0", "0,0,255"];
+  const bgTabs = [];
+  for (const color of colors) {
+    const t = await sessionManager.addTab(
+      session.session_id,
+      undefined,
+      `data:text/html,<body style='margin:0'><div style='height:3000px;background:rgb(${color})'></div><div id=el style='height:200px;background:rgb(${color})'></div></body>`,
+    );
+    bgTabs.push({ page: sessionManager.getPage(session.session_id, t.tab_id), color });
+  }
+  const s3 = windowState(tag);
+  check(s3.windows.length === 1, "all tabs are in one window", JSON.stringify(s3));
+  checkBackground(s3, "after opening more tabs");
+  // Center pixel of a PNG, decoded in the first tab.
+  const centerPixel = (buf) => page.evaluate(async (b64) => {
+    const img = await createImageBitmap(await (await fetch("data:image/png;base64," + b64)).blob());
+    const ctx = new OffscreenCanvas(img.width, img.height).getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    return Array.from(ctx.getImageData(img.width >> 1, img.height >> 1, 1, 1).data.slice(0, 3)).join(",");
+  }, buf.toString("base64"));
+  for (const { page: p, color } of bgTabs) {
+    for (const [kind, fn] of [
+      ["viewport", () => p.screenshot({ timeout: 10000 })],
+      ["fullPage", () => p.screenshot({ fullPage: true, timeout: 10000 })],
+      ["element", () => p.locator("#el").screenshot({ timeout: 10000 })],
+    ]) {
+      let px;
+      try { px = await centerPixel(await fn()); } catch (e) { px = e.message.split("\n")[0]; }
+      check(px === color, `${kind} screenshot of background tab rgb(${color}) shows its content`, px);
+    }
+  }
+  check(!windowState(tag).fgIsOurs, "browser does not have focus (after background-tab screenshots)");
 } finally {
   await sessionManager.close(session.session_id);
 }
