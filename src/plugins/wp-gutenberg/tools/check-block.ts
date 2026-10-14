@@ -220,7 +220,18 @@ export function createCheckBlockHandler(
         });
       }
 
-      const response: ToolResponse = { content };
+      const frontendPart = results.frontend_html === undefined
+        ? "no frontend URL"
+        : results.frontend_html === null
+          ? "block not found on the frontend"
+          : `${results.frontend_match_count} frontend match(es) by ${results.frontend_matched_by}`;
+      const response: ToolResponse = {
+        content,
+        _summary:
+          `${block_name}: registered ${results.is_registered}, valid ${results.is_valid}, ${frontendPart}, ` +
+          `${consoleErrors.length} console error(s). Editor: ${editorPath}` +
+          (results.frontend_screenshot ? ` | Frontend: ${results.frontend_screenshot}` : ""),
+      };
       if (resolved.warnings.length > 0) response._warnings = resolved.warnings;
       return response;
     } finally {

@@ -127,7 +127,8 @@ const designComparePlugin: ScreenshotPlugin = {
       name: "design_audit",
       description:
         "design-compare_design_compare plus a pixel diff of rootSelector against a reference PNG or a reference URL (rendered in the same browser), cross-checked: " +
-        "diff clusters over elements with property mismatches are 'explained', the rest 'unexplained' (or 'excluded' via knownExclusions).",
+        "diff clusters over elements with property mismatches are 'explained', the rest 'unexplained' (or 'excluded' via knownExclusions). " +
+        "The result is often tens of thousands of characters; pass result_path to keep it out of context.",
       schema: {
         url: z.string().describe(auditUrlDesc),
         referenceImage: z.string().optional().describe("Design PNG path. This or referenceUrl"),

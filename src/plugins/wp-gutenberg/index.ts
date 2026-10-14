@@ -212,7 +212,8 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
       name: "check_block",
       description:
         "Insert a block, save the post, and return registration, validity, console errors, editor and frontend screenshots, " +
-        "frontend HTML, and an accessibility check. On template-locked FSE posts it inserts into core/post-content.",
+        "frontend HTML, and an accessibility check. On template-locked FSE posts it inserts into core/post-content. " +
+        "Without frontend_selector the result can exceed 30k characters; pass result_path to keep it out of context.",
       schema: {
         post_id: z.number(),
         block_name: z.string().describe('e.g. "my-plugin/my-block"'),
@@ -226,6 +227,7 @@ const wpGutenbergPlugin: ScreenshotPlugin = {
         allow_write: allowWriteSchema,
       },
       handler: createCheckBlockHandler(ctx.core, sites, defaultOutputDir),
+      resultFile: true,
     });
 
     ctx.registerTool({
