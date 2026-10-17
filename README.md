@@ -138,7 +138,9 @@ modes:
   real browser engine, real cookies, or installed extensions matter.
 - **Endpoint** — `attach_cdp: "http://localhost:9222"` attaches to a
   user-managed browser already running with CDP exposed. The MCP never
-  spawns or closes the browser in this mode.
+  spawns or closes the browser in this mode. On Windows it hides the
+  browser's window like an auto-launched one, and shows it again when the
+  last session on it closes.
 
 Per-call overrides: `executable_path` (path to the browser binary —
 overrides `BROWSER_MCP_EXECUTABLE_PATH`), `user_data_dir` (reuse an
@@ -147,7 +149,9 @@ override of the config default), `headless: false` (visible window — on
 WSL, attached Windows browsers are naturally headed),
 `restore_previous_tabs: true` (opt into Chromium's session-restore — by
 default browser-mcp closes restored tabs on attach so the agent isn't
-greeted by tabs from a prior run).
+greeted by tabs from a prior run). Tabs are never closed on a browser
+that other active sessions use, in this or another browser-mcp process;
+the new session gets its own tab instead.
 
 **Translate popup suppression.** Auto-generated temp profiles get
 `--disable-features=Translate,TranslateUI` AND a pre-seeded
@@ -158,6 +162,19 @@ the infobar is also gated on the per-profile pref. A user-supplied
 `BROWSER_MCP_AGENT_PROFILES`: when browser-mcp launches the browser on it,
 it sets `translate.enabled = false` in that profile's `Default/Preferences`
 and keeps every other pref.
+
+**Hidden window (Windows / WSL).** The browser starts hidden: its window
+is transparent and click-through, has no taskbar button and no Alt+Tab
+entry, never takes focus, and covers the screen's work area (the screen
+minus the taskbar). Chromium keeps drawing it, so screenshots and every
+other tool work while it's hidden. When the user has to log in, solve MFA
+or a captcha, or answer a prompt, the agent calls
+`set_window({ session_id, state: "show" })` to bring the window to the
+front with focus, on the session's active tab, then `state: "hide"` to hide it again and give focus
+back to the window the user was in. The state belongs to the browser, so
+every session on a shared profile sees the same window. A session that
+attaches to a browser another session already uses leaves its window as
+it is.
 
 **WSL transparency.** WSL2's NAT can't reach Windows-host loopback, so on
 WSL the auto-launch path additionally spawns a session-scoped Windows-side

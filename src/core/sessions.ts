@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Dialog, type Page } from "playwright";
 import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
-import { forceKillProfile, keepBrowserBehindUser, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
+import { forceKillProfile, otherProcessSessionCount, setBrowserWindows, spawnAttachCdpRelay, type AttachCdpHandle, type WindowResult } from "../utils/cdp-relay.js";
 import { readSidecar } from "../utils/browser-sidecar.js";
 import { execFileSync } from "node:child_process";
 import {
@@ -22,19 +22,55 @@ import { gotoUntilPrompt, PromptTracker, type PromptInfo } from "./prompts.js";
 // a configurable session cap, and a SIGTERM/SIGINT cleanup hook.
 
 /**
- * Browser root PID when this attach_cdp browser should stay behind the user's
- * windows (Windows: WSL or native; browsers we launched, or another session
- * launched on the same profile). null otherwise, including user-managed
- * browsers (attach_cdp: "http://…"), whose windows we leave alone.
+ * Browser root PID of an attach_cdp browser on Windows (WSL or native), whose
+ * windows browser-mcp hides. A browser we launched (or another session launched
+ * on the same profile) has it in its launch record; for a browser the user
+ * started (attach_cdp: "http://…") CDP reports it. null on other platforms,
+ * or when CDP can't report it.
  */
-function backgroundBrowserPid(attachCdp: AttachCdpHandle | undefined): number | null {
-  if (!attachCdp?.browserPid) return null;
-  return isWsl() || process.platform === "win32" ? attachCdp.browserPid : null;
+async function windowBrowserPid(browser: Browser, attachCdp: AttachCdpHandle | undefined): Promise<number | null> {
+  if (!isWsl() && process.platform !== "win32") return null;
+  if (attachCdp) return attachCdp.browserPid;
+  try {
+    const cdp = await browser.newBrowserCDPSession();
+    try {
+      const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+      return processInfo.find((p) => p.type === "browser")?.id ?? null;
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  } catch (e) {
+    console.error(`[browser-mcp] attach_cdp: could not read the browser's process id, so its window stays as it is (${(e as Error).message})`);
+    return null;
+  }
+}
+
+/**
+ * Size the browser window to the work area (the screen minus the taskbar) of
+ * the monitor it's on. A normal window that size covers the same space as a
+ * maximized one; maximizing instead took focus, and hiding the window undid
+ * it (verified live).
+ */
+async function fitWindowToWorkArea(page: Page): Promise<void> {
+  const area = await page.evaluate(() => ({
+    left: (screen as any).availLeft as number,
+    top: (screen as any).availTop as number,
+    width: screen.availWidth,
+    height: screen.availHeight,
+  }));
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: area });
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
 }
 
 /**
  * Open a page without the browser taking focus: a background tab in the
- * browser's existing window, then push the window behind the user's window.
+ * browser's existing window, then hide any new window while the browser is hidden.
  * Playwright's newPage() opens a foreground tab and Chromium activates the
  * window to show it (verified live: focus taken every time). A background tab
  * isn't drawn, so its screenshots hang (verified live on Edge: 0/6); the
@@ -72,9 +108,9 @@ async function openBackgroundPage(context: BrowserContext, browserPid: number): 
         continue; // page closed mid-check
       }
       try {
-        keepBrowserBehindUser(browserPid);
+        setBrowserWindows(browserPid, "sweep");
       } catch (e) {
-        console.error(`[browser-mcp] open_tab: could not move the new window behind the user's windows (${(e as Error).message})`);
+        console.error(`[browser-mcp] open_tab: could not hide the new window (${(e as Error).message})`);
       }
       return p;
     }
@@ -329,6 +365,8 @@ interface Session {
   isBrowserStackRealDevice: boolean;
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
+  /** Root PID of an attach_cdp browser whose windows browser-mcp hides (see windowBrowserPid). null otherwise. */
+  windowPid: number | null;
   downloads: DownloadTracker;
   prompts: PromptTracker;
   /** The context "dialog" listener, removed on close: an attach_cdp context outlives the session. */
@@ -435,6 +473,7 @@ class SessionManager {
     let server: BrowserServer | undefined;
     let browser: Browser;
     let attachCdp: AttachCdpHandle | undefined;
+    let windowPid: number | null = null;
 
     if (opts.attach_cdp) {
       // attach_cdp path — connectOverCDP to an existing or auto-launched browser.
@@ -482,6 +521,7 @@ class SessionManager {
       } catch (e) {
         console.error(`[browser-mcp] attach_cdp: could not restore the browser's download settings; downloads may fail (${(e as Error).message})`);
       }
+      windowPid = await windowBrowserPid(browser, attachCdp);
     } else if (opts.useBrowserStack) {
       // BrowserStack cloud grid. connectBrowserStack returns a connect()'d
       // Browser (no BrowserServer). A device name routes to a real mobile
@@ -518,7 +558,12 @@ class SessionManager {
       context = existingContexts[0] ?? (await browser.newContext());
       context.setDefaultTimeout(30000);
 
-      const attachedToExisting = attachCdp?.attachedVia === "existing";
+      // A browser other active sessions use: one launched by another session
+      // on the same profile, or an endpoint URL that sessions in this or
+      // another browser-mcp process are attached to. Their tabs stay open.
+      const attachedToExisting = attachCdp
+        ? attachCdp.attachedVia === "existing"
+        : windowPid !== null && this.browserInUse(windowPid);
 
       if (attachedToExisting) {
         // Multi-server mode: another browser-mcp session is already attached
@@ -526,8 +571,7 @@ class SessionManager {
         // DON'T inherit any existing page — create a fresh one. The owner-
         // ship filter on context.on('page') (added below) will keep our
         // session.pages clean of other servers' tabs going forward.
-        const bgPid = backgroundBrowserPid(attachCdp);
-        page = bgPid ? await openBackgroundPage(context, bgPid) : await context.newPage();
+        page = windowPid ? await openBackgroundPage(context, windowPid) : await context.newPage();
         // restore_previous_tabs cleanup is also skipped — those "previous"
         // tabs may be another active session's current work.
       } else {
@@ -570,9 +614,20 @@ class SessionManager {
           }
           // The url gets its own page instead of replacing a restored tab.
           if (opts.url) {
-            const bgPid = backgroundBrowserPid(attachCdp);
-            page = bgPid ? await openBackgroundPage(context, bgPid) : await context.newPage();
+            page = windowPid ? await openBackgroundPage(context, windowPid) : await context.newPage();
           }
+        }
+      }
+      // A browser another session already uses keeps its window as it is
+      // (it may be shown for the user right now). Any other browser starts
+      // hidden at the size of the work area; one we launched was hidden at
+      // launch, before it could appear.
+      if (windowPid && !attachedToExisting) {
+        try {
+          if (attachCdp?.attachedVia !== "spawn") setBrowserWindows(windowPid, "hide");
+          await fitWindowToWorkArea(page);
+        } catch (e) {
+          console.error(`[browser-mcp] attach_cdp: could not hide the browser window or size it to the screen (${(e as Error).message})`);
         }
       }
     } else if (opts.useBrowserStack) {
@@ -654,6 +709,7 @@ class SessionManager {
       isAttachCdp: !!opts.attach_cdp,
       isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
+      windowPid,
       downloads,
       prompts,
       onDialog,
@@ -717,6 +773,14 @@ class SessionManager {
         // switch_tab. The agent gets visibility (list_tabs surfaces it)
         // but explicit-attention semantics stay intact.
         this.attachPageLifecycle(session, popupPage, tid);
+        // A window.open() popup gets its own window; hide it with the rest.
+        if (session.windowPid) {
+          try {
+            setBrowserWindows(session.windowPid, "sweep");
+          } catch (e) {
+            console.error(`[browser-mcp] could not hide the popup window of tab "${tid}" (${(e as Error).message})`);
+          }
+        }
       }).catch(() => { /* opener() can reject if the page closed mid-resolve; ignore */ });
     });
 
@@ -731,9 +795,9 @@ class SessionManager {
   private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
     session.downloads.watchPage(page);
     watchPrompts(session.prompts, page, tabId);
-    // Windows attach_cdp tabs share one window behind the user's windows, so
-    // all but one are background tabs that Chromium doesn't draw.
-    if (backgroundBrowserPid(session.attachCdp)) {
+    // Windows attach_cdp tabs share one hidden window, so all but one are
+    // background tabs that Chromium doesn't draw.
+    if (session.windowPid) {
       keepPageRendering(page).catch((e) => {
         if (!page.isClosed()) {
           console.error(`[browser-mcp] could not keep tab "${tabId}" drawing in the background; its screenshots may hang (${(e as Error).message})`);
@@ -1161,8 +1225,7 @@ class SessionManager {
     // a tab id from nextAutoTabId() (potentially a different one than the
     // caller-supplied tab_id). Pre-seed the map with our chosen tid so the
     // context handler sees it already exists and skips re-tracking.
-    const bgPid = backgroundBrowserPid(s.attachCdp);
-    const page = bgPid ? await openBackgroundPage(s.context, bgPid) : await s.context.newPage();
+    const page = s.windowPid ? await openBackgroundPage(s.context, s.windowPid) : await s.context.newPage();
     // The context.on('page') handler already registered this page under a
     // freshly-allocated auto tab id. Re-key it under the caller's chosen id.
     let autoTid: string | undefined;
@@ -1195,7 +1258,7 @@ class SessionManager {
     // Windows attach_cdp: tracked tabs keep drawing through keepPageRendering,
     // and bringToFront would take focus from the user (verified live). Only a
     // tab reporting itself hidden still gets selected.
-    if (backgroundBrowserPid(s.attachCdp)) {
+    if (s.windowPid) {
       const visibility = await page.evaluate(() => document.visibilityState).catch(() => "hidden");
       if (visibility === "visible") {
         this.touch(id);
@@ -1207,7 +1270,57 @@ class SessionManager {
     } catch {
       // bringToFront is best-effort in headless mode
     }
+    // While hidden, give the focus bringToFront took back to the user.
+    if (s.windowPid) {
+      try {
+        setBrowserWindows(s.windowPid, "sweep");
+      } catch (e) {
+        console.error(`[browser-mcp] switch_tab: could not give focus back after selecting the tab (${(e as Error).message})`);
+      }
+    }
     this.touch(id);
+  }
+
+  /** True when an active session in this or another browser-mcp process uses the browser with this root PID. */
+  private browserInUse(windowPid: number): boolean {
+    if ([...this.sessions.values()].some((o) => o.windowPid === windowPid)) return true;
+    try {
+      return otherProcessSessionCount(windowPid) > 0;
+    } catch (e) {
+      console.error(`[browser-mcp] attach_cdp: could not check whether other sessions use the browser, so its tabs stay open (${(e as Error).message})`);
+      return true;
+    }
+  }
+
+  /**
+   * Show the attach_cdp browser window (in front, with focus, e.g. for the user
+   * to log in) or hide it again (focus goes back to the user's window). Covers
+   * every window of the browser, so sessions sharing it see the same state.
+   */
+  async setWindow(id: string, state: "show" | "hide"): Promise<WindowResult> {
+    const s = this.get(id);
+    if (!s.windowPid) {
+      throw new Error(
+        s.isAttachCdp
+          ? "set_window works only on Windows (WSL or native), and only when the browser's process id is known."
+          : "set_window works only on attach_cdp sessions; other sessions have no window (headless) or one browser-mcp doesn't control.",
+      );
+    }
+    this.touch(id);
+    if (state === "show") {
+      // switch_tab leaves Edge's selected tab alone, so select the session's
+      // active tab before the user sees the window.
+      try {
+        await this.getPage(id).bringToFront();
+      } catch (e) {
+        console.error(`[browser-mcp] set_window: could not select tab "${s.activeTabId}" (${(e as Error).message})`);
+      }
+    }
+    const result = setBrowserWindows(s.windowPid, state);
+    if (result.windows === 0) {
+      throw new Error(`set_window: no window found for browser process ${s.windowPid}.`);
+    }
+    return result;
   }
 
   async closeTab(id: string, tab_id: string): Promise<void> {
@@ -1329,6 +1442,13 @@ class SessionManager {
       // and we just leak the WS for the remainder of this process.
       if (s.attachCdp) {
         try { await s.attachCdp.cleanup(); } catch { /* ignore */ }
+      } else if (s.windowPid && !this.browserInUse(s.windowPid)) {
+        // The user's own browser keeps running, so give its window back.
+        try {
+          setBrowserWindows(s.windowPid, "unhide");
+        } catch (e) {
+          console.error(`[browser-mcp] close_session: could not show the browser window again (${(e as Error).message})`);
+        }
       }
     } else {
       try { await s.context.close(); } catch { /* ignore */ }

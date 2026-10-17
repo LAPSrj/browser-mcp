@@ -23,6 +23,8 @@ import { isWsl, isWslMirrored, readWslGatewayIp, windowsSystemBinary, winToWslPa
 import {
   aliveWindowsPids,
   finalizeSidecarTeardown,
+  isLocalPidAlive,
+  readSidecar,
   removeSession,
   withSidecarLock,
 } from "./browser-sidecar.js";
@@ -219,73 +221,223 @@ function runPS(scriptText: string, timeoutMs = 5000): string {
 }
 
 /**
- * Keep the browser's windows behind whatever the user is working in, without
- * ever activating them (Windows: WSL or native).
- *
- * - Minimized windows are restored without focus and sent to the bottom of the
- *   window stack. The launch uses `start /MIN` so the window never takes focus,
- *   but Chromium stops producing frames for a minimized window and
- *   Page.captureScreenshot hangs (verified live: 0/5 screenshots minimized,
- *   5/5 restored). A covered window keeps rendering thanks to
- *   --disable-backgrounding-occluded-windows.
- * - Other windows that sit above the user's focused window (e.g. a new tab
- *   window opened by openBackgroundPage, which Chromium shows on top without
- *   focus) are sent to the bottom. Skipped while the user is in the browser.
- *
- * SW_SHOWNOACTIVATE (4) restores without focus; HWND_BOTTOM (1) with
- * SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE (0x13) sends it behind other windows.
- * With waitForWindow, polls up to ~5s for a window to exist (fresh launch).
- * Returns the number of browser windows found.
+ * What setBrowserWindows does to the browser's windows:
+ *  - "hide": make every window invisible and click-through, with no taskbar
+ *    button and no Alt+Tab entry, and give focus back to the window the user
+ *    was in before "show".
+ *  - "show": undo "hide", bring the browser to the front and focus it.
+ *  - "sweep": hide windows that appeared since the last "hide" (a new window
+ *    or popup), only while the browser is hidden.
+ *  - "unhide": undo "hide" without focusing the browser (closing a session on
+ *    a browser the user started).
  */
-export function keepBrowserBehindUser(browserPid: number, waitForWindow = false): number {
+export type WindowAction = "hide" | "show" | "sweep" | "unhide";
+
+export interface WindowResult {
+  /** Top-level browser windows found. */
+  windows: number;
+  /** "show": the browser has focus. "hide": the browser doesn't have focus. null for the other actions. */
+  focused: boolean | null;
+}
+
+/**
+ * Hide or show an attach_cdp browser's windows (Windows: WSL or native).
+ *
+ * A hidden window is a transparent (alpha 0), click-through tool window at the
+ * bottom of the window stack, so it has no taskbar button and no Alt+Tab
+ * entry but still counts as visible to Chromium. Chromium keeps drawing it, so
+ * screenshots work (verified live: 5/5 hidden). Other ways of hiding fail:
+ * SW_HIDE and minimizing stop Chromium drawing (0/5 screenshots), and DWM
+ * cloaking is refused for another process's window (access denied).
+ *
+ * The launch uses `start /MIN` so the window never takes focus. A minimized
+ * window is hidden first and restored afterwards, so it never appears on screen.
+ *
+ * Window properties store the state, so every browser-mcp process sharing the
+ * browser sees it: "bm-ex" holds a hidden window's original extended style,
+ * and "bm-prev-fg" the window that had focus before "show".
+ *
+ * With waitForWindow, polls up to ~5s for a window to exist (fresh launch).
+ */
+export function setBrowserWindows(browserPid: number, action: WindowAction, waitForWindow = false): WindowResult {
   const script = String.raw`
 Add-Type @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public static class BmBg {
+public static class BmWin {
   delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
-  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+  [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
+  [DllImport("user32.dll")] static extern bool GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+  public struct RECT { public int L, T, R, B; }
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
-  static bool IsAbove(IntPtr h, IntPtr target) {
-    for (var w = GetWindow(h, 2); w != IntPtr.Zero; w = GetWindow(w, 2)) if (w == target) return true;
-    return false;
-  }
-  public static int Run(uint pid) {
-    var fgw = GetForegroundWindow(); uint fgPid; GetWindowThreadProcessId(fgw, out fgPid);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out int v, int s);
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] static extern bool SetProp(IntPtr h, string name, IntPtr v);
+  [DllImport("user32.dll")] static extern IntPtr GetProp(IntPtr h, string name);
+  [DllImport("user32.dll")] static extern IntPtr RemoveProp(IntPtr h, string name);
+  // WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT
+  const int HIDE_BITS = 0x80 | 0x80000 | 0x20;
+  const int WS_EX_APPWINDOW = 0x40000;
+  // Set above any 32-bit style, so a stored style of 0 still reads as hidden.
+  const long STORED = 0x100000000L;
+  static readonly IntPtr HWND_TOP = IntPtr.Zero, HWND_BOTTOM = (IntPtr)1;
+  // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+  const uint KEEP = 0x13;
+
+  static List<IntPtr> Wins(uint pid) {
     var wins = new List<IntPtr>();
     EnumWindows((h, l) => {
       uint p; GetWindowThreadProcessId(h, out p);
-      if (p == pid && IsWindowVisible(h)) wins.Add(h);
+      if (p != pid || !IsWindowVisible(h)) return true;
+      var sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
+      if (sb.ToString() == "Chrome_WidgetWin_1") wins.Add(h);
       return true;
     }, IntPtr.Zero);
-    foreach (var h in wins) {
-      if (IsIconic(h)) {
-        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
-        ShowWindow(h, 4);
-        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
-      } else if (fgPid != pid && IsAbove(h, fgw)) {
-        SetWindowPos(h, (IntPtr)1, 0, 0, 0, 0, 0x13);
+    return wins;
+  }
+  static bool Hidden(IntPtr h) { return GetProp(h, "bm-ex") != IntPtr.Zero; }
+  static bool Ours(uint pid, IntPtr h) { uint p; GetWindowThreadProcessId(h, out p); return p == pid; }
+
+  static void HideOne(IntPtr h) {
+    int ex = GetWindowLong(h, -20);
+    bool iconic = IsIconic(h);
+    // Hide before changing the style so the taskbar drops the button.
+    ShowWindow(h, 0);
+    SetProp(h, "bm-ex", (IntPtr)(STORED | (uint)ex));
+    SetWindowLong(h, -20, (ex | HIDE_BITS) & ~WS_EX_APPWINDOW);
+    SetLayeredWindowAttributes(h, 0, 0, 2);
+    // SW_SHOWNOACTIVATE restores a minimized window; SW_SHOWNA keeps a maximized one.
+    ShowWindow(h, iconic ? 4 : 8);
+    SetWindowPos(h, HWND_BOTTOM, 0, 0, 0, 0, KEEP);
+  }
+  static void UnhideOne(IntPtr h) {
+    long stored = (long)GetProp(h, "bm-ex");
+    RemoveProp(h, "bm-ex");
+    ShowWindow(h, 0);
+    SetLayeredWindowAttributes(h, 0, 255, 2);
+    SetWindowLong(h, -20, (int)(stored & 0xFFFFFFFFL));
+    ShowWindow(h, 8);
+  }
+  // SetForegroundWindow alone can be refused (Windows' foreground lock);
+  // attaching to the foreground thread's input lifts it.
+  static void Focus(IntPtr h) {
+    if (!SetForegroundWindow(h) || GetForegroundWindow() != h) {
+      uint fgPid; uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out fgPid);
+      uint me = GetCurrentThreadId();
+      AttachThreadInput(me, fgThread, true);
+      BringWindowToTop(h);
+      SetForegroundWindow(h);
+      AttachThreadInput(me, fgThread, false);
+    }
+  }
+  // The window below the browser in the window stack that the user can see:
+  // where focus goes when no window was recorded at "show".
+  static IntPtr NextUserWindow(uint pid, IntPtr from) {
+    for (var w = GetWindow(from, 2); w != IntPtr.Zero; w = GetWindow(w, 2)) {
+      if (Ours(pid, w) || !IsWindowVisible(w) || IsIconic(w)) continue;
+      int ex = GetWindowLong(w, -20);
+      if ((ex & 0x80) != 0 || (ex & 0x20) != 0) continue; // tool or click-through windows
+      int cloaked; DwmGetWindowAttribute(w, 14, out cloaked, 4);
+      if (cloaked == 0) return w;
+    }
+    return IntPtr.Zero;
+  }
+  static bool WaitFocus(uint pid, bool wantOurs) {
+    for (int i = 0; i < 10; i++) {
+      if (Ours(pid, GetForegroundWindow()) == wantOurs) return true;
+      System.Threading.Thread.Sleep(100);
+    }
+    return false;
+  }
+
+  public static string Run(uint pid, string action) {
+    var wins = Wins(pid);
+    string focused = "null";
+    if (action == "hide" || action == "sweep") {
+      bool anyHidden = wins.Exists(Hidden);
+      if (action == "hide" || anyHidden) {
+        IntPtr prev = IntPtr.Zero;
+        IntPtr fg = GetForegroundWindow();
+        // Before hiding, which moves the browser to the bottom of the stack.
+        IntPtr below = Ours(pid, fg) ? NextUserWindow(pid, fg) : IntPtr.Zero;
+        foreach (var h in wins) {
+          if (prev == IntPtr.Zero) prev = GetProp(h, "bm-prev-fg");
+          RemoveProp(h, "bm-prev-fg");
+          if (!Hidden(h)) HideOne(h);
+        }
+        // A hidden browser with focus would take the user's keystrokes.
+        if (Ours(pid, fg)) {
+          if (prev == IntPtr.Zero || !IsWindow(prev)) prev = below;
+          if (prev != IntPtr.Zero) Focus(prev);
+        }
+        if (action == "hide") focused = WaitFocus(pid, false) ? "false" : "true";
+      }
+    } else if (action == "show" || action == "unhide") {
+      IntPtr fg = GetForegroundWindow();
+      foreach (var h in wins) if (Hidden(h)) UnhideOne(h);
+      if (action == "show" && wins.Count > 0) {
+        if (!Ours(pid, fg)) foreach (var h in wins) SetProp(h, "bm-prev-fg", fg);
+        // The largest window is the browser window, not a popup.
+        IntPtr main = wins[0]; long best = -1;
+        foreach (var h in wins) {
+          RECT r; GetWindowRect(h, out r);
+          long area = (long)(r.R - r.L) * (r.B - r.T);
+          if (area > best) { best = area; main = h; }
+        }
+        // SWP_NOSIZE | SWP_NOMOVE
+        SetWindowPos(main, HWND_TOP, 0, 0, 0, 0, 0x3);
+        Focus(main);
+        focused = WaitFocus(pid, true) ? "true" : "false";
       }
     }
-    return wins.Count;
+    return wins.Count + " " + focused;
   }
 }
 "@
-$n = [BmBg]::Run(${browserPid})
-for ($i = 0; ${waitForWindow ? "$true" : "$false"} -and $i -lt 25 -and $n -eq 0; $i++) {
+$r = [BmWin]::Run(${browserPid}, '${action}')
+for ($i = 0; ${waitForWindow ? "$true" : "$false"} -and $i -lt 25 -and $r.StartsWith('0 '); $i++) {
   Start-Sleep -Milliseconds 200
-  $n = [BmBg]::Run(${browserPid})
+  $r = [BmWin]::Run(${browserPid}, '${action}')
 }
-$n`;
-  const out = runPS(script, 20000);
-  return parseInt(out, 10) || 0;
+$r`;
+  const [count, focused] = runPS(script, 20000).split(" ");
+  return { windows: parseInt(count, 10) || 0, focused: focused === "null" ? null : focused === "true" };
+}
+
+/**
+ * Sessions in other browser-mcp processes attached to this browser, from the
+ * sidecar in its --user-data-dir (Windows: WSL or native). 0 when the browser
+ * has no sidecar (browser-mcp didn't launch it), or its sidecar records a
+ * different browser.
+ */
+export function otherProcessSessionCount(browserPid: number): number {
+  const commandLine = runPS(
+    `(Get-CimInstance Win32_Process -Filter "ProcessId=${Math.trunc(browserPid)}").CommandLine`,
+    8000,
+  );
+  const m = commandLine.match(/--user-data-dir=(?:"([^"]+)"|(\S+))/);
+  const dir = m?.[1] ?? m?.[2];
+  if (!dir) return 0;
+  const sidecar = readSidecar(isWsl() ? winToWslPath(dir) : dir);
+  if (!sidecar || sidecar.root_pid !== browserPid) return 0;
+  return sidecar.attached_sessions.filter(
+    (s) => s.browser_mcp_pid !== process.pid && isLocalPidAlive(s.browser_mcp_pid),
+  ).length;
 }
 
 function resolveWindowsTemp(): string {
@@ -1165,8 +1317,8 @@ export async function spawnAttachCdpRelay(
     // other way, revisit — the Preferences fix (set profile.exit_type=
     // "Normal" + exited_cleanly=true) is the backup.
     ...(opts.restorePreviousTabs ? [] : ["--hide-crash-restore-bubble"]),
-    // The Windows launch (WSL or native) keeps the window behind the user's windows (see
-    // sendBrowserWindowsToBackground). Chromium throttles or stops rendering
+    // The Windows launch (WSL or native) hides the window behind the user's
+    // windows (see setBrowserWindows). Chromium throttles or stops rendering
     // covered windows and background renderers, which stalls screenshots, rAF
     // and timers; these switches keep a covered window rendering normally.
     "--disable-backgrounding-occluded-windows",
@@ -1186,8 +1338,8 @@ export async function spawnAttachCdpRelay(
   if (wsl || process.platform === "win32") {
     // /MIN launches with SW_SHOWMINNOACTIVE: the window opens minimized without
     // taking focus, so it doesn't interrupt the user. Once CDP is up, step 3b
-    // restores it behind the user's windows (a minimized window can't be
-    // screenshotted). The user brings it forward from the taskbar for login/MFA.
+    // hides it and restores it (a minimized window can't be screenshotted).
+    // The agent shows it with set_window when the user needs to log in.
     const cmdArgs = [
       "/c",
       "start",
@@ -1258,18 +1410,18 @@ export async function spawnAttachCdpRelay(
   const browserPid = await findBrowserRootPid(actualCdpPort, userDataDirWin, processName);
   dbg(`browser root pid: ${browserPid}`);
 
-  // ---- 3b. Move the minimized window behind the user's windows (WSL / Windows) ----
+  // ---- 3b. Hide the minimized window (WSL / Windows) ----
   // Non-fatal: the browser still works, but a window left minimized can't be
   // screenshotted, so say so on stderr.
   if (wsl || process.platform === "win32") {
     try {
-      const found = browserPid ? keepBrowserBehindUser(browserPid, true) : 0;
-      dbg(`browser windows moved to background: ${found}`);
+      const found = browserPid ? setBrowserWindows(browserPid, "hide", true).windows : 0;
+      dbg(`browser windows hidden: ${found}`);
       if (found === 0) {
         console.error(`[browser-mcp] attach_cdp: no browser window found for pid ${browserPid}; if the window stays minimized, screenshots will time out until it is restored.`);
       }
     } catch (e) {
-      console.error(`[browser-mcp] attach_cdp: could not move the browser window to the background (${(e as Error).message}); screenshots time out while it stays minimized.`);
+      console.error(`[browser-mcp] attach_cdp: could not hide the browser window (${(e as Error).message}); screenshots time out while it stays minimized.`);
     }
   }
 

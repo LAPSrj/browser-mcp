@@ -135,7 +135,7 @@ export function aliveWindowsPids(pids: number[]): Set<number> {
  * attached_sessions entries from dead browser-mcp processes. Uses
  * process.kill(pid, 0) which is the POSIX "exists check" idiom.
  */
-function isLocalPidAlive(pid: number): boolean {
+export function isLocalPidAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

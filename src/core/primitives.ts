@@ -165,7 +165,8 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "attach_cdp only. Default false closes tabs the profile restores from its last run, leaving one page. true keeps them.",
+        "attach_cdp only. Default false closes tabs the profile restores from its last run, leaving one page. true keeps them. " +
+          "A browser other active sessions use keeps every tab; the session gets a new one.",
       ),
       ignore_https_errors: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
@@ -222,6 +223,21 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
       session_id: z.string(),
     },
     handler: async (p) => json(await sessionManager.browserStatus(p.session_id)),
+  },
+
+  set_window: {
+    description:
+      "Show or hide an attach_cdp browser's window (Windows). It starts hidden (no taskbar button, not in Alt+Tab) and " +
+      "every tool works while hidden. show brings it to the front with focus, on the session's active tab, e.g. for the user to log in, solve " +
+      "MFA or a captcha, or answer a prompt; hide it again when they're done. Affects every session on that browser.",
+    schema: {
+      session_id: z.string(),
+      state: z.enum(["show", "hide"]),
+    },
+    handler: async (p) => {
+      const r = await sessionManager.setWindow(p.session_id, p.state);
+      return json({ state: p.state, windows: r.windows, browser_has_focus: r.focused });
+    },
   },
 
   claim_tab: {

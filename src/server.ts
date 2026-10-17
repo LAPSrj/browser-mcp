@@ -26,7 +26,7 @@ import { describePrompt, RESPOND_HINT, type PromptTracker } from "./core/prompts
  */
 const PROMPT_SAFE_TOOLS = new Set([
   "list_prompts", "respond_prompt", "handle_next_dialog",
-  "list_sessions", "close_session", "close_browser", "browser_status", "claim_tab",
+  "list_sessions", "close_session", "close_browser", "browser_status", "claim_tab", "set_window",
   "list_tabs", "open_tab", "close_tab",
   "get_cookies", "set_cookies", "clear_cookies",
   "list_downloads", "set_download_dir", "wait_for_download",
