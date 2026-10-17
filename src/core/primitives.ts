@@ -1217,13 +1217,54 @@ export const savePrimitives: Record<string, PrimitiveDef> = {
 };
 
 // ---------------------------------------------------------------------------
-// Dialog handling (session-only, pre-arms a handler for the next dialog)
+// Prompts (session-only): dialogs, permission requests, HTTP logins
 // ---------------------------------------------------------------------------
 
 export const dialogPrimitives: Record<string, PrimitiveDef> = {
+  list_prompts: {
+    description:
+      "List the session's prompts waiting for an answer: alert/confirm/prompt/beforeunload dialogs, permission requests " +
+      "(camera, microphone, geolocation, notifications, clipboard read, ...; Chromium only) and HTTP logins (Chromium only). " +
+      "Each waits until respond_prompt answers it. Tool results on the session also list them.",
+    schema: {
+      session_id: z.string(),
+    },
+    handler: async (p) => {
+      sessionManager.touch(p.session_id);
+      return json(sessionManager.getPrompts(p.session_id).list());
+    },
+  },
+
+  respond_prompt: {
+    description:
+      "Answer a waiting prompt from list_prompts. Dialog: accept (with text for prompt()) or dismiss. " +
+      "Permission: accept grants it to that origin and the page's call goes ahead; dismiss rejects only that call. " +
+      "Neither is saved in the profile, so a later session asks again. " +
+      "HTTP login: accept with username + password, or dismiss to cancel (the page gets the 401).",
+    schema: {
+      session_id: z.string(),
+      prompt_id: z.string().describe('From list_prompts, e.g. "p1"'),
+      action: z.enum(["accept", "dismiss"]),
+      text: z.string().optional().describe("prompt() dialog text when accepting"),
+      username: z.string().optional().describe("HTTP login"),
+      password: z.string().optional().describe("HTTP login"),
+    },
+    handler: async (p) => {
+      sessionManager.touch(p.session_id);
+      const answered = await sessionManager.getPrompts(p.session_id).respond(p.prompt_id, {
+        action: p.action,
+        text: p.text,
+        username: p.username,
+        password: p.password,
+      });
+      return json({ answered: { ...answered, action: p.action } });
+    },
+  },
+
   handle_next_dialog: {
     description:
-      "Handle the next native alert/confirm/prompt on a session tab, once. Call before the action that opens the dialog.",
+      "Answer the next alert/confirm/prompt on a session tab without holding it for respond_prompt, once. " +
+      "Call before the action that opens the dialog.",
     schema: {
       session_id: z.string(),
       tab_id: z.string().optional(),
@@ -1232,19 +1273,11 @@ export const dialogPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => {
       sessionManager.touch(p.session_id);
-      const page = sessionManager.getPage(p.session_id, p.tab_id);
-      page.once("dialog", async (dialog) => {
-        try {
-          if (p.action === "accept") {
-            await dialog.accept(p.text);
-          } else {
-            await dialog.dismiss();
-          }
-        } catch {
-          // ignore — the dialog may have auto-closed
-        }
-      });
-      return ok(`Armed ${p.action} handler for next dialog on tab ${p.tab_id ?? "active"}`);
+      const target = sessionManager.promptTarget(p.session_id, p.tab_id);
+      if (!target) return err(`Session "${p.session_id}" not found or already closed.`);
+      sessionManager.getPage(p.session_id, target.tabId); // the tab must exist
+      target.prompts.presetNextDialog(target.tabId, { action: p.action, text: p.text });
+      return ok(`Armed ${p.action} handler for next dialog on tab ${target.tabId}`);
     },
   },
 };

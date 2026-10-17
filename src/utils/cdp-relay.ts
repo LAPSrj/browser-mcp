@@ -645,6 +645,51 @@ function readDevToolsActivePort(userDataDirWin: string): number | null {
   }
 }
 
+/** Comparable form of a profile path: Windows paths case-insensitive, no trailing separator. */
+function normalizeProfilePath(p: string): string {
+  const trimmed = p.trim().replace(/[\\/]+$/, "");
+  return /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\")
+    ? trimmed.replace(/\//g, "\\").toLowerCase()
+    : trimmed;
+}
+
+/**
+ * True when user_data_dir is listed in BROWSER_MCP_AGENT_PROFILES (paths
+ * separated by `;`). Other user-supplied profiles are never edited.
+ */
+export function isAgentProfile(userDataDir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const listed = (env.BROWSER_MCP_AGENT_PROFILES ?? "").split(";").filter((p) => p.trim());
+  const target = normalizeProfilePath(userDataDir);
+  return listed.some((p) => normalizeProfilePath(p) === target);
+}
+
+/**
+ * Set translate.enabled=false in <profile>/Default/Preferences, keeping every
+ * other pref. --disable-features=Translate alone doesn't stop Edge's
+ * "Translate this page?" bar; the per-profile pref does. Leaves an unreadable
+ * file alone rather than replacing the profile's prefs.
+ */
+export function disableTranslatePref(defaultDir: string): void {
+  const file = `${defaultDir}/Preferences`;
+  let prefs: Record<string, any> = {};
+  if (existsSync(file)) {
+    const raw = readFileSync(file, "utf8");
+    try {
+      prefs = JSON.parse(raw);
+    } catch {
+      throw new Error(`${file} is not valid JSON; left unchanged`);
+    }
+    if (!prefs || typeof prefs !== "object" || Array.isArray(prefs)) {
+      throw new Error(`${file} is not a JSON object; left unchanged`);
+    }
+  } else {
+    mkdirSync(defaultDir, { recursive: true });
+  }
+  if (prefs.translate?.enabled === false) return;
+  prefs.translate = { ...(typeof prefs.translate === "object" && prefs.translate ? prefs.translate : {}), enabled: false };
+  writeFileSync(file, JSON.stringify(prefs), "utf8");
+}
+
 export async function spawnAttachCdpRelay(
   opts: SpawnAttachCdpOptions,
 ): Promise<AttachCdpHandle> {
@@ -1070,6 +1115,16 @@ export async function spawnAttachCdpRelay(
       writeFileSync(`${defaultDirNode}/Preferences`, stubPrefs, "utf8");
     } catch (e) {
       dbg("pre-seed Preferences failed (non-fatal):", (e as Error).message);
+    }
+  } else if (isAgentProfile(opts.userDataDirOverride)) {
+    // A profile listed in BROWSER_MCP_AGENT_PROFILES belongs to the agents, so
+    // it gets the same translate pref as a temp profile. The browser isn't
+    // running yet (this is the spawn path), so it reads the pref at startup
+    // instead of overwriting it on exit.
+    try {
+      disableTranslatePref(wsl ? winToWslPath(`${userDataDirWin}\\Default`) : `${userDataDirWin}${process.platform === "win32" ? "\\" : "/"}Default`);
+    } catch (e) {
+      console.error(`[browser-mcp] attach_cdp: could not turn off translation in ${userDataDirWin} (${(e as Error).message})`);
     }
   }
 

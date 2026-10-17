@@ -112,7 +112,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `get_storage`, `set_storage`, `clear_storage` | localStorage / sessionStorage |
 | `screenshot` | session-bound screenshot (optional `selector` crop, `full_page`); returns page URL + title |
 | `save_pdf`, `save_html` | output capture |
-| `handle_next_dialog` | pre-arm a confirm/alert handler |
+| `list_prompts`, `respond_prompt`, `handle_next_dialog` | dialogs, permission requests and HTTP logins wait for the agent: list them, answer one, or pre-answer the next dialog (see Prompt contract) |
 | `wait_for_download`, `list_downloads`, `set_download_dir` | file downloads: wait for one to finish and get its saved path, list them, pick the folder (see Download contract) |
 | `list_modes` | enumerate registered modes |
 
@@ -262,6 +262,21 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 - A taken name gets ` (1)`, ` (2)`… appended before the extension.
 
 > **Hazard (old browser-mcp on a shared profile):** Playwright's `connectOverCDP` points the browser's downloads at a temp folder on the connecting machine (`/tmp/playwright-artifacts-*`, GUID filenames). browser-mcp undoes that right after connecting. The setting is per browser profile, so a browser-mcp version without this fix attaching to the same profile switches it back for everyone, and downloads fail again until a current version opens a session there. See § Diagnosis › Download fails with a GUID filename.
+
+### Prompt contract {#prompt-contract}
+
+- A session holds every prompt its own tabs open until you answer it: dialogs (`alert`, `confirm`, `prompt`, `beforeunload`; all engines), permission requests (camera, microphone, geolocation, notifications, clipboard read, MIDI, local fonts, window management, idle detection, storage access; Chromium only), and HTTP logins (Basic / Digest / NTLM on the tab's page loads, not cross-site iframes; Chromium only). Nothing is answered for you, and Playwright's default of dismissing dialogs is off.
+- Every tool result on the session ends with a `⏸ Waiting for an answer` block listing the waiting prompts. `list_prompts({ session_id })` returns them as objects: `prompt_id`, `kind` (`dialog` | `permission` | `http_auth`), `tab_id`, `url` (page URL, requesting origin, or request URL), `opened_at`, and per kind `dialog_type` / `message` / `default_value`, `permissions`, or `realm` / `scheme` / `source` / `credentials_rejected`. `list_sessions` and `open_session` include them as `prompts`.
+- `respond_prompt({ session_id, prompt_id, action: "accept" | "dismiss", text?, username?, password? })`:
+  - Dialog: accept (with `text` for `prompt()`) or dismiss.
+  - Permission: accept grants the permissions to that origin and the page's call goes ahead; dismiss rejects only that call (`NotAllowedError`, geolocation error code 1, `Notification` → `"denied"`). Neither is saved in the profile: a later session on the same profile asks again.
+  - HTTP login: accept needs `username` + `password`. Wrong credentials open a new prompt with `credentials_rejected: true`. Dismiss cancels, and the page gets the server's 401 response.
+- **A prompt opens during a call on its tab:** the call returns within about a second with an error saying it stopped waiting, plus the prompt list. What the call started (a click, a navigation) continues once you answer; check the page afterwards. Prompts on the session's other tabs don't stop the call; they only show up in the list.
+- **A dialog is waiting on the target tab:** the page can't run anything until it's answered, so page tools on that tab return an error without running. Tools that don't touch the tab still run: `list_prompts`, `respond_prompt`, `handle_next_dialog`, `list_sessions`, `list_tabs`, `open_tab`, `close_tab`, `claim_tab`, `close_session`, `close_browser`, `browser_status`, cookie tools, and download tools.
+- `handle_next_dialog({ session_id, tab_id?, action, text? })` answers the next dialog on a tab right away instead of holding it. Call it before the action that opens the dialog.
+- A call whose permission is already `granted` or `denied` isn't held. Closing a tab drops its prompts; closing a session dismisses its dialogs, rejects its permission requests, and cancels its logins.
+
+> **Hazard (shared attach_cdp profile):** while any session is attached, a dialog on a tab no session owns (e.g. its owner's server exited) stays open, because each session leaves other sessions' dialogs to their owner. Before this feature Playwright dismissed it. `claim_tab` it and close it, or answer it in the browser window.
 
 ### Pause / resume contract {#pause-resume-contract}
 

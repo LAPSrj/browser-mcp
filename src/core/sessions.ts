@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type BrowserServer, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type BrowserServer, type Dialog, type Page } from "playwright";
 import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, keepBrowserBehindUser, spawnAttachCdpRelay, type AttachCdpHandle } from "../utils/cdp-relay.js";
@@ -15,6 +15,7 @@ import {
 import { isWsl } from "../utils/wsl.js";
 import { parseIntEnv } from "../config.js";
 import { DownloadTracker } from "./downloads.js";
+import { gotoUntilPrompt, PromptTracker, type PromptInfo } from "./prompts.js";
 
 // Persistent browser sessions an agent can keep alive across MCP tool
 // calls. Guards against runaway lifetimes with idle + wall-clock TTLs,
@@ -98,6 +99,15 @@ async function keepPageRendering(page: Page): Promise<void> {
     cdp.send("Page.screencastFrameAck", { sessionId: f.sessionId }).catch(() => {});
   });
   await cdp.send("Page.startScreencast", { format: "jpeg", quality: 10 });
+}
+
+/** Start tracking a tab's prompts. A failure only loses permission and HTTP-login tracking on that tab. */
+function watchPrompts(prompts: PromptTracker, page: Page, tabId: string): Promise<void> {
+  return prompts.watchPage(page).catch((e) => {
+    if (!page.isClosed()) {
+      console.error(`[browser-mcp] could not track permission requests and HTTP logins on tab "${tabId}" (${(e as Error).message})`);
+    }
+  });
 }
 
 /**
@@ -250,6 +260,8 @@ export interface SessionInfo {
   expires_at: string;
   /** Folder downloads are saved into. null = the browser's own download folder. */
   download_dir: string | null;
+  /** Dialogs, permission requests and HTTP logins waiting for respond_prompt. */
+  prompts: PromptInfo[];
 }
 
 export interface CloseResult {
@@ -318,6 +330,9 @@ interface Session {
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
   downloads: DownloadTracker;
+  prompts: PromptTracker;
+  /** The context "dialog" listener, removed on close: an attach_cdp context outlives the session. */
+  onDialog: (dialog: Dialog) => void;
   /** Launch-time options captured for pause_session — replayed verbatim into resume_session's open(). */
   pauseFields: {
     viewport: { width: number; height: number };
@@ -595,13 +610,26 @@ class SessionManager {
     }
 
     downloads.watchPage(page);
+    const prompts = new PromptTracker({
+      chromium: browserName === "chromium",
+      exclusiveContext: !opts.attach_cdp,
+      tabIdOf: (pg) => {
+        for (const [tid, p] of this.sessions.get(id)?.pages ?? []) if (p === pg) return tid;
+        return null;
+      },
+    });
+    // A context listener also stops Playwright from dismissing dialogs on its
+    // own, including on another session's tabs in a shared attach_cdp profile;
+    // onDialog leaves those to their owner.
+    const onDialog = (dialog: Dialog) => {
+      prompts.onDialog(dialog).catch(() => {});
+    };
+    context.on("dialog", onDialog);
+    await watchPrompts(prompts, page, "main");
     if (opts.url) {
-      try {
-        await page.goto(opts.url, { waitUntil: "load", timeout: 30000 });
-      } catch {
-        // Surface navigation errors through the first interactive call rather
-        // than failing session open — the page is still usable.
-      }
+      // Navigation errors surface through the first interactive call rather
+      // than failing session open; the page is still usable.
+      await gotoUntilPrompt(prompts, page, opts.url);
     }
 
     const tabId = "main";
@@ -627,6 +655,8 @@ class SessionManager {
       isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
       downloads,
+      prompts,
+      onDialog,
       pauseFields: {
         viewport,
         user_agent: opts.user_agent,
@@ -700,6 +730,7 @@ class SessionManager {
    */
   private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
     session.downloads.watchPage(page);
+    watchPrompts(session.prompts, page, tabId);
     // Windows attach_cdp tabs share one window behind the user's windows, so
     // all but one are background tabs that Chromium doesn't draw.
     if (backgroundBrowserPid(session.attachCdp)) {
@@ -760,6 +791,7 @@ class SessionManager {
       wall_ttl_ms: s.wallTTLMs,
       expires_at: new Date(expires).toISOString(),
       download_dir: s.downloads.downloadDir(),
+      prompts: s.prompts.list(),
     };
   }
 
@@ -1146,11 +1178,8 @@ class SessionManager {
     s.activeTabId = tid;
     this.attachPageLifecycle(s, page, tid);
     if (url) {
-      try {
-        await page.goto(url, { waitUntil: "load", timeout: 30000 });
-      } catch {
-        // non-fatal
-      }
+      await watchPrompts(s.prompts, page, tid);
+      await gotoUntilPrompt(s.prompts, page, url);
     }
     this.touch(id);
     return { tab_id: tid, url: page.url() };
@@ -1213,6 +1242,17 @@ class SessionManager {
     return this.get(session_id).downloads;
   }
 
+  getPrompts(session_id: string): PromptTracker {
+    return this.get(session_id).prompts;
+  }
+
+  /** The prompt tracker and the tab a call targets, or null when the session doesn't exist. */
+  promptTarget(session_id: string, tab_id?: string): { prompts: PromptTracker; tabId: string } | null {
+    const s = this.sessions.get(session_id);
+    if (!s || s.closing) return null;
+    return { prompts: s.prompts, tabId: tab_id ?? s.activeTabId };
+  }
+
   /** True when the session runs on a real BrowserStack device (real iOS Safari). */
   isBrowserStackRealDevice(session_id: string): boolean {
     return this.get(session_id).isBrowserStackRealDevice;
@@ -1254,6 +1294,8 @@ class SessionManager {
     }
     s.closing = true;
     this.sessions.delete(s.id);
+    s.context.off("dialog", s.onDialog);
+    await s.prompts.dispose();
     await s.downloads.dispose();
 
     // Capture video paths by closing each page first (that flushes video

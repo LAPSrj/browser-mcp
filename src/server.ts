@@ -17,6 +17,86 @@ import { applyResultPath } from "./utils/result-file.js";
 import { compactErrorMessage } from "./utils/errors.js";
 import { allPrimitives } from "./core/primitives.js";
 import { sessionManager } from "./core/sessions.js";
+import { describePrompt, RESPOND_HINT, type PromptTracker } from "./core/prompts.js";
+
+/**
+ * Tools that don't touch a tab's page, so they still work while a dialog is
+ * held on it. Every other session tool fails fast on a tab with a held
+ * dialog: click, screenshot and evaluate hang until it's answered.
+ */
+const PROMPT_SAFE_TOOLS = new Set([
+  "list_prompts", "respond_prompt", "handle_next_dialog",
+  "list_sessions", "close_session", "close_browser", "browser_status", "claim_tab",
+  "list_tabs", "open_tab", "close_tab",
+  "get_cookies", "set_cookies", "clear_cookies",
+  "list_downloads", "set_download_dir", "wait_for_download",
+]);
+
+/** After a prompt opens mid-call, how long the call gets to finish on its own. */
+const PROMPT_GRACE_MS = 1000;
+
+/** Add the session's waiting prompts to a tool result. */
+function withPromptNotice(result: any, prompts: PromptTracker): any {
+  const waiting = prompts.list();
+  if (waiting.length === 0 || !result || !Array.isArray(result.content)) return result;
+  const text =
+    `⏸ Waiting for an answer (the page waits until you answer):\n` +
+    waiting.map((p) => `- ${describePrompt(p)}`).join("\n") +
+    `\n${RESPOND_HINT}`;
+  return { ...result, content: [...result.content, { type: "text" as const, text }] };
+}
+
+const errorResult = (text: string) => ({ content: [{ type: "text" as const, text: `Error: ${text}` }], isError: true });
+
+/**
+ * Run a session tool call with the session's prompts in view: refuse page
+ * tools on a tab whose dialog is waiting, stop waiting when a prompt opens on
+ * the call's tab mid-call (a held dialog or HTTP login would keep the call
+ * waiting until it times out), and list waiting prompts on every result.
+ */
+async function runWatchingPrompts(
+  toolName: string,
+  params: Record<string, unknown>,
+  run: () => Promise<any>,
+): Promise<any> {
+  const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
+  const tabId = typeof params.tab_id === "string" ? params.tab_id : undefined;
+  const target = sessionId ? sessionManager.promptTarget(sessionId, tabId) : null;
+  if (!target) return run();
+  const { prompts } = target;
+  const notice = (r: any) => (toolName === "list_prompts" ? r : withPromptNotice(r, prompts));
+
+  if (!PROMPT_SAFE_TOOLS.has(toolName)) {
+    const blocking = prompts.blockingDialog(target.tabId);
+    if (blocking) {
+      return notice(errorResult(
+        `${toolName} was not run: tab ${target.tabId} has a ${blocking.dialog_type}() dialog waiting for an answer ` +
+          `(${blocking.prompt_id}), and every page call on that tab waits until it's answered.`,
+      ));
+    }
+  }
+
+  let stop = () => {};
+  const opened = new Promise<null>((resolve) => {
+    // Prompts on the session's other tabs only show up in the notice.
+    stop = prompts.onOpen((p) => {
+      if (p.tab_id === target.tabId || p.tab_id === null) resolve(null);
+    });
+  });
+  const call = run().then((r) => ({ r }));
+  try {
+    const first = await Promise.race([call, opened]);
+    if (first) return notice(first.r);
+    const late = await Promise.race([call, new Promise<null>((r) => setTimeout(() => r(null), PROMPT_GRACE_MS))]);
+    if (late) return notice(late.r);
+    return notice(errorResult(
+      `${toolName} stopped waiting because the page opened a prompt while it ran. ` +
+        `What the call started continues once the prompt is answered, so check the page afterwards.`,
+    ));
+  } finally {
+    stop();
+  }
+}
 
 /**
  * Append a non-fatal warning to a tool result when a `use:` mode was resolved
@@ -188,7 +268,7 @@ export function createServer(config: ServerConfig = {}, registry?: PluginRegistr
         if ("error" in n) {
           return { content: [{ type: "text" as const, text: `Error: ${n.error}` }], isError: true };
         }
-        return run(n.params as any);
+        return runWatchingPrompts(name, n.params, () => run(n.params as any));
       }) as any,
     );
   };

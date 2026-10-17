@@ -153,8 +153,11 @@ greeted by tabs from a prior run).
 `--disable-features=Translate,TranslateUI` AND a pre-seeded
 `Default/Preferences` with `translate.enabled = false` before the browser
 starts — the feature flag alone isn't sufficient on current Edge because
-the infobar is also gated on the per-profile pref. User-supplied
-`user_data_dir` paths are NOT touched.
+the infobar is also gated on the per-profile pref. A user-supplied
+`user_data_dir` is only touched when it's listed in
+`BROWSER_MCP_AGENT_PROFILES`: when browser-mcp launches the browser on it,
+it sets `translate.enabled = false` in that profile's `Default/Preferences`
+and keeps every other pref.
 
 **WSL transparency.** WSL2's NAT can't reach Windows-host loopback, so on
 WSL the auto-launch path additionally spawns a session-scoped Windows-side
@@ -317,11 +320,38 @@ pass an explicit `tab_id`.
 | `save_pdf` | Any | Chromium-only PDF export. |
 | `save_html` | Any | Writes `page.content()` to disk. |
 
-### Dialogs
+### Prompts (session-scoped)
 
-`handle_next_dialog` pre-arms a one-shot handler (`accept` / `dismiss`,
-optional prompt text) for the next `alert` / `confirm` / `prompt` raised
-on the session's active tab.
+A session holds every prompt its tabs open until the agent answers it, so
+nothing is answered for the agent and nothing hangs unseen:
+
+- **Dialogs**: `alert`, `confirm`, `prompt`, `beforeunload`. All engines.
+- **Permission requests** (Chromium): camera, microphone, geolocation,
+  notifications, clipboard read, MIDI, local fonts, window management,
+  idle detection, storage access. CDP has no event for a permission
+  prompt, so an init script wraps the APIs that ask and waits for the
+  answer. A call whose permission is already granted or denied isn't held.
+- **HTTP logins** (Chromium): Basic / Digest / NTLM challenges on the
+  tab's page loads, including same-site iframes but not cross-site ones
+  (Chrome runs those in their own process). The navigation waits for
+  credentials.
+
+| Tool | Purpose |
+|---|---|
+| `list_prompts` | The session's waiting prompts: `prompt_id`, `kind`, `tab_id`, `url`, plus `dialog_type` / `message` / `default_value`, `permissions`, or `realm` / `scheme` / `credentials_rejected`. |
+| `respond_prompt` | `accept` or `dismiss` one. Dialog: `text` for `prompt()`. Permission: accept grants it to the origin and the page's call goes ahead, dismiss rejects only that call. Neither is saved in the profile, so a later session asks again. HTTP login: accept with `username` + `password`; wrong ones open a new prompt with `credentials_rejected: true`; dismiss gives the page the 401. |
+| `handle_next_dialog` | Answer the next dialog on a tab without holding it, once. Call before the action that opens it. |
+
+Every tool result on a session lists the session's waiting prompts. When a
+prompt opens on the tab a call is working on, the call returns after one
+second instead of waiting until it times out; what it started continues
+once the prompt is answered. While a dialog is waiting, the page can't run
+anything, so tools that touch that tab fail without running. Tools that
+don't touch it still run: `list_prompts`, `respond_prompt`, `list_tabs`,
+`open_tab`, `close_tab`, `close_session`, cookies, and downloads.
+`list_sessions` and `open_session` also return `prompts`. Closing a session
+dismisses its dialogs, rejects its permission requests, and cancels its
+logins.
 
 ### Downloads (session-scoped)
 
@@ -614,6 +644,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_NETWORK_IDLE_TIMEOUT` | `15000` | Navigation `networkidle` timeout before falling back to `load`. |
 | `BROWSER_MCP_PRODUCT` | `edge` (WSL/Win) / `chrome` (macOS/Linux) | Which Chromium-channel browser auto-launch uses. One of `edge`, `chrome`, `brave`, `vivaldi`, `opera`. Throws on typo. |
 | `BROWSER_MCP_EXECUTABLE_PATH` | per-product default | Path to the browser executable for `open_session({ attach_cdp: true })` auto-launch. Overrides the product's canonical default; required for Opera on Windows (no machine-wide path). Per-call `executable_path` overrides this. |
+| `BROWSER_MCP_AGENT_PROFILES` | — | `;`-separated `user_data_dir` paths that belong to the agents (e.g. `C:\edge-cdp-profile`). Before launching a browser on one, browser-mcp turns off translation in its `Default/Preferences`. Other user-supplied profiles are never edited. |
 | `BROWSER_MCP_CDP_DEBUG` | `0` | When `1`, the WSL CDP relay logs activity to `%TEMP%\browser-mcp\<session>\relay.log`. |
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | One WordPress site for the `wp` and `wp-gutenberg` plugins. The plugins need either `WP_URL` or `WP_SITES`. |
 | `WP_SITES` | — | Comma-separated site names (e.g. `LOCAL,PROD`). Each site reads `WP_URL_<NAME>`, `WP_USERNAME_<NAME>`, `WP_PASSWORD_<NAME>`, and optionally `WP_LOGIN_URL_<NAME>`, `WP_SESSION_TTL_<NAME>`, `WP_REQUIRE_ALLOW_WRITE_<NAME>`. When set, the unsuffixed `WP_URL` set is ignored. |
