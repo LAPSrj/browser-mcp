@@ -444,6 +444,8 @@ function resolveWindowsTemp(): string {
   const t = execFileSync("/mnt/c/Windows/System32/cmd.exe", ["/c", "echo %TEMP%"], {
     encoding: "utf8",
     timeout: 3000,
+    // From a WSL folder cmd.exe prints a "UNC paths are not supported" warning to stderr.
+    cwd: "/mnt/c",
   }).trim();
   if (!t || t.includes("%TEMP%")) {
     throw new Error("Could not resolve %TEMP% on Windows side");
