@@ -184,6 +184,13 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "attach_cdp only. Default false closes tabs the profile restores from its last run, leaving one page. true keeps them. " +
           "A browser other active sessions use keeps every tab; the session gets a new one.",
       ),
+      human_mouse: z.preprocess(
+        (v) => (v === "true" ? true : v === "false" ? false : v),
+        z.boolean(),
+      ).optional().describe(
+        "Clicks and hovers move the mouse along a curved path to a random point in the element and hold each click 50-150 ms, " +
+          "for sites that check for bots (e.g. Cloudflare Turnstile). Adds about 0.3-0.5 s per click or hover. Default true with attach_cdp, false otherwise.",
+      ),
       ignore_https_errors: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),

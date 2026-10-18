@@ -86,7 +86,7 @@ JSON values work as-is: `--viewports='[{"width":375,"height":812}]'`.
 
 | Tool | Purpose |
 |---|---|
-| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `has_touch`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`, `browserStackLocalLog`. |
+| `open_session` | Start a persistent browser session. Returns `session_id`. Optional `browser`, `viewport`, `url`, `user_agent`, `locale`, `timezone`, `record_video`, `idle_ttl_ms`, `wall_ttl_ms`, `output_dir`, `headless`, `attach_cdp`, `auto_launch`, `executable_path`, `user_data_dir`, `ignore_https_errors`, `has_touch`, `human_mouse`, `download_dir`, `useBrowserStack`, `browserStackOs`, `browserStackOsVersion`, `browserStackDevice`, `browserStackLocal`, `browserStackLocalLog`. |
 | `close_session` | Close a session by id. Returns video paths if recording was on. |
 | `list_sessions` | List open sessions with tabs, TTLs, and next expiry. |
 | `pause_session` | Snapshot a session's storage state (cookies + local/sessionStorage + launch shape) and close it. The returned `snapshot` is opaque JSON the caller persists. For human-in-loop handovers (captcha / MFA solved in a separate headed window). Not supported on `attach_cdp` sessions or while recording video / tracing. |

@@ -13,6 +13,7 @@ import {
   resolveBrowserProduct,
 } from "../utils/browser-products.js";
 import { isWsl } from "../utils/wsl.js";
+import { setHumanMouse } from "../utils/locator.js";
 import { parseIntEnv } from "../config.js";
 import { DownloadTracker } from "./downloads.js";
 import { gotoUntilPrompt, PromptTracker, type PromptInfo } from "./prompts.js";
@@ -226,6 +227,14 @@ export interface OpenSessionOptions {
    */
   restore_previous_tabs?: boolean;
   /**
+   * Clicks and hovers move the mouse along a curved path to a random point
+   * inside the element, and each click is held 50-150 ms, so bot checks like
+   * Cloudflare Turnstile see input closer to a person's. Costs about
+   * 0.3-0.5 s per click or hover. Default true with attach_cdp (the user's
+   * kind of browser, on sites that check for bots), false otherwise.
+   */
+  human_mouse?: boolean;
+  /**
    * Run this session on BrowserStack's cloud grid instead of a locally-launched
    * Playwright browser. The session is persistent and its session_id is reusable
    * across calls exactly like a local one. Mutually exclusive with attach_cdp.
@@ -367,6 +376,8 @@ interface Session {
   attachCdp?: AttachCdpHandle;
   /** Root PID of an attach_cdp browser whose windows browser-mcp hides (see windowBrowserPid). null otherwise. */
   windowPid: number | null;
+  /** Clicks and hovers on this session's tabs move the mouse like a person (open_session human_mouse). */
+  humanMouse: boolean;
   downloads: DownloadTracker;
   prompts: PromptTracker;
   /** The context "dialog" listener, removed on close: an attach_cdp context outlives the session. */
@@ -712,6 +723,7 @@ class SessionManager {
       isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
       windowPid,
+      humanMouse: opts.human_mouse ?? !!opts.attach_cdp,
       downloads,
       prompts,
       onDialog,
@@ -726,6 +738,7 @@ class SessionManager {
         auto_launch: opts.auto_launch,
         executable_path: opts.executable_path,
         user_data_dir: opts.user_data_dir,
+        human_mouse: opts.human_mouse,
         useBrowserStack: opts.useBrowserStack,
       },
       pauseFields: {
@@ -808,6 +821,7 @@ class SessionManager {
    * session's pages map + pageOrder + reselect activeTabId if needed.
    */
   private attachPageLifecycle(session: Session, page: Page, tabId: string): void {
+    setHumanMouse(page, session.humanMouse);
     session.downloads.watchPage(page);
     watchPrompts(session.prompts, page, tabId);
     // Windows attach_cdp tabs share one hidden window, so all but one are
