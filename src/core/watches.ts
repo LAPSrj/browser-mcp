@@ -23,8 +23,6 @@ import type { OpenSessionOptions } from "./sessions.js";
 // is compared to it, including the first one after a restart, which reports
 // what changed while no watcher was running.
 
-export const WATCH_BINDING = "__browserMcpWatch";
-
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MAX_TEXT = 2000;
 const MAX_ITEMS = 500;
@@ -140,9 +138,10 @@ export function snapshotExpression(cfg: WatchConfig): string {
 /**
  * Init script for the watcher's page: reports a snapshot after DOM changes
  * and every few seconds, and reports the site's desktop notifications.
- * Main frame only.
+ * Main frame only. Each report is console.debug(marker, JSON), from the
+ * page's original console.debug (see utils/internal-console.ts).
  */
-export function watchScript(cfg: WatchConfig): string {
+export function watchScript(cfg: WatchConfig, marker: string): string {
   return `(() => {
   if (window.top !== window || window.__browserMcpWatchInstalled) return;
   Object.defineProperty(window, "__browserMcpWatchInstalled", { value: true });
@@ -150,11 +149,9 @@ export function watchScript(cfg: WatchConfig): string {
   const snapshot = ${SNAPSHOT_FN};
   const findRoots = ${ROOTS_FN};
   const started = Date.now();
+  const debug = console.debug.bind(console);
   const send = (m) => {
-    try {
-      const b = window.${WATCH_BINDING};
-      if (typeof b === "function") Promise.resolve(b(m)).catch(() => {});
-    } catch {}
+    try { debug(${JSON.stringify(marker)}, JSON.stringify(m)); } catch {}
   };
   let timer = null;
   const observing = new WeakSet();

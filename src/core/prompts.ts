@@ -1,4 +1,5 @@
-import type { Browser, CDPSession, Dialog, Frame, Page } from "playwright";
+import type { Browser, CDPSession, ConsoleMessage, Dialog, Frame, Page } from "playwright";
+import { newConsoleMarker } from "../utils/internal-console.js";
 
 // Holds every prompt a session's pages open until the agent answers it, so an
 // unattended run never has a prompt answered for it or left hanging unseen.
@@ -12,7 +13,8 @@ import type { Browser, CDPSession, Dialog, Frame, Page } from "playwright";
 //   read, MIDI, local fonts, window management, idle detection, storage
 //   access. CDP has no event for a permission prompt (checked against the
 //   Chrome 145 protocol), so an init script wraps the APIs that ask, reports
-//   the request through a binding, and waits. Accepting grants the
+//   the request in a console message (see utils/internal-console.ts), and
+//   waits for the server to call back. Accepting grants the
 //   permission to the origin with Browser.setPermission and then runs the
 //   real call; dismissing rejects only that call. Neither is saved in the
 //   profile: a later session on the same Edge profile asks again (verified
@@ -67,17 +69,18 @@ interface Pending {
   cancel: () => void;
 }
 
-const BINDING = "__browserMcpPermissionPrompt";
-
 /**
  * Wraps the permission-requesting APIs in each frame. A call whose
  * permission is already granted or denied goes straight to the real API; a
  * call that would prompt asks the server first and waits for its verdict.
- * "pass" (no server, opaque origin, binding failure) runs the real call.
+ * The request is a console.debug(marker, document, names, resolve) call: the
+ * server finds the frame from the document and answers through resolve.
+ * "pass" (opaque origin, a failed send) runs the real call.
  */
-const PERMISSION_WRAPPER = `(() => {
+const permissionWrapper = (marker: string) => `(() => {
   if (window.__browserMcpPermissionsWrapped) return;
   Object.defineProperty(window, "__browserMcpPermissionsWrapped", { value: true });
+  const send = console.debug.bind(console);
   const ask = async (names) => {
     const pending = [];
     for (const name of names) {
@@ -85,8 +88,8 @@ const PERMISSION_WRAPPER = `(() => {
       try { state = (await navigator.permissions.query({ name })).state; } catch {}
       if (state === "prompt") pending.push(name);
     }
-    if (!pending.length || typeof window.${BINDING} !== "function") return "pass";
-    try { return await window.${BINDING}({ permissions: pending }); } catch { return "pass"; }
+    if (!pending.length) return "pass";
+    try { return await new Promise((resolve) => send(${JSON.stringify(marker)}, document, pending, resolve)); } catch { return "pass"; }
   };
   const notAllowed = () => new DOMException("Permission denied", "NotAllowedError");
   const wrapAsync = (owner, key, namesOf, onDenied) => {
@@ -326,12 +329,33 @@ export class PromptTracker {
   }
 
   private async watchPermissions(page: Page): Promise<void> {
-    await page.exposeBinding(BINDING, (source, payload: { permissions?: unknown }) =>
-      this.onPermissionRequest(page, source.frame, payload),
-    );
-    await page.addInitScript(PERMISSION_WRAPPER);
+    const marker = newConsoleMarker();
+    page.on("console", (msg) => {
+      if (msg.type() === "debug" && msg.text().startsWith(marker)) {
+        this.onPermissionMessage(page, msg).catch(() => {});
+      }
+    });
+    const wrapper = permissionWrapper(marker);
+    await page.addInitScript(wrapper);
     // addInitScript covers later documents; wrap the ones already loaded.
-    for (const frame of page.frames()) frame.evaluate(PERMISSION_WRAPPER).catch(() => {});
+    for (const frame of page.frames()) frame.evaluate(wrapper).catch(() => {});
+  }
+
+  /** A wrapper's console.debug(marker, document, names, resolve): ask the agent, then call resolve with the verdict. */
+  private async onPermissionMessage(page: Page, msg: ConsoleMessage): Promise<void> {
+    const [, docHandle, namesHandle, resolveHandle] = msg.args();
+    try {
+      let verdict: PermissionVerdict = "pass";
+      try {
+        // The frame comes from the browser, not from what the page says.
+        const frame = await docHandle?.asElement()?.ownerFrame();
+        const names = await namesHandle?.jsonValue();
+        if (frame) verdict = await this.onPermissionRequest(page, frame, { permissions: names });
+      } catch { /* "pass": the page's call runs as if nothing were tracked */ }
+      await resolveHandle?.evaluate((resolve, v) => (resolve as (v: string) => void)(v), verdict);
+    } finally {
+      for (const h of msg.args()) h.dispose().catch(() => {});
+    }
   }
 
   private onPermissionRequest(page: Page, frame: Frame, payload: { permissions?: unknown }): Promise<PermissionVerdict> {

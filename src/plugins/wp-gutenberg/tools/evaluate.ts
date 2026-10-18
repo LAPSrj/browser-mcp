@@ -5,6 +5,7 @@ import { resolveToolSite } from "../utils/site.js";
 import { navigateToEditor, checkEditorError } from "../utils/editor.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 import { evaluateScript } from "../../../utils/actions.js";
+import { isInternalConsoleMessage } from "../../../utils/internal-console.js";
 
 /**
  * Run arbitrary JS inside an authenticated Gutenberg editor page and return
@@ -49,6 +50,7 @@ export function createEvaluateHandler(
     // Removed in finally, or each call on a session would leave its
     // listeners on the page.
     const onConsole = (msg: ConsoleMessage) => {
+      if (isInternalConsoleMessage(msg)) return;
       consoleEntries.push({ type: msg.type(), text: msg.text() });
     };
     const onPageError = (err: Error) => {

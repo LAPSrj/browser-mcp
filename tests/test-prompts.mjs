@@ -46,6 +46,21 @@ const server = http.createServer((req, res) => {
     res.setHeader("content-type", "text/html");
     return res.end("<title>in</title><p id=msg>logged in</p>");
   }
+  if (req.url === "/embed") {
+    // The iframe is on localhost, another site than 127.0.0.1, so it runs out of process.
+    res.setHeader("content-type", "text/html");
+    return res.end(
+      `<script>addEventListener("message", (e) => { window.g = e.data; });</script>` +
+        `<iframe id=f allow="geolocation" src="http://localhost:${server.address().port}/frame"></iframe>`,
+    );
+  }
+  if (req.url === "/frame") {
+    res.setHeader("content-type", "text/html");
+    return res.end(
+      "<button id=geo onclick=\"navigator.geolocation.getCurrentPosition(" +
+        "() => parent.postMessage('ok', '*'), (e) => parent.postMessage('error ' + e.code, '*'))\">geo</button>",
+    );
+  }
   res.setHeader("content-type", "text/html");
   res.end(
     "<button id=c onclick=\"window.r = confirm('Delete post?')\">confirm</button>" +
@@ -163,6 +178,27 @@ try {
   await call("respond_prompt", { session_id: sid, prompt_id: perm?.prompt_id, action: "dismiss" });
   check((await evalValue(sid, "return await window.m")) === "NotAllowedError", "dismiss: getUserMedia rejects with NotAllowedError");
   check((await evalValue(sid, "return (await navigator.permissions.query({ name: 'camera' })).state")) === "prompt", "dismiss saves nothing");
+
+  // -------------------------------------------------------------------------
+  console.log("4b. permission request from a cross-origin iframe, no page globals");
+  await call("navigate", { session_id: sid, url: `${base}/embed` });
+  await call("wait_for_selector", { session_id: sid, selector: "#f >>> #geo" });
+  const globals = await evalValue(sid, "return Object.getOwnPropertyNames(window).filter((n) => /playwright|PermissionPrompt|binding__/i.test(n))");
+  check(Array.isArray(globals) && globals.length === 0, "no binding globals on the page", globals);
+  const capture = call("console_capture", { session_id: sid, actions: [{ action: "wait", ms: 1500 }] });
+  await call("click", { session_id: sid, selector: "#f >>> #geo" });
+  // The request reaches the server after the click returns.
+  for (let i = 0; i < 25 && !(perm = (await prompts(sid))[0]); i++) await new Promise((r) => setTimeout(r, 200));
+  const port = server.address().port;
+  check(perm?.kind === "permission" && perm.permissions?.[0] === "geolocation" && perm.url === `http://localhost:${port}`,
+    "the iframe's request is listed with the iframe's origin", perm);
+  await call("respond_prompt", { session_id: sid, prompt_id: perm?.prompt_id, action: "dismiss" });
+  await call("wait_for_selector", { session_id: sid, selector: "body" });
+  await new Promise((r) => setTimeout(r, 300));
+  check((await evalValue(sid, "return window.g")) === "error 1", "dismiss: the iframe's geolocation call fails with PERMISSION_DENIED");
+  const captured = text(await capture);
+  check(!captured.includes("__browserMcp:"), "console_capture doesn't list browser-mcp's own messages", captured);
+  await call("navigate", { session_id: sid, url: base });
 
   // -------------------------------------------------------------------------
   console.log("5. other tabs, list_sessions, close");

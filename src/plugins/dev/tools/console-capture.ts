@@ -6,6 +6,7 @@ import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget,
 import { navigateTo } from "../../../utils/navigate.js";
 import { saveFile, generateFilename } from "../../../utils/file.js";
 import { sessionManager } from "../../../core/sessions.js";
+import { isInternalConsoleMessage } from "../../../utils/internal-console.js";
 
 export interface ConsoleCaptureParams extends BrowserStackTarget {
   url?: string;
@@ -72,6 +73,7 @@ export async function consoleCaptureTool(params: ConsoleCaptureParams) {
   // Removed in finally, or each call on a session would leave its listeners
   // on the page for the session's lifetime.
   const onConsole = (msg: ConsoleMessage) => {
+    if (isInternalConsoleMessage(msg)) return;
     consoleLogs.push({
       type: msg.type(),
       text: msg.text(),

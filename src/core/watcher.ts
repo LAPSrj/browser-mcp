@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import type { Page } from "playwright";
 import { sessionManager } from "./sessions.js";
+import { newConsoleMarker } from "../utils/internal-console.js";
 import {
-  WATCH_BINDING,
   appendEvents,
   diffSnapshot,
   readSpec,
@@ -123,13 +123,18 @@ export async function runWatcher(name: string): Promise<number> {
       sessionManager.getPrompts(sessionId!).respond(prompt.prompt_id, { action: "dismiss" }).catch(() => {});
     });
 
-    await page.exposeBinding(WATCH_BINDING, (_source, msg: any) => {
+    const marker = newConsoleMarker();
+    page.on("console", (cm) => {
+      const text = cm.type() === "debug" ? cm.text() : "";
+      if (!text.startsWith(`${marker} `)) return;
+      let msg: any;
+      try { msg = JSON.parse(text.slice(marker.length + 1)); } catch { return; }
       if (msg?.type === "snapshot") onSnapshot(msg);
       else if (msg?.type === "notification") {
         emit([{ type: "notification", title: String(msg.title ?? ""), body: String(msg.body ?? "") }], page.url());
       }
     });
-    await page.addInitScript(watchScript(spec.config));
+    await page.addInitScript(watchScript(spec.config, marker));
     page.on("crash", () => {
       log("the page crashed; reloading");
       page.reload().catch((e) => end("error", `the page crashed and didn't reload: ${(e as Error).message}`, 1));
