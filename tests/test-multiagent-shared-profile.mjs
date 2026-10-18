@@ -86,7 +86,10 @@ async function main() {
   log(`Server B session_id=${sB.session_id}`);
   const procsAfterB = msedgeProcsTagged(PROFILE_WIN);
   log(`msedge procs: before B=${procsBeforeB}, after B=${procsAfterB}`);
-  if (procsAfterB > procsBeforeB + 1) fail(`Server B should NOT spawn another browser; procs grew from ${procsBeforeB} to ${procsAfterB} (more than +1 renderer)`);
+  // B's new tab adds a renderer, and Edge sometimes starts a spare renderer or
+  // utility process at the same moment (seen live: +2). A second browser would
+  // add a dozen or more; the sidecar's root_pid check below is the exact one.
+  if (procsAfterB > procsBeforeB + 3) fail(`Server B should NOT spawn another browser; procs grew from ${procsBeforeB} to ${procsAfterB} (more than +3)`);
   ok("Server B did NOT spawn another browser — attached to existing");
 
   const sidecar2 = readSidecar(PROFILE_WSL);
