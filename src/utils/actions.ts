@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
 import type { CustomActionHandler } from "../plugins/types.js";
 import { resolveLocator, pointerActionFailingFastWhenCovered } from "./locator.js";
+import { scrollIntoView, selectOption, typeText } from "./input.js";
 import { compactErrorMessage } from "./errors.js";
 
 // Module-level custom action handlers from plugins.
@@ -170,11 +171,7 @@ export async function runActions(
         }
         case "type": {
           const a = act as TypeAction;
-          const timeout = resolveTimeout(a);
-          await resolveLocator(page, a.selector).fill(
-            a.text,
-            timeout !== undefined ? { timeout } : undefined,
-          );
+          await typeText(resolveLocator(page, a.selector), a.selector, a.text, { timeout: resolveTimeout(a) });
           break;
         }
         case "wait_for_selector": {
@@ -188,10 +185,7 @@ export async function runActions(
           break;
         case "scroll_to": {
           const a = act as ScrollToAction;
-          const timeout = resolveTimeout(a);
-          await resolveLocator(page, a.selector).scrollIntoViewIfNeeded(
-            timeout !== undefined ? { timeout } : undefined,
-          );
+          await scrollIntoView(resolveLocator(page, a.selector), resolveTimeout(a));
           break;
         }
         case "evaluate":
@@ -208,11 +202,7 @@ export async function runActions(
         }
         case "select": {
           const a = act as SelectAction;
-          const timeout = resolveTimeout(a);
-          await resolveLocator(page, a.selector).selectOption(
-            a.value,
-            timeout !== undefined ? { timeout } : undefined,
-          );
+          await selectOption(resolveLocator(page, a.selector), a.selector, a.value, resolveTimeout(a));
           break;
         }
         case "assert_visible":

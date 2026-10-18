@@ -11,6 +11,7 @@ import {
 import { sessionManager } from "./sessions.js";
 import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator, pointerActionFailingFastWhenCovered } from "../utils/locator.js";
+import { LONG_TEXT, drag, pressKeys, scrollIntoView, scrollPage, selectOption, setChecked, typeText } from "../utils/input.js";
 import { diagnosePageErrors } from "../utils/page-diagnostics.js";
 import {
   checkName,
@@ -184,12 +185,14 @@ export const sessionPrimitives: Record<string, PrimitiveDef> = {
         "attach_cdp only. Default false closes tabs the profile restores from its last run, leaving one page. true keeps them. " +
           "A browser other active sessions use keeps every tab; the session gets a new one.",
       ),
-      human_mouse: z.preprocess(
+      human_behavior: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
         z.boolean(),
       ).optional().describe(
-        "Clicks and hovers move the mouse along a curved path to a random point in the element and hold each click 50-150 ms, " +
-          "for sites that check for bots (e.g. Cloudflare Turnstile). Adds about 0.3-0.5 s per click or hover. Default true with attach_cdp, false otherwise.",
+        "Act like a person, for sites that check for bots (e.g. Cloudflare): the mouse moves along varied curves to a random point in the element, " +
+          "clicks are held 50-150 ms, scrolling uses the mouse wheel, type_text clicks into the field and types key by key " +
+          `(text over ${LONG_TEXT} chars is pasted with Ctrl+V), and select_option opens the dropdown and picks with the arrow keys. ` +
+          "Slower: about 0.3-0.5 s per click, 5 s per 50 typed chars. Default true with attach_cdp, false otherwise.",
       ),
       ignore_https_errors: z.preprocess(
         (v) => (v === "true" ? true : v === "false" ? false : v),
@@ -521,14 +524,11 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      const target = resolveLocator(page, p.selector);
-      const clear = p.clear !== false;
-      if (clear) {
-        await target.fill(p.text, { timeout: p.timeout });
-      } else {
-        await target.pressSequentially(p.text, { timeout: p.timeout });
-      }
-      if (p.press_enter) await target.press("Enter");
+      await typeText(resolveLocator(page, p.selector), p.selector, p.text, {
+        clear: p.clear,
+        pressEnter: p.press_enter,
+        timeout: p.timeout,
+      });
       return ok(`Typed ${p.text.length} chars into ${p.selector}`);
     }),
   },
@@ -553,14 +553,12 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       if (keys.length === 0) return err("keys is empty.");
       return withPage(p, async (page) => {
         const lines: string[] = [];
-        for (const [i, key] of keys.entries()) {
-          if (i === 0 && p.selector) {
-            await resolveLocator(page, p.selector).press(key, { timeout: p.timeout });
-          } else {
-            await page.keyboard.press(key);
-          }
-          lines.push(`${key} → focus: ${await describeFocus(page)}`);
-        }
+        await pressKeys(
+          page,
+          keys,
+          async (key) => { lines.push(`${key} → focus: ${await describeFocus(page)}`); },
+          p.selector ? { locator: resolveLocator(page, p.selector), selector: p.selector, timeout: p.timeout } : undefined,
+        );
         return ok(keys.length === 1 ? `Pressed ${lines[0]}` : `Pressed ${keys.length} keys:\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n")}`);
       });
     },
@@ -598,21 +596,13 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        await resolveLocator(page, p.selector).scrollIntoViewIfNeeded({ timeout: p.timeout });
+        await scrollIntoView(resolveLocator(page, p.selector), p.timeout);
         return ok(`Scrolled ${p.selector} into view`);
       }
-      if (p.to === "top") {
-        await page.evaluate(() => window.scrollTo(0, 0));
-        return ok("Scrolled to top");
-      }
-      if (p.to === "bottom") {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        return ok("Scrolled to bottom");
-      }
-      const dx = p.x ?? 0;
-      const dy = p.y ?? 0;
-      await page.evaluate(([x, y]) => window.scrollBy(x as number, y as number), [dx, dy]);
-      return ok(`Scrolled by x=${dx}, y=${dy}`);
+      const moved = await scrollPage(page, { top: p.to === "top", bottom: p.to === "bottom", dx: p.x, dy: p.y });
+      if (p.to === "top") return ok("Scrolled to top");
+      if (p.to === "bottom") return ok("Scrolled to bottom");
+      return ok(`Scrolled by x=${moved.x}, y=${moved.y}`);
     }),
   },
 
@@ -626,9 +616,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      const from = resolveLocator(page, p.from_selector);
-      const to = resolveLocator(page, p.to_selector);
-      await from.dragTo(to, { timeout: p.timeout });
+      await drag(resolveLocator(page, p.from_selector), resolveLocator(page, p.to_selector), p.timeout);
       return ok(`Dragged ${p.from_selector} → ${p.to_selector}`);
     }),
   },
@@ -649,7 +637,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       if (p.value !== undefined) opts.value = p.value;
       if (p.label !== undefined) opts.label = p.label;
       if (p.index !== undefined) opts.index = p.index;
-      const picked = await resolveLocator(page, p.selector).selectOption(opts, { timeout: p.timeout });
+      const picked = await selectOption(resolveLocator(page, p.selector), p.selector, opts, p.timeout);
       return json({ selected: picked });
     }),
   },
@@ -658,7 +646,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Check a checkbox or radio button. No-op if already checked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).check({ timeout: p.timeout });
+      await setChecked(resolveLocator(page, p.selector), p.selector, true, p.timeout);
       return ok(`Checked ${p.selector}`);
     }),
   },
@@ -667,7 +655,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Uncheck a checkbox. No-op if already unchecked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).uncheck({ timeout: p.timeout });
+      await setChecked(resolveLocator(page, p.selector), p.selector, false, p.timeout);
       return ok(`Unchecked ${p.selector}`);
     }),
   },
@@ -718,7 +706,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
         // before the listener is attached.
         const [chooser] = await Promise.all([
           page.waitForEvent("filechooser", { timeout }),
-          resolveLocator(page, p.trigger_selector).click({ timeout }),
+          pointerActionFailingFastWhenCovered(resolveLocator(page, p.trigger_selector), "click", p.trigger_selector, { timeout }),
         ]);
         await chooser.setFiles(p.paths, { timeout });
         return ok(
