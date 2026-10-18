@@ -13,6 +13,22 @@ import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator, pointerActionFailingFastWhenCovered } from "../utils/locator.js";
 import { diagnosePageErrors } from "../utils/page-diagnostics.js";
 import {
+  checkName,
+  createWatch,
+  diffSnapshot,
+  emptyState,
+  ensureWatcher,
+  listWatchNames,
+  removeWatch,
+  snapshotExpression,
+  summarizeWatch,
+  watchCommand,
+  watchPaths,
+  type Snapshot,
+  type WatchConfig,
+  type WatchSpec,
+} from "./watches.js";
+import {
   settleElementForCapture,
   settlePageForCapture,
   formatSettleWarning,
@@ -1354,6 +1370,141 @@ export const downloadPrimitives: Record<string, PrimitiveDef> = {
 };
 
 // ---------------------------------------------------------------------------
+// Page watches
+// ---------------------------------------------------------------------------
+
+/** BROWSER_MCP_* settings a watcher started from another shell needs to open the same browser. */
+function browserMcpEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (e): e is [string, string] => e[0].startsWith("BROWSER_MCP_") && e[0] !== "BROWSER_MCP_WATCH_DIR" && e[1] !== undefined,
+    ),
+  );
+}
+
+export const watchPrimitives: Record<string, PrimitiveDef> = {
+  watch_page: {
+    description:
+      "Watch a session tab for changes (new chat messages, a status or price change) and get a shell command that reports them. " +
+      "A background watcher opens its own session on the same profile and keeps running after this server or the agent exits. " +
+      "Running the command starts the watcher again if it isn't running (after a crash or reboot), prints the events since the last run " +
+      "as JSON lines (including what changed while it was down), and ends with VERDICT: EVENTS | NONE | TIMEOUT | ENDED | ERROR. " +
+      "Add --wait to wait for the next event (run it as a background command), or --follow to keep printing. " +
+      "attach_cdp sessions need user_data_dir; Playwright sessions have their cookies saved with the watch.",
+    schema: {
+      session_id: z.string(),
+      tab_id: z.string().optional().describe("Tab to watch (default: active). The watcher loads its current URL."),
+      name: z.string().describe("Watch name: letters, digits, - or _. An existing watch with this name is replaced."),
+      selector: z.string().optional().describe(
+        "CSS selector (not role= or text=), also matched inside open shadow roots. items mode: one match per message, e.g. \".message .text\"; pick the element with only " +
+          "the message text, since a timestamp that changes makes it a new message. value mode: the element whose text to watch.",
+      ),
+      mode: z.enum(["items", "value"]).optional().describe(
+        'items (default): report each new text under selector. value: report when the first match\'s text changes, with from/to.',
+      ),
+      title: z.boolean().optional().describe(
+        "Report document.title changes, e.g. \"(3) Inbox\" (default true without selector, false with one; titles that blink report often)",
+      ),
+      notifications: z.boolean().optional().describe(
+        "Report the site's desktop notifications (new Notification / showNotification), with title and body (default true). " +
+          "Many sites only send them with notification permission and while the tab is hidden.",
+      ),
+      logged_in_selector: z.string().optional().describe(
+        "CSS selector that's on the page only while logged in (e.g. the avatar). Missing 15s after a load ends the watch as logged_out.",
+      ),
+      logged_out_url: z.string().optional().describe("Substring or /regex/flags of the login page URL; going there ends the watch as logged_out"),
+      reload_ms: z.number().min(10000).optional().describe("Reload the page this often, for sites that only update on reload (min 10000)"),
+    },
+    handler: async (p) => {
+      const name = checkName(p.name);
+      const config: WatchConfig = {
+        selector: p.selector ?? null,
+        mode: p.mode ?? "items",
+        title: p.title ?? !p.selector,
+        notifications: p.notifications ?? true,
+        logged_in_selector: p.logged_in_selector ?? null,
+      };
+      if (!config.selector && !config.title && !config.notifications) {
+        return err("Nothing to watch: pass a selector, or leave title or notifications on.");
+      }
+      sessionManager.touch(p.session_id);
+      const page = sessionManager.getPage(p.session_id, p.tab_id);
+      let source: Awaited<ReturnType<typeof sessionManager.watchSource>>;
+      try {
+        source = await sessionManager.watchSource(p.session_id);
+      } catch (e) {
+        return err((e as Error).message);
+      }
+      let snap: Snapshot;
+      try {
+        snap = await page.evaluate(snapshotExpression(config));
+      } catch (e) {
+        return err(`Could not read the page with selector ${JSON.stringify(config.selector)} (it must be CSS): ${(e as Error).message}`);
+      }
+      if (config.logged_in_selector && !snap.logged_in) {
+        return err(`logged_in_selector ${JSON.stringify(config.logged_in_selector)} isn't on ${snap.url}. Log in first, or fix the selector.`);
+      }
+      if (/^(about|chrome|edge|data):/.test(snap.url)) {
+        return err(`The tab is on ${snap.url}; navigate it to the page to watch first.`);
+      }
+      const state = emptyState();
+      diffSnapshot(config, state, snap, true);
+      const spec: WatchSpec = {
+        version: 1,
+        name,
+        created_at: new Date().toISOString(),
+        url: snap.url,
+        config,
+        logged_out_url: p.logged_out_url ?? null,
+        reload_ms: p.reload_ms ?? null,
+        open: source.open,
+        env: browserMcpEnv(),
+        has_storage: !!source.storageState,
+      };
+      await createWatch(spec, state, source.storageState);
+      const watcher = await ensureWatcher(name, 60_000);
+      const notes: string[] = [];
+      if (config.selector && snap.items.length === 0) {
+        notes.push(`selector ${JSON.stringify(config.selector)} matches nothing with text on the page right now, so check it before relying on the watch.`);
+      }
+      if (source.storageState) {
+        notes.push(`The session's cookies were saved to ${watchPaths(name).storage} (readable by you only) so the watcher opens the page logged in.`);
+      }
+      return json({
+        name,
+        url: snap.url,
+        matched: snap.items.length,
+        ...(config.mode === "items" ? { last_items: snap.items.slice(-5) } : { value: snap.items[0] ?? null }),
+        title: snap.title,
+        watcher,
+        command: watchCommand(name),
+        wait_command: `${watchCommand(name)} --wait`,
+        events_file: watchPaths(name).events,
+        ...(notes.length ? { notes } : {}),
+      });
+    },
+  },
+
+  unwatch_page: {
+    description: "Stop a watch's background watcher and delete the watch (its saved state, events and cookies).",
+    schema: {
+      name: z.string(),
+    },
+    handler: async (p) => {
+      const name = checkName(p.name);
+      const r = await removeWatch(name);
+      return r.removed ? json({ name, ...r }) : err(`No watch named "${name}". Watches: ${listWatchNames().join(", ") || "(none)"}.`);
+    },
+  },
+
+  list_watches: {
+    description: "List page watches: URL, selector, whether the watcher is running, unread events, the last event, and the command.",
+    schema: {},
+    handler: async () => json(listWatchNames().map(summarizeWatch).filter(Boolean)),
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Type + aggregator
 // ---------------------------------------------------------------------------
 
@@ -1376,5 +1527,6 @@ export function allPrimitives(): Record<string, PrimitiveDef> {
     ...savePrimitives,
     ...dialogPrimitives,
     ...downloadPrimitives,
+    ...watchPrimitives,
   };
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
-import { runCli } from "./cli.js";
+import { parseArgs, runCli } from "./cli.js";
+import { checkName, runWatchCli } from "./core/watches.js";
+import { runWatcher } from "./core/watcher.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { loadPlugins } from "./plugins/loader.js";
 import { launchSession, closeSession } from "./utils/browser.js";
@@ -48,6 +50,15 @@ async function bootstrap(): Promise<{ config: ServerConfig; registry: PluginRegi
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // Page watches don't use plugins: the reader only reads files, and the
+  // watcher process opens a plain session.
+  if (args[0] === "watch" || args[0] === "unwatch") {
+    process.exit(await runWatchCli(args[0], parseArgs(args.slice(1))));
+  }
+  if (args[0] === "watch-run") {
+    process.exit(await runWatcher(checkName(String(parseArgs(args.slice(1)).name))));
+  }
 
   if (args.length > 0) {
     // Direct CLI usage: node dist/index.js <tool> [options]

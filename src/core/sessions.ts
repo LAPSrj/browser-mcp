@@ -371,6 +371,8 @@ interface Session {
   prompts: PromptTracker;
   /** The context "dialog" listener, removed on close: an attach_cdp context outlives the session. */
   onDialog: (dialog: Dialog) => void;
+  /** The open() options that pick the browser and profile, for watch_page to reopen an equivalent session. */
+  openFields: OpenSessionOptions;
   /** Launch-time options captured for pause_session — replayed verbatim into resume_session's open(). */
   pauseFields: {
     viewport: { width: number; height: number };
@@ -713,6 +715,19 @@ class SessionManager {
       downloads,
       prompts,
       onDialog,
+      openFields: {
+        browser: opts.browser,
+        viewport: opts.viewport,
+        user_agent: opts.user_agent,
+        locale: opts.locale,
+        timezone: opts.timezone,
+        ignore_https_errors: opts.ignore_https_errors,
+        attach_cdp: opts.attach_cdp,
+        auto_launch: opts.auto_launch,
+        executable_path: opts.executable_path,
+        user_data_dir: opts.user_data_dir,
+        useBrowserStack: opts.useBrowserStack,
+      },
       pauseFields: {
         viewport,
         user_agent: opts.user_agent,
@@ -1364,6 +1379,30 @@ class SessionManager {
     const s = this.sessions.get(session_id);
     if (!s || s.closing) return null;
     return { prompts: s.prompts, tabId: tab_id ?? s.activeTabId };
+  }
+
+  /**
+   * What a watcher process needs to open its own session like this one: the
+   * open options without a url or TTLs, and for a Playwright-launched session
+   * its cookies and storage, which exist only in this process. Throws for
+   * sessions a watcher can't reopen logged in.
+   */
+  async watchSource(session_id: string): Promise<{ open: OpenSessionOptions; storageState?: object }> {
+    const s = this.get(session_id);
+    const open = Object.fromEntries(
+      Object.entries(s.openFields).filter(([, v]) => v !== undefined),
+    ) as OpenSessionOptions;
+    if (open.useBrowserStack) {
+      throw new Error("watch_page doesn't work on BrowserStack sessions: the watcher would keep a BrowserStack session open all the time.");
+    }
+    if (open.attach_cdp === true && !open.user_data_dir) {
+      throw new Error(
+        "This attach_cdp session uses a temporary profile that's deleted when the session closes, so a watcher couldn't open it logged in. " +
+          "Open the session with user_data_dir (a profile folder that stays), log in, and call watch_page on that session.",
+      );
+    }
+    if (s.isAttachCdp) return { open };
+    return { open, storageState: await s.context.storageState() };
   }
 
   /** True when the session runs on a real BrowserStack device (real iOS Safari). */

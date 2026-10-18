@@ -56,6 +56,15 @@ Dialogs:
 
 Downloads (session-only):
   wait_for_download, list_downloads, set_download_dir
+
+Page watches (create one with the watch_page MCP tool):
+  watch --name=<name>     Start the watcher if it isn't running, print new events as JSON lines,
+                          end with VERDICT: EVENTS | NONE | TIMEOUT | ENDED | ERROR (exit 0/0/2/3/1)
+        --wait            Wait for the next event when there are none
+        --timeout=<ms>    Give up waiting after this long (default: no limit)
+        --follow          Keep printing events until the watch ends
+  watch                   List watches
+  unwatch --name=<name>   Stop the watcher and delete the watch
 ${pluginSection}
 Options are passed as --key=value or --key value. JSON values are supported.
 
@@ -81,7 +90,7 @@ Examples:
 `);
 }
 
-function parseArgs(args: string[]): Record<string, unknown> {
+export function parseArgs(args: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   let i = 0;
 

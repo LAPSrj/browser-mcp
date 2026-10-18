@@ -115,6 +115,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `save_pdf`, `save_html` | output capture |
 | `list_prompts`, `respond_prompt`, `handle_next_dialog` | dialogs, permission requests and HTTP logins wait for the agent: list them, answer one, or pre-answer the next dialog (see Prompt contract) |
 | `wait_for_download`, `list_downloads`, `set_download_dir` | file downloads: wait for one to finish and get its saved path, list them, pick the folder (see Download contract) |
+| `watch_page`, `list_watches`, `unwatch_page` | watch a tab for new messages or a changed value; returns the `browser-mcp watch --name=<name>` command that reports them, across restarts (see Watch contract) |
 | `list_modes` | enumerate registered modes |
 
 ## Cross-cutting concepts {#cross-cutting}
@@ -278,6 +279,18 @@ Assertions inside `actions` produce `assertions` output messages but don't fail 
 - A call whose permission is already `granted` or `denied` isn't held. Closing a tab drops its prompts; closing a session dismisses its dialogs, rejects its permission requests, and cancels its logins.
 
 > **Hazard (shared attach_cdp profile):** while any session is attached, a dialog on a tab no session owns (e.g. its owner's server exited) stays open, because each session leaves other sessions' dialogs to their owner. Before this feature Playwright dismissed it. `claim_tab` it and close it, or answer it in the browser window.
+
+### Watch contract {#watch-contract}
+
+- `watch_page({ session_id, tab_id?, name, selector?, mode?, title?, notifications?, logged_in_selector?, logged_out_url?, reload_ms? })` saves a watch of the tab's current URL in `~/.browser-mcp/watches/<name>/` (`BROWSER_MCP_WATCH_DIR`), starts its background watcher, and returns `{ matched, last_items | value, title, watcher: { pid, started, error? }, command, wait_command, events_file }`. A watch with the same name is replaced.
+- `selector` is CSS only (no `role=` / `text=`), matched in the document and in open shadow roots. `mode: "items"` (default) reports each text new under it as `added`; `mode: "value"` reports the first match's text changing as `changed` with `from` / `to`. `title` defaults to true only without a selector. `notifications` (default true) reports the site's `new Notification(...)` and `registration.showNotification(...)` calls; sites often send them only with notification permission and while the tab is hidden.
+- `browser-mcp watch --name=<name> [--wait] [--timeout=<ms>] [--follow]` starts the watcher if it isn't running (lock file, so concurrent runs start one), prints each event after the last printed one as a JSON line (`seq`, `time`, `url`, `type`, …), and ends with `VERDICT: EVENTS | NONE | TIMEOUT | ENDED | ERROR` (exit 0 / 0 / 2 / 3 / 1). `--wait` waits for the next event, and `--follow` keeps printing until the watch ends. Without `--name` it lists the watches. `browser-mcp unwatch --name=<name>` stops the watcher and deletes the watch.
+- The watch folder keeps what was last reported (per-text counts, the value, the title). A restarted watcher compares the page with it first, so events cover what changed while no watcher ran (crash, reboot), and nothing is reported twice. A text appearing more times than ever before is new; re-rendered messages aren't.
+- `ended` events: `logged_out` (URL matches `logged_out_url`, or `logged_in_selector` missing 15 s after a load), `browser_closed`, `error`. The watcher exits; the next run starts it again and reports `logged_out` again while the site is still logged out.
+- Dialogs and permission requests in the watcher's tab are dismissed and reported as `prompt` events, because a held dialog stops the page.
+- Refused: BrowserStack sessions, and `attach_cdp: true` without `user_data_dir` (that temp profile is deleted on close). Playwright-launched sessions have their cookies and storage saved to `storage.json` (mode 0600).
+
+> **Hazard (selector includes a changing timestamp):** in items mode a message is its text, so a relative time inside the matched element ("now" → "1 min") makes the same message look new. Match the element with only the message body.
 
 ### Pause / resume contract {#pause-resume-contract}
 
@@ -651,6 +664,14 @@ When NOT to use a long `wall_ttl_ms`:
 2. `click({ session_id, selector: "role=link[name=\"Download PDF\"]" })`.
 3. `wait_for_download({ session_id })` → `{ state: "completed", path: "/home/me/work/invoices/invoice-0423.pdf", bytes: 48213, ... }`.
 4. Read or upload `path` directly. For several files, repeat the click + `wait_for_download` pair, or click them all and call `wait_for_download` once per file (it returns them oldest first). `list_downloads` shows everything so far.
+
+### Get notified of new messages on a logged-in chat
+
+1. `open_session({ attach_cdp: true, user_data_dir })`, log in (`set_window({ state: "show" })` if a human has to), and `navigate` to the conversation.
+2. Find a CSS selector that matches only each message's text (check it with `evaluate_script`), and one that exists only while logged in.
+3. `watch_page({ session_id, name: "chat", selector: ".msg .body", logged_in_selector: "#avatar" })` → `command: "browser-mcp watch --name=chat"`.
+4. Run `browser-mcp watch --name=chat --wait` as a background command. It exits on the next message with the events and `VERDICT: EVENTS`; handle them and run it again. A scheduled task can run `browser-mcp watch --name=chat` on its own schedule instead, which also restarts the watcher after a reboot and reports what came in meanwhile.
+5. `VERDICT: ENDED` with `reason: "logged_out"` means the login expired: log in again in the profile, then run the command again.
 
 ### Run an a11y audit on a logged-in page
 

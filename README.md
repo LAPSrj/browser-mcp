@@ -411,6 +411,91 @@ A name that's already taken gets a ` (1)`, ` (2)`… suffix. Downloads are
 tracked per tab, so sessions sharing one attach_cdp profile only see their
 own.
 
+### Page watches
+
+Watch a page for changes, such as new chat messages or a status that
+changes, and get a shell command that reports them. The watch keeps running
+after the MCP server and the agent exit, and it picks up again after a crash
+or a reboot.
+
+| Tool | Purpose |
+|---|---|
+| `watch_page` | Save a watch for a session tab and start its background watcher. Returns the command to run. |
+| `list_watches` | Every watch: URL, selector, whether the watcher is running, unread events, last event, command. |
+| `unwatch_page` | Stop the watcher and delete the watch. |
+
+```jsonc
+{ "tool": "watch_page", "params": {
+  "session_id": "…", "name": "support-chat",
+  "selector": ".message .text",        // one match per message
+  "logged_in_selector": "#avatar"      // only there while logged in
+}}
+// → { "matched": 12, "last_items": […], "command": "browser-mcp watch --name=support-chat", … }
+```
+
+```bash
+browser-mcp watch --name=support-chat          # print new events, then exit
+browser-mcp watch --name=support-chat --wait   # wait for the next event (run as a background command)
+browser-mcp watch --name=support-chat --follow # keep printing (e.g. for Claude Code's Monitor)
+browser-mcp watch                              # list watches
+browser-mcp unwatch --name=support-chat
+```
+
+Each event is one JSON line, and the last line is the verdict:
+
+```
+{"seq":4,"time":"2026-10-17T21:02:11.204Z","url":"https://…/chat","type":"added","text":"Your refund was approved"}
+VERDICT: EVENTS
+```
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `EVENTS` | 0 | New events were printed. |
+| `NONE` | 0 | Nothing new (without `--wait`). |
+| `TIMEOUT` | 2 | `--timeout=<ms>` passed with nothing new. |
+| `ENDED` | 3 | The watcher ended: logged out, the browser closed, or an error (see the `ended` event's `reason`). The next run starts it again. |
+| `ERROR` | 1 | No such watch, or the watcher didn't start (its log is `watcher.log` in the watch folder). |
+
+Event types: `added` (items mode: a text new under `selector`), `changed`
+(value mode: `from` / `to`), `title` (`from` / `to`), `notification`
+(the site's `new Notification` / `showNotification`, with `title` and
+`body`), `prompt` (a dialog or permission request, dismissed so the page
+keeps running), and `ended` (`reason`: `logged_out`, `browser_closed`,
+`error`).
+
+How it works:
+
+- `watch_page` saves the watch in `~/.browser-mcp/watches/<name>/`
+  (`BROWSER_MCP_WATCH_DIR` to change it): the URL, the selector, the
+  session's open options, and its `BROWSER_MCP_*` settings. The watcher is
+  a background process that opens its own session from those options. For
+  attach_cdp it opens a tab in the same profile, starting the browser hidden
+  if it isn't running. A Playwright-launched session's cookies and storage
+  are saved with the watch (`storage.json`, readable by you only).
+- Every run of `browser-mcp watch` starts the watcher if it isn't running,
+  and a lock file keeps two runs from starting two watchers. A run prints
+  the events after the last ones printed, so an agent and a scheduled task
+  can run the same command and only get what's new.
+- The watch folder keeps what was last reported: a count per message text
+  in items mode (a second identical "ok" is new, and a message re-rendered
+  by scrolling or a reload isn't), or the last value in value mode, plus the
+  title. A restarted watcher compares the page with it and reports what
+  changed while no watcher was running. Notifications and titles shown while
+  it was down can't be recovered.
+- `selector` is CSS, matched in the document and in open shadow roots. In
+  items mode, pick the element holding only the message text, because a
+  timestamp that changes ("now", "1 min") makes the same message look new.
+  Only rendered elements count, so a virtualized list reports what it shows.
+- A login that ends is reported as `ended` with `reason: "logged_out"` when
+  the page goes to `logged_out_url`, or when `logged_in_selector` is missing
+  15 s after a load. Each later run reports it again until you log back in.
+- `reload_ms` reloads the page on a timer, for sites that only update on
+  reload.
+
+Not supported: BrowserStack sessions, and attach_cdp sessions on the default
+temporary profile (it's deleted when the session closes, so open the session
+with `user_data_dir`).
+
 ## Plugins
 
 Plugins are opt-in. Enable with `BROWSER_MCP_PLUGINS=name1,name2,…` —
