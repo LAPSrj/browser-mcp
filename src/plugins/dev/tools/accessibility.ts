@@ -5,6 +5,7 @@ import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget,
 import { navigateTo } from "../../../utils/navigate.js";
 import { walkAccessibilityTree } from "../../../utils/a11y-walker.js";
 import { sessionManager } from "../../../core/sessions.js";
+import { childFrames, frameContentBox, framePath } from "../../../utils/frames.js";
 
 export type A11yRuleName =
   | "section-has-name"
@@ -104,6 +105,9 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
 
     if (!skipTree) {
       const snapshot = await walkAccessibilityTree(page, scope);
+      // The page walk stops at <iframe>, so a whole-page snapshot adds each
+      // laid-out iframe's own tree, labelled with its selector prefix.
+      const iframes = scope ? [] : await iframeTrees(page);
       if (!snapshot) {
         content.push({ type: "text", text: "No accessibility tree available for this page." });
       } else if (summaryOnly) {
@@ -118,10 +122,28 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
             headingCount: stats.headingCount,
             landmarkCount: stats.landmarkCount,
             namedNodeCount: stats.namedNodeCount,
+            ...(iframes.length > 0
+              ? {
+                  iframes: iframes.map((f) => ({
+                    frame: f.frame,
+                    url: f.url,
+                    totalNodes: summarizeA11yTree(f.tree as Record<string, unknown>).totalNodes,
+                  })),
+                }
+              : {}),
           }, null, 2),
         });
       } else {
         content.push({ type: "text", text: JSON.stringify(snapshot, null, 2) });
+      }
+      if (iframes.length > 0 && !summaryOnly) {
+        content.push({
+          type: "text",
+          text:
+            `Iframes (${iframes.length}). To act on an element inside one, put its frame value and " >>> " before the selector, ` +
+            `e.g. \`${iframes[0].frame} >>> role=button[name="…"]\`.\n` +
+            JSON.stringify(iframes, null, 2),
+        });
       }
     }
 
@@ -129,6 +151,16 @@ export async function accessibilitySnapshotTool(params: AccessibilitySnapshotPar
   } finally {
     if (cleanup) await cleanup();
   }
+}
+
+async function iframeTrees(page: Page): Promise<Array<{ frame: string; url: string; tree: unknown }>> {
+  const out: Array<{ frame: string; url: string; tree: unknown }> = [];
+  for (const frame of childFrames(page)) {
+    if (!(await frameContentBox(frame))) continue;
+    const tree = await walkAccessibilityTree(frame).catch(() => null);
+    if (tree) out.push({ frame: await framePath(frame), url: frame.url(), tree });
+  }
+  return out;
 }
 
 async function runA11yRules(

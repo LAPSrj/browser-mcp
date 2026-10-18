@@ -11,6 +11,7 @@ import {
 import { sessionManager } from "./sessions.js";
 import { useSchemaField, browserStackFields } from "../utils/schemas.js";
 import { resolveLocator, pointerActionFailingFastWhenCovered } from "../utils/locator.js";
+import { locate, locateWhenPresent, frameNote } from "../utils/frames.js";
 import { LONG_TEXT, drag, pressKeys, scrollIntoView, scrollPage, selectOption, setChecked, typeText } from "../utils/input.js";
 import { diagnosePageErrors } from "../utils/page-diagnostics.js";
 import {
@@ -109,7 +110,10 @@ const selectorField = {
     "CSS (`#id`, `nav > a`), Playwright role (`role=button[name=\"Submit\"]`, preferred: survives class and layout changes), " +
     "text (`text=\"Save\"` exact, `text=Save` substring; breaks across locales), or `button:has-text(\"Save\")`. " +
     "Avoid build-hashed classes like `.css-1g2hf83`. " +
-    "Pierce iframes, cross-origin too, with ` >>> `: `iframe[src*=\"chat\"] >>> #send` (nestable).",
+    "Pierce iframes, cross-origin too, with ` >>> `: `iframe[src*=\"chat\"] >>> #send` (nestable), or by frame URL when CSS " +
+    "can't reach the iframe (closed shadow root): `frame-url=challenges.cloudflare.com >>> input`. " +
+    "A plain selector that matches nothing on the page is also looked up inside iframes. " +
+    "list_interactive_elements returns iframe contents with these prefixes.",
   ),
 };
 const timeoutField = {
@@ -440,7 +444,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      const locator = resolveLocator(page, p.selector);
+      const { locator, selector } = await locate(page, p.selector);
 
       const elementInfo = await locator.first().evaluate((el) => {
         const he = el as HTMLElement;
@@ -474,7 +478,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
 
       const urlBefore = page.url();
 
-      await pointerActionFailingFastWhenCovered(locator, "click", p.selector, {
+      await pointerActionFailingFastWhenCovered(locator, "click", selector, {
         button: p.button,
         clickCount: p.click_count,
         force: p.force,
@@ -486,6 +490,10 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       const navigated = urlAfter !== urlBefore;
 
       const result: Record<string, unknown> = { selector: p.selector };
+      if (selector !== p.selector) {
+        result.resolved_selector = selector;
+        result.note = `Found inside an iframe. Use resolved_selector for this element from now on.`;
+      }
 
       if (elementInfo) result.element = elementInfo;
 
@@ -524,12 +532,13 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await typeText(resolveLocator(page, p.selector), p.selector, p.text, {
+      const { locator, selector } = await locate(page, p.selector);
+      await typeText(locator, selector, p.text, {
         clear: p.clear,
         pressEnter: p.press_enter,
         timeout: p.timeout,
       });
-      return ok(`Typed ${p.text.length} chars into ${p.selector}`);
+      return ok(`Typed ${p.text.length} chars into ${p.selector}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -553,13 +562,15 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       if (keys.length === 0) return err("keys is empty.");
       return withPage(p, async (page) => {
         const lines: string[] = [];
+        const target = p.selector ? await locate(page, p.selector) : undefined;
         await pressKeys(
           page,
           keys,
           async (key) => { lines.push(`${key} → focus: ${await describeFocus(page)}`); },
-          p.selector ? { locator: resolveLocator(page, p.selector), selector: p.selector, timeout: p.timeout } : undefined,
+          target ? { locator: target.locator, selector: target.selector, timeout: p.timeout } : undefined,
         );
-        return ok(keys.length === 1 ? `Pressed ${lines[0]}` : `Pressed ${keys.length} keys:\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n")}`);
+        const note = target ? frameNote(p.selector, target.selector) : "";
+        return ok((keys.length === 1 ? `Pressed ${lines[0]}` : `Pressed ${keys.length} keys:\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n")}`) + note);
       });
     },
   },
@@ -574,11 +585,12 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await pointerActionFailingFastWhenCovered(resolveLocator(page, p.selector), "hover", p.selector, {
+      const { locator, selector } = await locate(page, p.selector);
+      await pointerActionFailingFastWhenCovered(locator, "hover", selector, {
         force: p.force,
         timeout: p.timeout,
       });
-      return ok(`Hovered ${p.selector}`);
+      return ok(`Hovered ${p.selector}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -596,8 +608,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        await scrollIntoView(resolveLocator(page, p.selector), p.timeout);
-        return ok(`Scrolled ${p.selector} into view`);
+        const { locator, selector } = await locate(page, p.selector);
+        await scrollIntoView(locator, p.timeout);
+        return ok(`Scrolled ${p.selector} into view${frameNote(p.selector, selector)}`);
       }
       const moved = await scrollPage(page, { top: p.to === "top", bottom: p.to === "bottom", dx: p.x, dy: p.y });
       if (p.to === "top") return ok("Scrolled to top");
@@ -616,8 +629,13 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await drag(resolveLocator(page, p.from_selector), resolveLocator(page, p.to_selector), p.timeout);
-      return ok(`Dragged ${p.from_selector} → ${p.to_selector}`);
+      const from = await locate(page, p.from_selector);
+      const to = await locate(page, p.to_selector);
+      await drag(from.locator, to.locator, p.timeout);
+      return ok(
+        `Dragged ${p.from_selector} → ${p.to_selector}` +
+          frameNote(p.from_selector, from.selector) + frameNote(p.to_selector, to.selector),
+      );
     }),
   },
 
@@ -637,8 +655,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       if (p.value !== undefined) opts.value = p.value;
       if (p.label !== undefined) opts.label = p.label;
       if (p.index !== undefined) opts.index = p.index;
-      const picked = await selectOption(resolveLocator(page, p.selector), p.selector, opts, p.timeout);
-      return json({ selected: picked });
+      const { locator, selector } = await locate(page, p.selector);
+      const picked = await selectOption(locator, selector, opts, p.timeout);
+      return json(selector === p.selector ? { selected: picked } : { selected: picked, resolved_selector: selector });
     }),
   },
 
@@ -646,8 +665,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Check a checkbox or radio button. No-op if already checked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await setChecked(resolveLocator(page, p.selector), p.selector, true, p.timeout);
-      return ok(`Checked ${p.selector}`);
+      const { locator, selector } = await locate(page, p.selector);
+      await setChecked(locator, selector, true, p.timeout);
+      return ok(`Checked ${p.selector}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -655,8 +675,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
     description: "Uncheck a checkbox. No-op if already unchecked.",
     schema: { ...selectorField, ...timeoutField, ...targetField, ...useSchemaField },
     handler: async (p) => withPage(p, async (page) => {
-      await setChecked(resolveLocator(page, p.selector), p.selector, false, p.timeout);
-      return ok(`Unchecked ${p.selector}`);
+      const { locator, selector } = await locate(page, p.selector);
+      await setChecked(locator, selector, false, p.timeout);
+      return ok(`Unchecked ${p.selector}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -670,8 +691,9 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).setInputFiles(p.paths, { timeout: p.timeout });
-      return ok(`Uploaded ${p.paths.length} file(s) to ${p.selector}`);
+      const { locator, selector } = await locate(page, p.selector);
+      await locator.setInputFiles(p.paths, { timeout: p.timeout });
+      return ok(`Uploaded ${p.paths.length} file(s) to ${p.selector}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -701,17 +723,19 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
       }
       return withPage(p, async (page) => {
         const timeout = p.timeout ?? 30000;
+        const { locator, selector } = await locate(page, p.trigger_selector);
         // Arm the chooser listener and click in one shot — the Playwright-
         // recommended idiom that avoids the race where the chooser opens
         // before the listener is attached.
         const [chooser] = await Promise.all([
           page.waitForEvent("filechooser", { timeout }),
-          pointerActionFailingFastWhenCovered(resolveLocator(page, p.trigger_selector), "click", p.trigger_selector, { timeout }),
+          pointerActionFailingFastWhenCovered(locator, "click", selector, { timeout }),
         ]);
         await chooser.setFiles(p.paths, { timeout });
         return ok(
           `Opened file chooser via ${p.trigger_selector} and set ${p.paths.length} file(s)` +
-            (chooser.isMultiple() ? " (chooser accepts multiple)" : ""),
+            (chooser.isMultiple() ? " (chooser accepts multiple)" : "") +
+            frameNote(p.trigger_selector, selector),
         );
       });
     },
@@ -739,7 +763,8 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
           b64: (await fs.readFile(pth)).toString("base64"),
         })),
       );
-      await resolveLocator(page, p.target_selector).evaluate(
+      const { locator, selector } = await locate(page, p.target_selector);
+      await locator.evaluate(
         (el: Element, payload: Array<{ name: string; mime: string; b64: string }>) => {
           const dt = new DataTransfer();
           for (const f of payload) {
@@ -756,7 +781,7 @@ export const interactionPrimitives: Record<string, PrimitiveDef> = {
         files,
         { timeout },
       );
-      return ok(`Dropped ${files.length} file(s) onto ${p.target_selector}`);
+      return ok(`Dropped ${files.length} file(s) onto ${p.target_selector}${frameNote(p.target_selector, selector)}`);
     }),
   },
 };
@@ -815,8 +840,17 @@ export const waitPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      await resolveLocator(page, p.selector).waitFor({ state: p.state, timeout: p.timeout });
-      return ok(`Selector ${p.selector} reached state ${p.state ?? "visible"}`);
+      // For appearing states, keep checking the iframes too while waiting, so
+      // content that loads late inside one is found.
+      const appearing = p.state === undefined || p.state === "visible" || p.state === "attached";
+      const total = p.timeout ?? 30000;
+      const start = Date.now();
+      const { locator, selector } = appearing
+        ? await locateWhenPresent(page, p.selector, total)
+        : await locate(page, p.selector);
+      const timeout = Math.max(1, total - (Date.now() - start));
+      await locator.waitFor({ state: p.state, timeout });
+      return ok(`Selector ${p.selector} reached state ${p.state ?? "visible"}${frameNote(p.selector, selector)}`);
     }),
   },
 
@@ -876,7 +910,8 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       const sel = p.selector ?? "body";
-      const text = await resolveLocator(page, sel).first().innerText();
+      const { locator } = await locate(page, sel);
+      const text = await locator.first().innerText();
       return ok(text);
     }),
   },
@@ -890,8 +925,14 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
       ...useSchemaField,
     },
     handler: async (p) => withPage(p, async (page) => {
-      const val = await resolveLocator(page, p.selector).first().getAttribute(p.attribute);
-      return json({ selector: p.selector, attribute: p.attribute, value: val });
+      const { locator, selector } = await locate(page, p.selector);
+      const val = await locator.first().getAttribute(p.attribute);
+      return json({
+        selector: p.selector,
+        ...(selector !== p.selector ? { resolved_selector: selector } : {}),
+        attribute: p.attribute,
+        value: val,
+      });
     }),
   },
 
@@ -904,7 +945,8 @@ export const readPrimitives: Record<string, PrimitiveDef> = {
     },
     handler: async (p) => withPage(p, async (page) => {
       if (p.selector) {
-        const html = await resolveLocator(page, p.selector).first().evaluate((el) => el.outerHTML);
+        const { locator } = await locate(page, p.selector);
+        const html = await locator.first().evaluate((el) => el.outerHTML);
         return ok(html);
       }
       return ok(await page.content());
@@ -1159,7 +1201,7 @@ export const capturePrimitives: Record<string, PrimitiveDef> = {
       let settle: SettleResult | null = null;
       let buf: Buffer;
       if (p.selector) {
-        const target = resolveLocator(page, p.selector).first();
+        const target = (await locate(page, p.selector)).locator.first();
         settle = await settleElementForCapture(target);
         buf = await target.screenshot({ type: "png" });
       } else {

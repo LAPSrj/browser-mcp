@@ -701,6 +701,15 @@ Quick symptom lookup:
 | `target="_blank" href="data:..."` click returns success but no popup tab appears; `context.pages()` stays the same; `waitForEvent("page")` times out | [Data-URL popup silently blocked](#data-url-popup-blocked) |
 | Session gets killed at exactly the `wall_ttl_ms` value you passed (e.g. 1h cut on a long support chat); felt like a "cap" but you set it yourself | [wall_ttl_ms misread as a cap](#wall-ttl-misread) |
 | attach_cdp download shows in the browser as a GUID name (`f862ec60-…`) with "Couldn't download - Download error"; empty `C:\tmp\playwright-artifacts-*` folders appear | [Download fails with a GUID filename](#download-guid-failure) |
+| A visible modal, consent banner, widget, or "Verify you are human" checkbox can't be clicked; the click error says an `<iframe>` intercepts pointer events; the snapshot shows an iframe with nothing inside | [Control inside an iframe](#control-inside-iframe) |
+
+### Control inside an iframe {#control-inside-iframe}
+
+**Symptom:** a control you can see in a screenshot doesn't show up in `accessibility_snapshot` with a scope, `dom_query`, or `evaluate_script`, or a click on a page element under it fails with "`<iframe …>` intercepts pointer events".
+
+**Cause:** the control is in an iframe, which is a separate document. Page-level scripts and CSS stop at the `<iframe>` element, and when the iframe sits inside a closed shadow root (Cloudflare Turnstile), CSS can't reach the `<iframe>` element either.
+
+**Fix:** call `list_interactive_elements` without `scope`. It lists overlay iframes (modals, banners, widgets) before the page and other iframes after it, and each `selector_hint` already starts with the frame prefix (`iframe[title="…"] >>> …`, or `frame-url=… >>> …` when CSS can't reach the iframe), so you can pass it straight to `click`, `check`, or `type_text`. A plain selector that matches inside exactly one iframe also works, and the result's `resolved_selector` gives the prefixed form. `hit_test` at the control's point shows which frame and element are on top. For a challenge checkbox, a click that Cloudflare rejects comes from its bot check, not from targeting, so hand the check to a person (see [Hand off to a human for captcha / MFA, then resume](#workflows)).
 
 ### Mode not registered {#mode-not-registered}
 

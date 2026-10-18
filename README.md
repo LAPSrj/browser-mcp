@@ -303,6 +303,33 @@ To check whether a genuine tap would actually reach the upload control (vs being
 covered by an overlay or a mispositioned input — the iOS picker-tap bug), use
 the `dev` plugin's `hit_test`.
 
+**Iframes** (consent banners, chat widgets, payment forms, challenge
+checkboxes). Every selector argument reaches into iframes, cross-origin ones
+included:
+
+- `iframe[title="Consent"] >>> role=button[name="Accept all"]` goes through
+  the iframe that CSS selector matches. Chain ` >>> ` for nested frames.
+- `frame-url=challenges.cloudflare.com >>> input` picks the one iframe whose
+  URL contains the text. Use it when CSS can't reach the `<iframe>` element,
+  such as one inside a closed shadow root.
+- A plain selector that matches nothing on the page is also looked up inside
+  the iframes. If exactly one iframe has it, the tool acts there and returns
+  the frame-prefixed selector (`resolved_selector` on `click`). If several
+  do, it fails and lists one selector per iframe. `wait_for_selector` keeps
+  checking the iframes while it waits.
+
+You rarely need to write these by hand, because the `dev` plugin's
+`list_interactive_elements` lists iframe contents with the prefix already in
+each `selector_hint`. Overlay iframes (fixed position and on top, such as
+modals, consent banners, and chat widgets) come before the page's own
+elements, and other iframes (video, ads, maps) come after them, so embeds
+can't push the page's elements past the cap. Its `frames` field lists every
+iframe with its element count, and `scope: "<frame selector> >>> body"` lists
+one iframe on its own. `accessibility_snapshot` adds each iframe's
+tree, and `hit_test` follows a point into the iframe on top of it. A click
+blocked by an iframe fails after 5 s with an error that points to
+`list_interactive_elements`.
+
 ### Waits
 
 `wait_for_selector`, `wait_for_url`, `wait_for_load_state`, `wait` (sleep).

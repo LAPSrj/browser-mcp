@@ -1,9 +1,11 @@
-import type { Page } from "playwright";
+import type { Page, Frame } from "playwright";
+import { hasFramePierce, resolveLocator, splitFramePierce } from "../../../utils/locator.js";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop, formatAssertions } from "../../../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
 import { navigateTo } from "../../../utils/navigate.js";
 import { sessionManager } from "../../../core/sessions.js";
+import { childFrames, frameContentBox, framePath } from "../../../utils/frames.js";
 
 // Bundled discovery: returns every clickable / form element on the page with
 // the metadata an agent needs to drive it — role, accessible name, visible
@@ -37,6 +39,8 @@ interface InteractiveElement {
   rect: { x: number; y: number; width: number; height: number };
   visible: boolean;
   selector_hint: string;
+  /** Selector prefix of the iframe holding the element; absent on the page itself. */
+  frame?: string;
 }
 
 interface Result {
@@ -95,7 +99,33 @@ export async function listInteractiveElementsTool(params: ListInteractiveElement
       assertionsMsg = formatAssertions(assertions);
     }
 
-    const result: Result = await page.evaluate(runInPage, { scope, cap, includeHidden: include_hidden });
+    let result: Record<string, unknown>;
+    if (hasFramePierce(scope)) {
+      result = await scanOneFrame(page, scope, cap, include_hidden);
+    } else {
+      const own: Result = await page.evaluate(runInPage, { scope, cap, includeHidden: include_hidden });
+      // A whole-page scan also covers iframes (cross-origin and closed-shadow-root
+      // ones too). Overlay iframes (modals, consent banners, chat widgets) come
+      // before the page's elements, because they block it. Embeds (video, ads,
+      // maps) come after, so they can't push the page's own elements past the cap.
+      const framed = scope === "body" ? await scanFrames(page, cap, include_hidden) : null;
+      const overlays = framed?.elements.filter((e) => framed.overlay.has(e.frame!)) ?? [];
+      const embeds = framed?.elements.filter((e) => !framed.overlay.has(e.frame!)) ?? [];
+      const elements = [...overlays, ...own.elements, ...embeds].slice(0, cap);
+      const totalMatched = own.totalMatched + (framed?.totalMatched ?? 0);
+      const frames = framed?.frames.map((f) => ({
+        ...f,
+        listed: elements.filter((e) => e.frame === f.selector).length,
+      })) ?? [];
+      result = {
+        scope,
+        count: elements.length,
+        truncated: elements.length < totalMatched,
+        totalMatched,
+        ...(frames.length > 0 ? { frames } : {}),
+        elements,
+      };
+    }
 
     const content: Array<{ type: string; text: string }> = [];
     if (actionStopMsg) content.push({ type: "text", text: actionStopMsg });
@@ -105,6 +135,97 @@ export async function listInteractiveElementsTool(params: ListInteractiveElement
   } finally {
     if (cleanup) await cleanup();
   }
+}
+
+interface FrameSummary {
+  /** Selector prefix for the frame; join with " >>> " and an inner selector. */
+  selector: string;
+  url: string;
+  /** True for an iframe laid over the page (fixed position and on top), such as a modal. */
+  overlay: boolean;
+  /** Interactive elements found in the frame (before the cap). */
+  elements: number;
+}
+
+// Iframes smaller than this (tracking pixels, hidden helpers) aren't scanned.
+const MIN_FRAME_PX = 5;
+
+// Runs the collector in every laid-out child frame. Each element's
+// selector_hint gets the frame prefix, and its rect moves to page coordinates.
+async function scanFrames(
+  page: Page,
+  cap: number,
+  includeHidden: boolean,
+): Promise<{ elements: InteractiveElement[]; totalMatched: number; frames: FrameSummary[]; overlay: Set<string> }> {
+  const elements: InteractiveElement[] = [];
+  const frames: FrameSummary[] = [];
+  const overlay = new Set<string>();
+  const overlayFrames = new Set<Frame>();
+  let totalMatched = 0;
+  for (const frame of childFrames(page)) {
+    const box = await frameContentBox(frame);
+    if (!includeHidden && (!box || box.width < MIN_FRAME_PX || box.height < MIN_FRAME_PX)) continue;
+    // A nested frame is an overlay when the frame holding it is one.
+    const parent = frame.parentFrame();
+    const isOverlay = parent && parent !== page.mainFrame()
+      ? overlayFrames.has(parent)
+      : await isOverlayIframe(frame);
+    if (isOverlay) overlayFrames.add(frame);
+    const r = await frame.evaluate(runInPage, { scope: "body", cap, includeHidden }).catch(() => null);
+    if (!r) continue;
+    const prefix = await framePath(frame);
+    if (isOverlay) overlay.add(prefix);
+    frames.push({ selector: prefix, url: frame.url(), overlay: isOverlay, elements: r.totalMatched });
+    totalMatched += r.totalMatched;
+    elements.push(...r.elements.map((el) => inFrame(el, prefix, box)));
+  }
+  return { elements, totalMatched, frames, overlay };
+}
+
+function inFrame(
+  el: InteractiveElement,
+  prefix: string,
+  box: { x: number; y: number } | null,
+): InteractiveElement {
+  return {
+    ...el,
+    frame: prefix,
+    rect: box ? { ...el.rect, x: el.rect.x + Math.round(box.x), y: el.rect.y + Math.round(box.y) } : el.rect,
+    selector_hint: `${prefix} >>> ${el.selector_hint}`,
+  };
+}
+
+// An overlay iframe is position:fixed (itself or an ancestor, through shadow
+// roots) and on top at its own center. That matches modals, consent banners,
+// and chat widgets, but not video, ad, or map embeds in the page flow.
+async function isOverlayIframe(frame: Frame): Promise<boolean> {
+  const el = await frame.frameElement().catch(() => null);
+  if (!el) return false;
+  return el.evaluate((iframe) => {
+    const up = (n: Node): Node | null => n.parentNode ?? (n as ShadowRoot).host ?? null;
+    let fixed = false;
+    for (let n: Node | null = iframe; n && !fixed; n = up(n)) {
+      fixed = n.nodeType === Node.ELEMENT_NODE && getComputedStyle(n as Element).position === "fixed";
+    }
+    if (!fixed) return false;
+    const r = (iframe as Element).getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    for (let n: Node | null = iframe; n; n = up(n)) if (n === top) return true;
+    return false;
+  }).catch(() => false);
+}
+
+// scope with ` >>> ` (e.g. `iframe[title="Video"] >>> body`): list only the
+// contents of that frame, under the CSS after the last ` >>> `.
+async function scanOneFrame(page: Page, scope: string, cap: number, includeHidden: boolean): Promise<Record<string, unknown>> {
+  const handle = await resolveLocator(page, scope).first().elementHandle({ timeout: 5000 });
+  const frame = handle ? await handle.ownerFrame() : null;
+  if (!frame) throw new Error(`scope "${scope}" matched nothing`);
+  const inner = splitFramePierce(scope).pop()!;
+  const prefix = await framePath(frame);
+  const r: Result = await frame.evaluate(runInPage, { scope: inner, cap, includeHidden });
+  const box = await frameContentBox(frame);
+  return { ...r, scope, frame: prefix, elements: r.elements.map((el) => inFrame(el, prefix, box)) };
 }
 
 // In-page collector. Stays self-contained — no external function refs.

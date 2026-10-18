@@ -506,14 +506,17 @@ const devPlugin: ScreenshotPlugin = {
       description:
         "Which element would receive a real tap/click at a point (an element's center, or x/y)? Returns the z-ordered element stack there and a verdict: " +
         "reachesTarget, coveredBy (an overlay on top), tapWouldHitFileInput (plus expect.reachesExpected with expect_selector). Checks whether a control is really clickable, e.g. a file input hidden under its button. " +
-        "Works on real iOS devices, where click_to_upload can't.",
+        "Works on real iOS devices, where click_to_upload can't. When the point lands on an iframe, `frames` follows it inside and " +
+        "reports what is on top there, with the frame's selector prefix.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
         browser: z.enum(["chromium", "firefox", "webkit"]).optional().describe('Ephemeral only (default "chromium")'),
         viewport: z.object({ width: z.number(), height: z.number() }).optional().describe("Ephemeral only (default 1280x720)"),
-        selector: z.string().optional().describe("Element whose center is tested (and the expected target by default). Give this or x and y."),
+        selector: z.string().optional().describe(
+          "Element whose center is tested (and the expected target by default). Give this or x and y. CSS, or an iframe selector with ` >>> `.",
+        ),
         x: z.number().optional().describe("Viewport X; needs y"),
         y: z.number().optional().describe("Viewport Y; needs x"),
         expect_selector: z.string().optional().describe("Element the tap should reach, e.g. `input[type=file]` (default: selector)"),
@@ -619,12 +622,17 @@ const devPlugin: ScreenshotPlugin = {
       description:
         "List every clickable or typable element (links, buttons, form fields, contenteditable, interactive ARIA roles) with tag, type, role, " +
         "accessible name, text, value, rect, visible, and a selector_hint ready for click or type_text " +
-        "(role=ROLE[name=\"NAME\"] when possible). Use before evaluate_script to find clickables.",
+        "(role=ROLE[name=\"NAME\"] when possible). Without scope it also lists iframe contents (cross-origin too), with the frame " +
+        "prefix already in selector_hint: overlay iframes (modals, consent banners, chat widgets) before the page's elements, other " +
+        "iframes (video, ads) after them. `frames` lists every iframe with its element count, even when the cap cut its elements. " +
+        "Use it when a modal or widget won't respond to clicks. Use before evaluate_script to find clickables.",
       schema: {
         url: z.string().optional().describe(urlOptionalDesc),
         session_id: z.string().optional().describe(sessionIdDesc),
         tab_id: z.string().optional().describe(tabIdDesc),
-        scope: z.string().optional().describe('CSS selector (default "body")'),
+        scope: z.string().optional().describe(
+          'CSS selector (default "body"); a scope skips the iframe scan. `<frame selector> >>> body` lists only that iframe.',
+        ),
         cap: z.number().optional().describe("Max elements (default 100); truncated:true if more exist"),
         include_hidden: z.boolean().optional().describe("Include hidden and off-screen elements (default false)"),
         actions: z.array(actionSchema).optional().describe(actionsDesc),

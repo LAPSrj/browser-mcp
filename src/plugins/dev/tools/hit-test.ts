@@ -1,4 +1,6 @@
-import type { Page } from "playwright";
+import type { Page, Frame } from "playwright";
+import { hasFramePierce } from "../../../utils/locator.js";
+import { frameContentBox, framePath, locate } from "../../../utils/frames.js";
 import type { AnyAction } from "../../../utils/actions.js";
 import { runActions, formatActionStop } from "../../../utils/actions.js";
 import { launchSession, closeSession, pickBrowserStack, type BrowserStackTarget, type BrowserName } from "../../../utils/browser.js";
@@ -162,6 +164,104 @@ const runHitTest = (argsJson: string): string => {
   });
 };
 
+interface FrameHit {
+  /** Selector prefix of the iframe; join with " >>> " and an inner selector. */
+  frame: string;
+  url: string;
+  /** The point in the frame's own viewport. */
+  point: { x: number; y: number };
+  topmost: unknown;
+  stack: unknown[];
+}
+
+// When the point (page viewport px) lands on an iframe that is on top there,
+// probe inside it, and repeat for nested iframes. Returns one entry per frame
+// entered, outermost first. Covers iframes in closed shadow roots, where
+// elementFromPoint on the page returns the shadow host instead of the iframe.
+async function followFrames(page: Page, x: number, y: number, stackDepth: number): Promise<FrameHit[]> {
+  const hits: FrameHit[] = [];
+  let current: Frame = page.mainFrame();
+  let origin = { x: 0, y: 0 };
+  descend: for (;;) {
+    for (const child of current.childFrames()) {
+      if (child.isDetached()) continue;
+      const box = await frameContentBox(child);
+      if (!box || x < box.x || y < box.y || x >= box.x + box.width || y >= box.y + box.height) continue;
+      const el = await child.frameElement().catch(() => null);
+      if (!el) continue;
+      const onTop = await el.evaluate((iframe, pt) => {
+        const top = document.elementFromPoint(pt.x, pt.y);
+        // Walk up through shadow roots: a closed one retargets `top` to its host.
+        for (let n: Node | null = iframe; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) {
+          if (n === top) return true;
+        }
+        return false;
+      }, { x: x - origin.x, y: y - origin.y }).catch(() => false);
+      if (!onTop) continue;
+      const raw = await child.evaluate(runHitTest, JSON.stringify({
+        selector: null, x: x - box.x, y: y - box.y, expectSelector: null, stackDepth,
+      })).catch(() => null);
+      if (!raw) break descend;
+      const r = JSON.parse(raw);
+      hits.push({ frame: await framePath(child), url: child.url(), point: r.point, topmost: r.topmost, stack: r.stack });
+      current = child;
+      origin = { x: box.x, y: box.y };
+      continue descend;
+    }
+    return hits;
+  }
+  return hits;
+}
+
+// hit_test for a target inside an iframe: probe the page at the target's
+// center (or x/y), follow the iframes there, and check whether the innermost
+// topmost element is the target. Null when the selector matches nothing.
+async function hitTestInFrame(
+  page: Page,
+  selector: string,
+  x: number | undefined,
+  y: number | undefined,
+  expectSelector: string | undefined,
+  stackDepth: number,
+): Promise<Record<string, unknown> | null> {
+  if (expectSelector) {
+    return { error: "expect_selector isn't supported when the target is inside an iframe; leave it out to test the target itself." };
+  }
+  const { locator, selector: used } = await locate(page, selector);
+  if ((await locator.count()) === 0) return null;
+  const handle = await locator.first().elementHandle({ timeout: 5000 }).catch(() => null);
+  const rect = handle ? await handle.boundingBox() : null;
+  if (!handle || !rect) return { error: `selector "${used}" matched an element that isn't laid out (hidden or detached)` };
+  const px = x ?? rect.x + rect.width / 2;
+  const py = y ?? rect.y + rect.height / 2;
+  const top = JSON.parse(await page.evaluate(runHitTest, JSON.stringify({
+    selector: null, x: px, y: py, expectSelector: null, stackDepth,
+  })));
+  const frames = await followFrames(page, px, py, stackDepth);
+  const innermost = frames[frames.length - 1];
+  const targetFrame = await handle.ownerFrame();
+  let reachesTarget = false;
+  if (innermost && targetFrame && innermost.frame === (await framePath(targetFrame))) {
+    reachesTarget = await handle.evaluate((t, pt) => {
+      const hit = document.elementFromPoint(pt.x, pt.y);
+      return !!hit && (hit === t || t.contains(hit) || hit.contains(t));
+    }, innermost.point).catch(() => false);
+  }
+  return {
+    point: { x: Math.round(px), y: Math.round(py) },
+    basedOn: x !== undefined && y !== undefined ? "explicit" : "selector-center",
+    inViewport: top.inViewport,
+    target: { selector: used, rect },
+    topmost: top.topmost,
+    stack: top.stack,
+    frames,
+    verdict: {
+      reachesTarget,
+      coveredBy: reachesTarget ? null : (innermost ? { frame: innermost.frame, element: innermost.topmost } : top.topmost),
+    },
+  };
+}
+
 export async function hitTestTool(params: HitTestParams) {
   const {
     url,
@@ -214,14 +314,23 @@ export async function hitTestTool(params: HitTestParams) {
     // runHitTest is an arrow taking a JSON-string arg and returning a JSON
     // string — see its note for the BrowserStack real-device-bridge quirks
     // this works around. null (not undefined) for absent values.
-    const raw = await page.evaluate(runHitTest, JSON.stringify({
-      selector: selector ?? null,
+    const probe = (sel: string | null) => page.evaluate(runHitTest, JSON.stringify({
+      selector: sel,
       x: x ?? null,
       y: y ?? null,
       expectSelector: expect_selector ?? null,
       stackDepth: stack_depth,
     }));
-    const result = JSON.parse(raw);
+    // A selector that reaches into an iframe (` >>> `), or that matches only
+    // inside one, can't go through document.querySelector on the page.
+    let result: any = selector && hasFramePierce(selector) ? null : JSON.parse(await probe(selector ?? null));
+    if (selector && (result === null || /matched no element/.test(result.error ?? ""))) {
+      const framed = await hitTestInFrame(page, selector, x, y, expect_selector, stack_depth);
+      result = framed ?? result ?? { error: `selector "${selector}" matched no element` };
+    } else if (result && !result.error) {
+      const frames = await followFrames(page, result.point.x, result.point.y, stack_depth);
+      if (frames.length > 0) result.frames = frames;
+    }
 
     const content: Array<{ type: string; text: string }> = [];
     if (actionStopMsg) content.push({ type: "text", text: actionStopMsg });

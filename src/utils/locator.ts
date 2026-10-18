@@ -1,4 +1,4 @@
-import type { Page, Locator, FrameLocator } from "playwright";
+import type { Page, Frame, Locator, FrameLocator } from "playwright";
 import { isHuman, pointerLikeAPerson } from "./human.js";
 
 // Frame-pierce delimiter for cross-frame selectors. Whitespace-padded `>>>`
@@ -9,11 +9,18 @@ import { isHuman, pointerLikeAPerson } from "./human.js";
 //   "#btn"                            → page.locator("#btn")
 //   "iframe.outer >>> #btn"           → page.frameLocator("iframe.outer").locator("#btn")
 //   "iframe.a >>> iframe.b >>> #btn"  → page.frameLocator("iframe.a").frameLocator("iframe.b").locator("#btn")
+//   "frame-url=example.com/w >>> #btn" → (the one frame whose URL contains it).locator("#btn")
+//
+// `frame-url=` picks a frame by its URL instead of by its <iframe> element, so
+// it reaches frames that CSS can't, such as one inside a closed shadow root
+// (Cloudflare's Turnstile widget). It searches every frame on the page, at
+// any depth.
 //
 // Required whitespace-padding keeps `>>>` from colliding with CSS attribute
 // values that might contain the literal sequence — none in valid CSS would
 // be whitespace-padded that way, so the discrimination is safe in practice.
 const FRAME_PIERCE = /\s+>>>\s+/;
+const FRAME_URL = /^frame-url=(["']?)(.+)\1$/;
 
 export function hasFramePierce(selector: string): boolean {
   return FRAME_PIERCE.test(selector);
@@ -37,11 +44,25 @@ export function resolveLocator(page: Page, selector: string): Locator {
     // Pathological: pierce token with empty inner / outer segment.
     return page.locator(selector);
   }
-  let frame: FrameLocator = page.frameLocator(parts[0]);
-  for (let i = 1; i < parts.length - 1; i++) {
-    frame = frame.frameLocator(parts[i]);
+  let scope: Page | Frame | FrameLocator = page;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const byUrl = parts[i].match(FRAME_URL);
+    scope = byUrl ? frameByUrl(page, byUrl[2]) : scope.frameLocator(parts[i]);
   }
-  return frame.locator(parts[parts.length - 1]);
+  return scope.locator(parts[parts.length - 1]);
+}
+
+/** The one child frame whose URL contains `text`; throws when none or several do. */
+export function frameByUrl(page: Page, text: string): Frame {
+  const children = page.frames().filter((f) => f !== page.mainFrame());
+  const hits = children.filter((f) => f.url().includes(text));
+  if (hits.length === 1) return hits[0];
+  const urls = children.map((f) => f.url()).join(", ") || "(none)";
+  throw new Error(
+    hits.length === 0
+      ? `No iframe on the page has a URL containing "${text}". Iframe URLs: ${urls}`
+      : `${hits.length} iframes have a URL containing "${text}", so frame-url= can't tell them apart. Iframe URLs: ${urls}`,
+  );
 }
 
 // How long a click or hover keeps retrying while another element covers the
@@ -89,7 +110,11 @@ export async function pointerActionFailingFastWhenCovered(
         `${kind} on ${selector} didn't happen: ${cover} covers it and intercepts pointer events ` +
           `(still covered after ${COVERED_GIVE_UP_MS / 1000} s). Close or wait out the covering element ` +
           `(e.g. wait_for_selector with state "hidden"), or run hit_test to see what is on top. ` +
-          `force:true skips the check, but a real user couldn't ${kind} it.`,
+          `force:true skips the check, but a real user couldn't ${kind} it.` +
+          (/<iframe\b/i.test(cover)
+            ? " The cover is an iframe, so the control you want is probably inside it: list_interactive_elements " +
+              "lists iframe contents with selectors that reach into the frame."
+            : ""),
       );
     }
   }
