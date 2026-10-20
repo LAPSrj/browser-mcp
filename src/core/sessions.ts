@@ -5,14 +5,14 @@ import { chromium, type Browser, type BrowserContext, type BrowserServer, type D
 import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, otherProcessSessionCount, setBrowserWindows, spawnAttachCdpRelay, type AttachCdpHandle, type WindowResult } from "../utils/cdp-relay.js";
-import { readSidecar } from "../utils/browser-sidecar.js";
+import { readSidecar, setSessionTabs, takeDeadTabs } from "../utils/browser-sidecar.js";
 import { execFileSync } from "node:child_process";
 import {
   BROWSER_PRODUCT_SPECS,
   defaultExePath,
   resolveBrowserProduct,
 } from "../utils/browser-products.js";
-import { isWsl } from "../utils/wsl.js";
+import { isWsl, winToWslPath } from "../utils/wsl.js";
 import { setHumanBehavior } from "../utils/human.js";
 import { parseIntEnv } from "../config.js";
 import { DownloadTracker } from "./downloads.js";
@@ -136,6 +136,26 @@ async function keepPageRendering(page: Page): Promise<void> {
     cdp.send("Page.screencastFrameAck", { sessionId: f.sessionId }).catch(() => {});
   });
   await cdp.send("Page.startScreencast", { format: "jpeg", quality: 10 });
+}
+
+const targetIds = new WeakMap<Page, string>();
+
+/** A page's CDP target id, which other browser-mcp processes can close it by. null if the page closed. */
+async function pageTargetId(page: Page): Promise<string | null> {
+  const known = targetIds.get(page);
+  if (known) return known;
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const { targetInfo } = await cdp.send("Target.getTargetInfo");
+      targetIds.set(page, targetInfo.targetId);
+      return targetInfo.targetId;
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** Start tracking a tab's prompts. A failure only loses permission and HTTP-login tracking on that tab. */
@@ -373,6 +393,16 @@ interface Session {
   isBrowserStackRealDevice: boolean;
   /** Set ONLY on auto_launch attach_cdp sessions. Holds the relay/browser handle for teardown. Undefined for explicit-string-endpoint attaches (user owns lifecycle). */
   attachCdp?: AttachCdpHandle;
+  /** WSL path of the attachCdp profile, where its sidecar is. null without attachCdp. */
+  sidecarDir: string | null;
+  /**
+   * Tabs this session opened (not ones it reused or took over with
+   * claim_tab). They close with the session, and the sidecar lists them so
+   * another process closes them if this one dies first.
+   */
+  ownedPages: Set<Page>;
+  /** Pending sidecar update of ownedPages; updates run one at a time, in order. */
+  tabSync: Promise<void>;
   /** Root PID of an attach_cdp browser whose windows browser-mcp hides (see windowBrowserPid). null otherwise. */
   windowPid: number | null;
   /** Input on this session's tabs acts like a person (open_session human_behavior). */
@@ -563,6 +593,9 @@ class SessionManager {
 
     let context: BrowserContext;
     let page: Page;
+    // False when the main tab was already open in a browser browser-mcp
+    // doesn't manage (the user's own tab), which then stays open on close.
+    let mainOpened = true;
     if (opts.attach_cdp) {
       // attached browsers come with at least one default context + page already.
       // Reuse the first context to honor the user's existing profile state.
@@ -590,6 +623,7 @@ class SessionManager {
         // Single-server / spawn path: behavior unchanged from before.
         const existingPages = context.pages();
         page = existingPages[0] ?? (await context.newPage());
+        mainOpened = !!attachCdp || existingPages.length === 0;
 
         // Default: don't let Chromium's session-restore tabs leak into the
         // agent's view. When attaching to a profile that has saved session
@@ -627,6 +661,7 @@ class SessionManager {
           // The url gets its own page instead of replacing a restored tab.
           if (opts.url) {
             page = windowPid ? await openBackgroundPage(context, windowPid) : await context.newPage();
+            mainOpened = true;
           }
         }
       }
@@ -721,6 +756,9 @@ class SessionManager {
       isAttachCdp: !!opts.attach_cdp,
       isBrowserStackRealDevice: !!(opts.useBrowserStack && opts.browserStackDevice),
       attachCdp,
+      sidecarDir: attachCdp ? (isWsl() ? winToWslPath(attachCdp.userDataDir) : attachCdp.userDataDir) : null,
+      ownedPages: new Set(),
+      tabSync: Promise.resolve(),
       windowPid,
       humanBehavior: opts.human_behavior ?? !!opts.attach_cdp,
       downloads,
@@ -767,6 +805,9 @@ class SessionManager {
     // Pages with no opener (rel=noopener, or sibling-server's main tabs
     // surfaced at attach time) are not claimed.
     this.attachPageLifecycle(session, page, "main");
+    if (mainOpened) this.ownPage(session, page);
+    // Close the tabs of sessions whose process died since the last check.
+    await this.closeDeadTabs(session);
     context.on("page", (popupPage) => {
       // De-dup against addTab's pre-registration. addTab calls
       // context.newPage() then synchronously inserts the new Page under
@@ -800,6 +841,7 @@ class SessionManager {
         // switch_tab. The agent gets visibility (list_tabs surfaces it)
         // but explicit-attention semantics stay intact.
         this.attachPageLifecycle(session, popupPage, tid);
+        this.ownPage(session, popupPage);
         // A window.open() popup gets its own window; hide it with the rest.
         if (session.windowPid) {
           try {
@@ -834,6 +876,7 @@ class SessionManager {
     }
     page.on("close", () => {
       if (session.closing) return; // closeInternal handles its own teardown
+      if (session.ownedPages.delete(page)) this.syncOwnedTabs(session);
       session.pages.delete(tabId);
       session.pageOrder = session.pageOrder.filter((t) => t !== tabId);
       if (session.activeTabId === tabId) {
@@ -842,6 +885,56 @@ class SessionManager {
         session.activeTabId = session.pageOrder[session.pageOrder.length - 1] ?? "main";
       }
     });
+  }
+
+  /** Mark a tab as opened by this session (see Session.ownedPages). */
+  private ownPage(session: Session, page: Page): void {
+    session.ownedPages.add(page);
+    this.syncOwnedTabs(session);
+  }
+
+  /** Write the session's open owned tabs to the sidecar, after any earlier write. */
+  private syncOwnedTabs(session: Session): void {
+    const dir = session.sidecarDir;
+    if (!dir) return;
+    session.tabSync = session.tabSync
+      .then(async () => {
+        if (session.closing) return;
+        const ids: string[] = [];
+        for (const p of session.ownedPages) {
+          if (p.isClosed()) continue;
+          const tid = await pageTargetId(p);
+          if (tid) ids.push(tid);
+        }
+        if (session.closing) return;
+        await setSessionTabs({ userDataDirWsl: dir, session_id: session.id, tab_target_ids: ids });
+      })
+      .catch((e) => {
+        console.error(`[browser-mcp] could not record session ${session.id}'s tabs in the profile's sidecar, so they stay open if this process dies (${(e as Error).message})`);
+      });
+  }
+
+  /**
+   * Close the tabs of sessions on this profile whose browser-mcp process
+   * died without closing them (killed, crashed, or its terminal closed).
+   */
+  private async closeDeadTabs(session: Session): Promise<void> {
+    if (!session.sidecarDir) return;
+    try {
+      const ids = await takeDeadTabs(session.sidecarDir);
+      if (ids.length === 0) return;
+      const cdp = await session.browser.newBrowserCDPSession();
+      try {
+        for (const targetId of ids) {
+          // A tab the user or the browser already closed is gone; nothing to do.
+          await cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+        }
+      } finally {
+        await cdp.detach().catch(() => {});
+      }
+    } catch (e) {
+      console.error(`[browser-mcp] could not close the tabs of dead browser-mcp sessions (${(e as Error).message})`);
+    }
   }
 
   get(id: string): Session {
@@ -1268,6 +1361,7 @@ class SessionManager {
     if (!s.pageOrder.includes(tid)) s.pageOrder.push(tid);
     s.activeTabId = tid;
     this.attachPageLifecycle(s, page, tid);
+    this.ownPage(s, page);
     if (url) {
       await watchPrompts(s.prompts, page, tid);
       await gotoUntilPrompt(s.prompts, page, url);
@@ -1451,6 +1545,13 @@ class SessionManager {
         await this.closeInternal(s, "wall_ttl").catch(() => null);
       }
     }
+    // One live session per profile closes the tabs of dead processes.
+    const checked = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (s.closing || !s.sidecarDir || checked.has(s.sidecarDir)) continue;
+      checked.add(s.sidecarDir);
+      await this.closeDeadTabs(s);
+    }
   }
 
   private async closeInternal(s: Session, reason: string): Promise<CloseResult> {
@@ -1492,6 +1593,17 @@ class SessionManager {
       // references and rely on cleanup() (auto_launch only) to kill the
       // procs we own. For explicit-endpoint mode, the user keeps Edge alive
       // and we just leak the WS for the remainder of this process.
+      //
+      // The browser outlives this session when other sessions use it or the
+      // user started it, so close the tabs this session opened. When they're
+      // the only tabs left, the browser is about to be killed (last session
+      // out), and closing every tab could close the user's browser window.
+      const owned = [...s.ownedPages].filter((p) => !p.isClosed());
+      if (owned.length > 0 && s.context.pages().some((p) => !s.ownedPages.has(p))) {
+        for (const p of owned) {
+          try { await p.close(); } catch { /* already closed */ }
+        }
+      }
       if (s.attachCdp) {
         try { await s.attachCdp.cleanup(); } catch { /* ignore */ }
       } else if (s.windowPid && !this.browserInUse(s.windowPid)) {

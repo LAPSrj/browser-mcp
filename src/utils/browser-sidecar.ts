@@ -50,6 +50,8 @@ export interface AttachedSession {
   /** PID of the browser-mcp Node process holding this session (for crash-recovery sweep). */
   browser_mcp_pid: number;
   attached_at: string;
+  /** CDP target ids of the tabs this session opened, closed by a peer if the process dies without closing them. */
+  tab_target_ids?: string[];
 }
 
 export interface SidecarInfo {
@@ -70,6 +72,11 @@ export interface SidecarInfo {
   spawned_at: string;
   /** Currently-attached browser-mcp sessions. */
   attached_sessions: AttachedSession[];
+  /**
+   * Tabs of sessions whose browser-mcp process died without closing them,
+   * waiting for a live session to close them (takeDeadTabs).
+   */
+  dead_tab_target_ids?: string[];
 }
 
 function sidecarPath(userDataDirWsl: string): string {
@@ -201,15 +208,17 @@ export function readSidecar(userDataDirWsl: string): SidecarInfo | null {
 
 /**
  * Read-modify-write under exclusive lock. The callback receives the current
- * sidecar (or null if absent) and returns the updated sidecar to persist
- * (or null to delete the file — used for last-out cleanup).
+ * sidecar (or null if absent) and returns the updated sidecar to persist,
+ * null to delete the file (used for last-out cleanup), or undefined to leave
+ * the file as it is.
  *
  * Auto-sweeps dead browser-mcp PIDs from attached_sessions before passing
  * to the callback, so the caller always sees a fresh-as-of-this-moment view.
+ * The swept sessions' tabs move to dead_tab_target_ids.
  */
 export async function withSidecarLock<T>(
   userDataDirWsl: string,
-  fn: (current: SidecarInfo | null) => Promise<{ updated: SidecarInfo | null; result: T }>,
+  fn: (current: SidecarInfo | null) => Promise<{ updated: SidecarInfo | null | undefined; result: T }>,
 ): Promise<T> {
   const release = await acquireLock(userDataDirWsl);
   try {
@@ -220,13 +229,20 @@ export async function withSidecarLock<T>(
         : new Set<number>();
       const swept = current.attached_sessions.filter((s) => alivePids.has(s.browser_mcp_pid));
       if (swept.length !== current.attached_sessions.length) {
-        current = { ...current, attached_sessions: swept };
+        const deadTabs = current.attached_sessions
+          .filter((s) => !alivePids.has(s.browser_mcp_pid))
+          .flatMap((s) => s.tab_target_ids ?? []);
+        current = {
+          ...current,
+          attached_sessions: swept,
+          dead_tab_target_ids: [...(current.dead_tab_target_ids ?? []), ...deadTabs],
+        };
       }
     }
     const { updated, result } = await fn(current);
     if (updated === null) {
       try { unlinkSync(sidecarPath(userDataDirWsl)); } catch { /* fine */ }
-    } else {
+    } else if (updated !== undefined) {
       writeFileSync(sidecarPath(userDataDirWsl), JSON.stringify(updated, null, 2), "utf8");
     }
     return result;
@@ -359,6 +375,38 @@ export async function removeSession(opts: {
     }
     const updated: SidecarInfo = { ...current, attached_sessions: filtered };
     return { updated, result: { was_last: false, remaining: filtered.length, sidecar: updated } };
+  });
+}
+
+/** Record the CDP target ids of the tabs a session opened (replaces the previous list). */
+export async function setSessionTabs(opts: {
+  userDataDirWsl: string;
+  session_id: string;
+  tab_target_ids: string[];
+}): Promise<void> {
+  await withSidecarLock<void>(opts.userDataDirWsl, async (current) => {
+    if (!current || !current.attached_sessions.some((s) => s.session_id === opts.session_id)) {
+      return { updated: undefined, result: undefined };
+    }
+    const updated: SidecarInfo = {
+      ...current,
+      attached_sessions: current.attached_sessions.map((s) =>
+        s.session_id === opts.session_id ? { ...s, tab_target_ids: opts.tab_target_ids } : s,
+      ),
+    };
+    return { updated, result: undefined };
+  });
+}
+
+/**
+ * Return the tabs of sessions whose process died (see withSidecarLock) and
+ * clear the list, so only one live session closes them.
+ */
+export async function takeDeadTabs(userDataDirWsl: string): Promise<string[]> {
+  return withSidecarLock<string[]>(userDataDirWsl, async (current) => {
+    const dead = current?.dead_tab_target_ids ?? [];
+    if (!current || dead.length === 0) return { updated: undefined, result: [] };
+    return { updated: { ...current, dead_tab_target_ids: [] }, result: dead };
   });
 }
 

@@ -77,13 +77,22 @@ async function main() {
     // Clean up persistent sessions + plugins on shutdown, in that order —
     // sessions hold live BrowserServers that need to die before the process
     // exits, otherwise they leak as orphaned headless Chromium processes.
-    const cleanup = async (reason: string) => {
-      try { await sessionManager.closeAll(reason); } catch { /* ignore */ }
-      try { await registry.destroyAll(); } catch { /* ignore */ }
-      process.exit(0);
+    let cleaning: Promise<void> | undefined;
+    const cleanup = (reason: string) => {
+      cleaning ??= (async () => {
+        try { await sessionManager.closeAll(reason); } catch { /* ignore */ }
+        try { await registry.destroyAll(); } catch { /* ignore */ }
+        process.exit(0);
+      })();
+      return cleaning;
     };
     process.on("SIGINT", () => { void cleanup("sigint"); });
     process.on("SIGTERM", () => { void cleanup("sigterm"); });
+    // An MCP client ends a stdio server by closing its stdin, and may kill it
+    // soon after. The SDK's stdio transport doesn't react to that, and open
+    // CDP connections keep the process alive, so close the sessions now.
+    process.stdin.on("end", () => { void cleanup("stdin_closed"); });
+    process.stdin.on("close", () => { void cleanup("stdin_closed"); });
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
