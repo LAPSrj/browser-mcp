@@ -22,9 +22,10 @@ import type { Page } from "playwright";
  *     decoration stripped: aria-label="Block: …", draggable="true",
  *     tabindex="0", and the bare "wp-block" class — but only on the
  *     wrapper, so user content keeps its own draggable/aria-label/tabindex.
- *   - Auto-generated wrapper IDs from both sides are dropped via narrow
- *     patterns: id="block-{uuid}" (Gutenberg useBlockProps) and
- *     id="auto-{hash}" (WP convention for anchorless blocks).
+ *   - Generated ids are left alone here. The editor wrapper's
+ *     id="block-{clientId}" and whatever id the theme generates on the
+ *     frontend have different values by design; reconcileGeneratedIds()
+ *     pairs the two normalized trees and gives both the same value.
  *   - Editor-only data attributes (data-block, data-type, data-title,
  *     data-wp-block, data-rich-text-*, data-is-drop-zone, data-empty,
  *     data-rich-text-placeholder) and editor-state classes (is-selected,
@@ -273,25 +274,7 @@ export async function normalizeBlockHtmlOnPage(
         stripClasses(el, (c) => c === "wp-block");
       }
 
-      // 3b. Auto-generated wrapper IDs from both providers. Both are
-      //     pattern-narrow enough to strip without colliding with
-      //     user-meaningful ids:
-      //       - Editor: useBlockProps emits id="block-{clientId-uuid}"
-      //       - Frontend: WP convention (e.g. takt_block_props) emits
-      //         id="auto-{hash}" when the block has no user-set anchor.
-      const idAttr = el.getAttribute("id");
-      if (idAttr) {
-        const isGutenbergWrapperId =
-          /^block-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
-            idAttr,
-          );
-        const isAutoFrontendId = /^auto-[a-f0-9]+$/i.test(idAttr);
-        if (isGutenbergWrapperId || isAutoFrontendId) {
-          el.removeAttribute("id");
-        }
-      }
-
-      // 3c. Semantic-no-op attributes some block authors emit always vs.
+      // 3b. Semantic-no-op attributes some block authors emit always vs.
       //     conditionally. These are HTML/ARIA no-ops — stripping them is
       //     canonical-form normalization, not hiding behavior drift:
       //       - <a target="_self"> is the HTML default; identical to no target.
@@ -435,4 +418,157 @@ export async function normalizeBlockHtmlOnPage(
     extraCssVars: stripCssVars,
     extraSubtrees: stripSubtrees,
   });
+}
+
+/** One block wrapper in the editor HTML, in document order. */
+export interface EditorBlockId {
+  /** The wrapper's editor id, Gutenberg's `block-{clientId}`. */
+  id: string;
+  /** The block's `anchor` attribute, or null when it has none. */
+  anchor: string | null;
+}
+
+/**
+ * Collect the wrapper id and anchor of every block in a raw editor
+ * outerHTML (the root block and its inner blocks), in document order.
+ * Runs on the editor page, where wp.data can read the block attributes.
+ */
+export async function collectEditorBlockIds(
+  page: Page,
+  rawEditorHtml: string,
+): Promise<EditorBlockId[]> {
+  return page.evaluate((raw) => {
+    const wp = (window as any).wp;
+    const store = wp?.data?.select?.("core/block-editor");
+    const tpl = document.createElement("template");
+    tpl.innerHTML = raw;
+    const out: { id: string; anchor: string | null }[] = [];
+    for (const el of Array.from(tpl.content.querySelectorAll("[data-block]"))) {
+      if (!el.id) continue;
+      const anchor = store?.getBlock(el.getAttribute("data-block"))?.attributes?.anchor;
+      out.push({ id: el.id, anchor: typeof anchor === "string" && anchor ? anchor : null });
+    }
+    return out;
+  }, rawEditorHtml);
+}
+
+/**
+ * Give generated ids the same value on both sides of a normalized
+ * editor/frontend pair.
+ *
+ * Gutenberg's useBlockProps always sets the editor wrapper id to
+ * `block-{clientId}`, even when the block has an anchor. On the frontend
+ * the same block has its anchor, an id the theme generates, or no id.
+ * Block code often derives more ids from the wrapper id
+ * (`{id}-heading`) and points ARIA attributes at them, so those differ
+ * too. For each editor block wrapper:
+ *   - With an anchor: the editor id becomes the anchor, so the frontend
+ *     shows a difference only when it doesn't output the anchor.
+ *   - Without an anchor: the frontend element at the same position in the
+ *     normalized tree (same tag) is its counterpart. If that element has
+ *     an id, the theme generated it, and both ids become
+ *     `generated-id-{n}`. If it has none (or there's no counterpart), the
+ *     editor id is removed.
+ * Derived ids (`{id}-…`) and references to them in id-reference
+ * attributes and `href="#…"` are rewritten with the id they derive from.
+ * Pairing by position can't match blocks whose structure already differs
+ * between the sides; those keep their own ids, inside a diff that shows
+ * anyway.
+ */
+export async function reconcileGeneratedIds(
+  page: Page,
+  editorHtml: string,
+  frontendHtml: string | null,
+  editorBlocks: EditorBlockId[],
+): Promise<{ editor: string; frontend: string | null }> {
+  return page.evaluate(({ editorRaw, frontendRaw, blocks }) => {
+    const parse = (html: string): Element | null => {
+      const tpl = document.createElement("template");
+      tpl.innerHTML = html;
+      return tpl.content.firstElementChild;
+    };
+    const editorRoot = parse(editorRaw);
+    if (!editorRoot) return { editor: editorRaw, frontend: frontendRaw };
+    const frontendRoot = frontendRaw === null ? null : parse(frontendRaw);
+
+    // Pair editor wrapper ids with the frontend id at the same position.
+    const wrapperIds = new Set(blocks.map((b) => b.id));
+    const frontendIdFor = new Map<string, string | null>();
+    const pair = (e: Element, f: Element): void => {
+      if (e.tagName !== f.tagName) return;
+      if (e.id && wrapperIds.has(e.id)) frontendIdFor.set(e.id, f.id || null);
+      const n = Math.min(e.children.length, f.children.length);
+      for (let i = 0; i < n; i++) pair(e.children[i], f.children[i]);
+    };
+    if (frontendRoot) pair(editorRoot, frontendRoot);
+
+    const editorMap = new Map<string, string>();
+    const frontendMap = new Map<string, string>();
+    const editorDrop = new Set<string>();
+    blocks.forEach((b, n) => {
+      if (b.anchor) {
+        editorMap.set(b.id, b.anchor);
+        return;
+      }
+      const f = frontendIdFor.get(b.id);
+      if (f) {
+        const placeholder = `generated-id-${n}`;
+        editorMap.set(b.id, placeholder);
+        frontendMap.set(f, placeholder);
+      } else {
+        editorDrop.add(b.id);
+      }
+    });
+
+    const ID_REF_ATTRS = [
+      "aria-activedescendant",
+      "aria-controls",
+      "aria-describedby",
+      "aria-details",
+      "aria-errormessage",
+      "aria-flowto",
+      "aria-labelledby",
+      "aria-owns",
+      "commandfor",
+      "for",
+      "form",
+      "headers",
+      "list",
+      "popovertarget",
+    ];
+
+    const rewrite = (root: Element, map: Map<string, string>, drop: Set<string>): void => {
+      // Longest first, so "a-b" wins over "a" for "a-b-heading".
+      const entries = Array.from(map).sort((x, y) => y[0].length - x[0].length);
+      const mapId = (v: string): string => {
+        for (const [from, to] of entries) {
+          if (v === from) return to;
+          if (v.startsWith(`${from}-`)) return to + v.slice(from.length);
+        }
+        return v;
+      };
+      for (const el of [root, ...Array.from(root.querySelectorAll("*"))]) {
+        const id = el.getAttribute("id");
+        if (id !== null) {
+          if (drop.has(id)) el.removeAttribute("id");
+          else el.setAttribute("id", mapId(id));
+        }
+        for (const name of ID_REF_ATTRS) {
+          const v = el.getAttribute(name);
+          if (v) el.setAttribute(name, v.split(/\s+/).filter(Boolean).map(mapId).join(" "));
+        }
+        for (const name of ["href", "xlink:href"]) {
+          const v = el.getAttribute(name);
+          if (v && v.startsWith("#")) el.setAttribute(name, `#${mapId(v.slice(1))}`);
+        }
+      }
+    };
+
+    rewrite(editorRoot, editorMap, editorDrop);
+    if (frontendRoot) rewrite(frontendRoot, frontendMap, new Set());
+    return {
+      editor: editorRoot.outerHTML,
+      frontend: frontendRoot ? frontendRoot.outerHTML : null,
+    };
+  }, { editorRaw: editorHtml, frontendRaw: frontendHtml, blocks: editorBlocks });
 }

@@ -23,7 +23,11 @@ import {
 } from "../utils/wp-data.js";
 import type { BlockFrontendHints } from "../utils/wp-data.js";
 import { findBlockOnFrontend } from "../utils/frontend-locator.js";
-import { normalizeBlockHtmlOnPage } from "../utils/normalize-html.js";
+import {
+  normalizeBlockHtmlOnPage,
+  collectEditorBlockIds,
+  reconcileGeneratedIds,
+} from "../utils/normalize-html.js";
 import { resolveGutenbergSession } from "../utils/session.js";
 
 /**
@@ -283,11 +287,14 @@ export function createBlockHtmlHandler(
         stripCssVars: strip_css_vars,
         stripSubtrees: strip_subtrees,
       };
-      const editorHtml = await normalizeBlockHtmlOnPage(
+      const normalizedEditorHtml = await normalizeBlockHtmlOnPage(
         resolved.page,
         editorRawHtml,
         normalizeOptions,
       );
+      // Read wrapper ids + anchors now: the normalized HTML no longer has
+      // data-block, and wp.data isn't available on the frontend.
+      const editorBlockIds = await collectEditorBlockIds(resolved.page, editorRawHtml);
       const blockName = block_name || resolvedBlockName;
 
       // Gather frontend hints before navigating away. In post_content mode we
@@ -324,7 +331,7 @@ export function createBlockHtmlHandler(
         return post?.link as string | undefined;
       });
 
-      let frontendHtml: string | null = null;
+      let normalizedFrontendHtml: string | null = null;
       let frontendMatchedBy: string | null = null;
       const diagnostics: Record<string, unknown> = {};
 
@@ -341,7 +348,7 @@ export function createBlockHtmlHandler(
           // same parse → walk → outerHTML pipeline (canonical entities).
           // Same options — symmetric strips, no-ops on the frontend side
           // for entries that don't appear there.
-          frontendHtml = await normalizeBlockHtmlOnPage(
+          normalizedFrontendHtml = await normalizeBlockHtmlOnPage(
             resolved.page,
             lookup.matches[0].html,
             normalizeOptions,
@@ -354,6 +361,13 @@ export function createBlockHtmlHandler(
           diagnostics.frontend_tried_selectors = lookup.triedSelectors;
         }
       }
+
+      const { editor: editorHtml, frontend: frontendHtml } = await reconcileGeneratedIds(
+        resolved.page,
+        normalizedEditorHtml,
+        normalizedFrontendHtml,
+        editorBlockIds,
+      );
 
       const result = {
         client_id: reportedClientId,
