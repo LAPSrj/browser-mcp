@@ -635,6 +635,9 @@ const devPlugin: ScreenshotPlugin = {
         ),
         cap: z.number().optional().describe("Max elements (default 100); truncated:true if more exist"),
         include_hidden: z.boolean().optional().describe("Include hidden and off-screen elements (default false)"),
+        include_passwords: z.boolean().optional().describe(
+          'Return the text in password fields (default false: a filled one reads "[hidden]"). The value goes into the session log.',
+        ),
         actions: z.array(actionSchema).optional().describe(actionsDesc),
         useBrowserStack: z.boolean().optional().describe("Default false"),
         ...browserStackFields,

@@ -794,10 +794,12 @@ async function describeFocus(page: Page): Promise<string> {
     const el = document.activeElement as HTMLElement | null;
     if (!el || el === document.body || el === document.documentElement) return "(page body)";
     const role = el.getAttribute("role");
+    // Never report the text in a password field (Enter there submits logins).
+    const isPassword = el instanceof HTMLInputElement && el.type === "password";
     const label = (
       el.getAttribute("aria-label") ||
       el.innerText ||
-      (el as HTMLInputElement).value ||
+      (isPassword ? "" : (el as HTMLInputElement).value) ||
       el.getAttribute("placeholder") ||
       ""
     ).trim().replace(/\s+/g, " ");

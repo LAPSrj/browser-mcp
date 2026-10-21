@@ -5,6 +5,7 @@
  */
 import { sessionManager } from "../dist/core/sessions.js";
 import { listInteractiveElementsTool } from "../dist/plugins/dev/tools/list-interactive-elements.js";
+import { interactionPrimitives } from "../dist/core/primitives.js";
 
 const log = (...a) => console.log("[t]", ...a);
 const fail = (m) => { console.error("[t] FAIL", m); process.exit(1); };
@@ -112,6 +113,36 @@ const result4 = JSON.parse(r4.content[r4.content.length - 1].text);
 if (result4.count !== 3) fail(`expected count=3 with cap:3, got ${result4.count}`);
 if (!result4.truncated) fail("expected truncated:true when cap < totalMatched");
 ok("cap respected; truncated flag set");
+
+// ---- 4b. Password fields ----
+log("\nTest 4b — password values are hidden unless include_passwords:true");
+const page = sessionManager.getPage(session.session_id);
+await page.fill('input[name="pwd"]', "s3cret-pass");
+await page.fill('input[name="username"]', "nelson");
+const r4b = await listInteractiveElementsTool({ session_id: session.session_id });
+const text4b = r4b.content[r4b.content.length - 1].text;
+if (text4b.includes("s3cret-pass")) fail("password value leaked in the default scan");
+const els4b = JSON.parse(text4b).elements;
+const pwd = els4b.find((e) => e.type === "password-input");
+if (pwd?.value !== "[hidden]") fail(`filled password should read "[hidden]", got ${JSON.stringify(pwd?.value)}`);
+if (els4b.find((e) => e.type === "text-input")?.value !== "nelson") fail("text input value should still be returned");
+ok('password value reads "[hidden]"; other values unchanged');
+const r4c = await listInteractiveElementsTool({ session_id: session.session_id, include_passwords: true });
+const pwdShown = JSON.parse(r4c.content[r4c.content.length - 1].text).elements.find((e) => e.type === "password-input");
+if (pwdShown?.value !== "s3cret-pass") fail(`include_passwords:true should return the value, got ${JSON.stringify(pwdShown?.value)}`);
+ok("include_passwords:true returns the value");
+// Without an aria-label the focus description falls back to the field's value.
+await page.evaluate(() => document.querySelector('input[name="pwd"]').removeAttribute("aria-label"));
+const pk = await interactionPrimitives.press_key.handler({ session_id: session.session_id, key: "End", selector: 'input[name="pwd"]' });
+const pkText = JSON.stringify(pk.content);
+if (pk.isError) fail(`press_key errored: ${pkText}`);
+if (pkText.includes("s3cret-pass")) fail(`press_key leaked the password: ${pkText}`);
+ok("press_key's focus description leaves out the password");
+await page.fill('input[name="pwd"]', "");
+const r4d = await listInteractiveElementsTool({ session_id: session.session_id });
+const pwdEmpty = JSON.parse(r4d.content[r4d.content.length - 1].text).elements.find((e) => e.type === "password-input");
+if (pwdEmpty?.value !== "") fail(`empty password should read "", got ${JSON.stringify(pwdEmpty?.value)}`);
+ok('empty password reads ""');
 
 // ---- 5. Validation: missing url + session_id ----
 log("\nTest 5 — missing url + session_id errors");

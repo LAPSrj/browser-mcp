@@ -24,6 +24,8 @@ export interface ListInteractiveElementsParams extends BrowserStackTarget {
   cap?: number;
   /** Include non-visible elements (hidden, off-screen) in the result. Default false. */
   include_hidden?: boolean;
+  /** Return the text typed into password fields. Default false: a filled one reads "[hidden]". */
+  include_passwords?: boolean;
   actions?: AnyAction[];
   useBrowserStack?: boolean;
   viewport?: { width: number; height: number };
@@ -59,6 +61,7 @@ export async function listInteractiveElementsTool(params: ListInteractiveElement
     scope = "body",
     cap = 100,
     include_hidden = false,
+    include_passwords = false,
     actions = [],
     useBrowserStack = false,
     viewport = { width: 1280, height: 720 },
@@ -99,16 +102,17 @@ export async function listInteractiveElementsTool(params: ListInteractiveElement
       assertionsMsg = formatAssertions(assertions);
     }
 
+    const opts: ScanOptions = { cap, includeHidden: include_hidden, includePasswords: include_passwords };
     let result: Record<string, unknown>;
     if (hasFramePierce(scope)) {
-      result = await scanOneFrame(page, scope, cap, include_hidden);
+      result = await scanOneFrame(page, scope, opts);
     } else {
-      const own: Result = await page.evaluate(runInPage, { scope, cap, includeHidden: include_hidden });
+      const own: Result = await page.evaluate(runInPage, { scope, ...opts });
       // A whole-page scan also covers iframes (cross-origin and closed-shadow-root
       // ones too). Overlay iframes (modals, consent banners, chat widgets) come
       // before the page's elements, because they block it. Embeds (video, ads,
       // maps) come after, so they can't push the page's own elements past the cap.
-      const framed = scope === "body" ? await scanFrames(page, cap, include_hidden) : null;
+      const framed = scope === "body" ? await scanFrames(page, opts) : null;
       const overlays = framed?.elements.filter((e) => framed.overlay.has(e.frame!)) ?? [];
       const embeds = framed?.elements.filter((e) => !framed.overlay.has(e.frame!)) ?? [];
       const elements = [...overlays, ...own.elements, ...embeds].slice(0, cap);
@@ -137,6 +141,12 @@ export async function listInteractiveElementsTool(params: ListInteractiveElement
   }
 }
 
+interface ScanOptions {
+  cap: number;
+  includeHidden: boolean;
+  includePasswords: boolean;
+}
+
 interface FrameSummary {
   /** Selector prefix for the frame; join with " >>> " and an inner selector. */
   selector: string;
@@ -154,8 +164,7 @@ const MIN_FRAME_PX = 5;
 // selector_hint gets the frame prefix, and its rect moves to page coordinates.
 async function scanFrames(
   page: Page,
-  cap: number,
-  includeHidden: boolean,
+  opts: ScanOptions,
 ): Promise<{ elements: InteractiveElement[]; totalMatched: number; frames: FrameSummary[]; overlay: Set<string> }> {
   const elements: InteractiveElement[] = [];
   const frames: FrameSummary[] = [];
@@ -164,14 +173,14 @@ async function scanFrames(
   let totalMatched = 0;
   for (const frame of childFrames(page)) {
     const box = await frameContentBox(frame);
-    if (!includeHidden && (!box || box.width < MIN_FRAME_PX || box.height < MIN_FRAME_PX)) continue;
+    if (!opts.includeHidden && (!box || box.width < MIN_FRAME_PX || box.height < MIN_FRAME_PX)) continue;
     // A nested frame is an overlay when the frame holding it is one.
     const parent = frame.parentFrame();
     const isOverlay = parent && parent !== page.mainFrame()
       ? overlayFrames.has(parent)
       : await isOverlayIframe(frame);
     if (isOverlay) overlayFrames.add(frame);
-    const r = await frame.evaluate(runInPage, { scope: "body", cap, includeHidden }).catch(() => null);
+    const r = await frame.evaluate(runInPage, { scope: "body", ...opts }).catch(() => null);
     if (!r) continue;
     const prefix = await framePath(frame);
     if (isOverlay) overlay.add(prefix);
@@ -217,20 +226,20 @@ async function isOverlayIframe(frame: Frame): Promise<boolean> {
 
 // scope with ` >>> ` (e.g. `iframe[title="Video"] >>> body`): list only the
 // contents of that frame, under the CSS after the last ` >>> `.
-async function scanOneFrame(page: Page, scope: string, cap: number, includeHidden: boolean): Promise<Record<string, unknown>> {
+async function scanOneFrame(page: Page, scope: string, opts: ScanOptions): Promise<Record<string, unknown>> {
   const handle = await resolveLocator(page, scope).first().elementHandle({ timeout: 5000 });
   const frame = handle ? await handle.ownerFrame() : null;
   if (!frame) throw new Error(`scope "${scope}" matched nothing`);
   const inner = splitFramePierce(scope).pop()!;
   const prefix = await framePath(frame);
-  const r: Result = await frame.evaluate(runInPage, { scope: inner, cap, includeHidden });
+  const r: Result = await frame.evaluate(runInPage, { scope: inner, ...opts });
   const box = await frameContentBox(frame);
   return { ...r, scope, frame: prefix, elements: r.elements.map((el) => inFrame(el, prefix, box)) };
 }
 
 // In-page collector. Stays self-contained — no external function refs.
-function runInPage(args: { scope: string; cap: number; includeHidden: boolean }): Result {
-  const { scope, cap, includeHidden } = args;
+function runInPage(args: { scope: string } & ScanOptions): Result {
+  const { scope, cap, includeHidden, includePasswords } = args;
   const root = document.querySelector(scope) ?? document.body;
 
   // Interactive-element query. Broad enough to catch ARIA-roled elements
@@ -424,9 +433,14 @@ function runInPage(args: { scope: string; cap: number; includeHidden: boolean })
     const name = getAccessibleName(el);
     const rawText = ((el as HTMLElement).innerText || el.textContent || "").trim().replace(/\s+/g, " ");
     const text = rawText.length > 0 ? clip(rawText, 120) : null;
-    const value = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
+    let value = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
       ? (el.value ?? "").slice(0, 200)
       : null;
+    // Saved or typed passwords would otherwise end up in the agent's log.
+    // Show only whether the field is filled.
+    if (value && !includePasswords && el instanceof HTMLInputElement && el.type === "password") {
+      value = "[hidden]";
+    }
     const r = el.getBoundingClientRect();
     const rect = { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
     const selector_hint = makeSelectorHint(el, role, name, text);

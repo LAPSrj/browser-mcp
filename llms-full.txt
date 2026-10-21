@@ -47,7 +47,7 @@ Exhaustive list of `mcp__browser__*` tools by plugin. Tools marked **(contract)*
 | `dom_snapshot` | Full DOM tree as JSON | |
 | `dom_query` | Batched DOM read by selector with typed schema (text/rect/computed/attributes per query) | preferred over raw `evaluate_script` for element discovery |
 | `accessibility_snapshot` | a11y tree + 6 hand-rolled rule asserts | (surface) accessibility_snapshot — NOT a full WCAG audit; also the cheapest discovery tool for clickables-by-role+name |
-| `list_interactive_elements` | Every clickable / typable on the page with role + name + rect + click-ready `selector_hint` | preferred entry point for "what can I click here?" — bundled discovery, one call |
+| `list_interactive_elements` | Every clickable / typable on the page with role + name + rect + click-ready `selector_hint` | preferred entry point for "what can I click here?" — bundled discovery, one call; a filled password field's `value` reads `"[hidden]"` unless `include_passwords: true` |
 | `hit_test` | Geometric reachability at a point (selector center or x/y): z-ordered hit stack + whether a real tap would land on / forward to a file input | detects overlays / mispositioned inputs (iOS file-picker tap bug); the one such check that works on real iOS |
 | `axe_audit` | Full axe-core WCAG audit (violations + passes + incomplete) | (surface) axe_audit; session-aware |
 | `network_log` | HAR-style network requests over a script run | |
