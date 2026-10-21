@@ -321,17 +321,42 @@ export async function typeLikeAPerson(page: Page, text: string): Promise<void> {
  * false, and the input event's inputType is "insertText", not
  * "insertFromPaste". `field` is the element being typed into; the event goes
  * to whatever has focus in its document.
+ *
+ * On Windows the browser runs its own paste on the Ctrl+V keystroke, which
+ * would insert the OS clipboard in front of `text` (verified live on Edge).
+ * A capture listener on the window, added before the key goes down, cancels
+ * that trusted paste before the page's later listeners see it.
  */
 export async function pasteLikeAPerson(page: Page, field: Locator, text: string): Promise<void> {
+  const blocker = "browser-mcp:block-native-paste";
+  await field.evaluate((el, key) => {
+    const win = el.ownerDocument.defaultView!;
+    const block = (e: Event) => {
+      if (!e.isTrusted) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    win.addEventListener("paste", block, true);
+    Object.defineProperty(win, Symbol.for(key), { value: block, configurable: true });
+    // If a step below throws, the user's own pastes still work after this.
+    setTimeout(() => win.removeEventListener("paste", block, true), 10_000);
+  }, blocker);
   await page.keyboard.down("ControlOrMeta");
   await sleep(between(40, 110));
   await page.keyboard.down("v");
-  const unhandled = await field.evaluate((el, t) => {
+  const unhandled = await field.evaluate((el, [t, key]) => {
+    const win = el.ownerDocument.defaultView!;
+    const sym = Symbol.for(key);
+    const block = (win as unknown as Record<symbol, EventListener>)[sym];
+    if (block) {
+      win.removeEventListener("paste", block, true);
+      delete (win as unknown as Record<symbol, unknown>)[sym];
+    }
     const target = el.ownerDocument.activeElement ?? el;
     const data = new DataTransfer();
     data.setData("text/plain", t);
     return target.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true, composed: true }));
-  }, text);
+  }, [text, blocker] as const);
   if (unhandled) await page.keyboard.insertText(text);
   await sleep(holdMs());
   await page.keyboard.up("v");

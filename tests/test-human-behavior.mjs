@@ -18,7 +18,8 @@
 //    by y uses the wheel and reports the distance moved.
 // 5. drag presses, moves along a path and releases over the target.
 // 6. A regular session defaults to off: Playwright's one mousemove and fill().
-// 7. On Windows/WSL with a Chromium-family browser, attach_cdp defaults to on.
+// 7. On Windows/WSL with a Chromium-family browser, attach_cdp defaults to on,
+//    and a long paste doesn't bring in the OS clipboard.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -246,6 +247,11 @@ try {
     check((await value(cdp, "#day")) === "2024-05-01", "attach_cdp: a date is typed in the field's order", await value(cdp, "#day"));
     await call("type_text", { session_id: cdp, selector: "#day", text: "2025-12-31" });
     check((await value(cdp, "#day")) === "2025-12-31", "attach_cdp: a second date uses the order that worked", await value(cdp, "#day"));
+    // Edge on Windows pastes the OS clipboard on Ctrl+V; it must not reach the
+    // field. Only catches it when the clipboard has text; the test never sets it.
+    await call("type_text", { session_id: cdp, selector: "#bio", text: long });
+    const bio = await value(cdp, "#bio");
+    check(bio === long, "attach_cdp: a long paste has only the text, not the OS clipboard", { length: bio.length, want: long.length });
     await evalValue(cdp, EVENTS);
     await call("select_option", { session_id: cdp, selector: "#color", value: "b" });
     ev = await evalValue(cdp, EVENTS);
