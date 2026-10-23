@@ -628,6 +628,65 @@ Plus custom actions usable in any tool's `actions[]`: `gutenberg_insert`,
 `gutenberg_set_attribute`, `gutenberg_select_block`, `gutenberg_remove`,
 `gutenberg_clear`.
 
+### `custom` — tools from a JSON file
+
+Registers tools described in the JSON file named by
+`BROWSER_MCP_CUSTOM_CONFIG` (a `~/` path works). Each tool runs a command
+from the file. It either returns the command's output, or types the output
+into fields the agent names and never returns it, which keeps values such
+as passwords out of the agent's context. The file is checked at startup,
+and the server doesn't start when it has an unknown key or version.
+
+```json
+{
+  "version": 1,
+  "tools": {
+    "accounts": {
+      "description": "List the logins saved for the current page.",
+      "run": ["my-vault", "list", "{url}"],
+      "output": "return"
+    },
+    "login": {
+      "description": "Type a saved login into the form. Doesn't submit it.",
+      "params": {
+        "account": { "description": "Account id from custom_accounts", "required": true },
+        "username_selector": { "description": "Username field" },
+        "password_selector": { "description": "Password field" }
+      },
+      "fill": [
+        { "target": "{username_selector}", "run": ["my-vault", "get", "{url}", "username", "{account}"] },
+        { "target": "{password_selector}", "run": ["my-vault", "get", "{url}", "password", "{account}"] }
+      ],
+      "errors": { "1": "Not saved for this site.", "4": "The vault is locked: {stderr}" },
+      "timeout_ms": 15000
+    }
+  }
+}
+```
+
+Each tool becomes `custom_<name>` and takes `session_id` (required) and
+`tab_id`, plus its own `params`. These rules apply:
+
+- A tool has either `run` with `"output": "return"`, or `fill` steps. A
+  `fill` step's `target` is one placeholder naming the param that holds the
+  field's selector. Steps whose selector wasn't passed are skipped.
+- `{url}` is the page's URL, or for a fill step the URL of the frame that
+  holds the field. The agent can't set it. Other placeholders must be
+  declared params, and a value starting with `-` is refused.
+- Commands run without a shell, with the server's environment, so put the
+  command's folder (and its interpreter's) on the server's `PATH`.
+- Exit code 0 is success, whatever is on stderr. Other codes return
+  `errors[code]` or `errors.default`, where `{stderr}` is the command's
+  stderr. One trailing newline is removed from a value before typing it.
+- Values are only typed on https pages or on localhost (including
+  `*.localhost` names), not while a trace
+  is recording, and not when the page has moved to another origin since the
+  command started. Results only say how many characters were typed.
+
+The agent can still read a typed value back from the page (for example with
+`evaluate_script`), so this keeps values out of tool results but doesn't
+hide them from an agent that looks for them.
+
 ### Large results: `result_path`
 
 `wp-gutenberg_block_html` and `design-compare_design_audit` accept
@@ -775,6 +834,7 @@ The URL you navigate to is not constrained by the MCP — you pass any host in
 | `BROWSER_MCP_EXECUTABLE_PATH` | per-product default | Path to the browser executable for `open_session({ attach_cdp: true })` auto-launch. Overrides the product's canonical default; required for Opera on Windows (no machine-wide path). Per-call `executable_path` overrides this. |
 | `BROWSER_MCP_AGENT_PROFILES` | — | `;`-separated `user_data_dir` paths that belong to the agents (e.g. `C:\edge-cdp-profile`). Before launching a browser on one, browser-mcp turns off translation in its `Default/Preferences`. Other user-supplied profiles are never edited. |
 | `BROWSER_MCP_CDP_DEBUG` | `0` | When `1`, the WSL CDP relay logs activity to `%TEMP%\browser-mcp\<session>\relay.log`. |
+| `BROWSER_MCP_CUSTOM_CONFIG` | — | JSON file defining the `custom` plugin's tools. Required by that plugin. |
 | `WP_URL` / `WP_USERNAME` / `WP_PASSWORD` | — | One WordPress site for the `wp` and `wp-gutenberg` plugins. The plugins need either `WP_URL` or `WP_SITES`. |
 | `WP_SITES` | — | Comma-separated site names (e.g. `LOCAL,PROD`). Each site reads `WP_URL_<NAME>`, `WP_USERNAME_<NAME>`, `WP_PASSWORD_<NAME>`, and optionally `WP_LOGIN_URL_<NAME>`, `WP_SESSION_TTL_<NAME>`, `WP_REQUIRE_ALLOW_WRITE_<NAME>`. When set, the unsuffixed `WP_URL` set is ignored. |
 | `WP_LOGIN_URL` | `{WP_URL}/wp-login.php` | Custom WP login page. |

@@ -21,6 +21,10 @@ const BUILTIN_PLUGINS: Record<string, () => Promise<ScreenshotPlugin>> = {
     const mod = await import("./design-compare/index.js");
     return mod.default;
   },
+  custom: async () => {
+    const mod = await import("./custom/index.js");
+    return mod.default;
+  },
 };
 
 /**
