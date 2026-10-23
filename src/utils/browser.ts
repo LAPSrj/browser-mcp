@@ -142,14 +142,14 @@ export function setLaunchConfig(opts: { launchTimeout?: number; launchRetries?: 
  * - WebKit: already renders WebGL on the GPU by default (~0.9s / 4% CPU) — no
  *   override required.
  *
- * Enabled by default. Disable with BROWSER_MCP_GPU=0 — e.g. if goldens must
- * match a SwiftShader/CI environment, the GPU path proves flaky on some host,
- * or you want Firefox back to its stock WebGL-off default. Only affects
- * locally-launched browsers; BrowserStack is untouched.
+ * Disabled by default: browsers launch with Playwright's stock rendering
+ * (SwiftShader for Chromium, WebGL off for Firefox). Enable with
+ * BROWSER_MCP_GPU=1 (or true/on/yes). Only affects locally-launched browsers;
+ * BrowserStack is untouched.
  */
 export function gpuEnabled(): boolean {
-  const v = (process.env.BROWSER_MCP_GPU ?? "1").toLowerCase();
-  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+  const v = (process.env.BROWSER_MCP_GPU ?? "").toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
 }
 
 /**
@@ -190,7 +190,7 @@ export function gpuLaunchOverrides(browserName: BrowserName): GpuLaunchOverrides
   // makes d3d12 captures pixel-identical to SwiftShader. Compositing and WebGL
   // stay on the GPU; only page content is rasterized on the CPU. Headed
   // Chromium picks d3d12 + GPU raster on its own, so this applies even with
-  // BROWSER_MCP_GPU=0. Regression test: tests/test-gpu-raster-bowtie.mjs.
+  // GPU mode off (the default). Regression test: tests/test-gpu-raster-bowtie.mjs.
   const wslRasterFix = browserName === "chromium" && isWsl() ? ["--disable-gpu-rasterization"] : [];
 
   if (!gpuEnabled()) return { args: wslRasterFix };

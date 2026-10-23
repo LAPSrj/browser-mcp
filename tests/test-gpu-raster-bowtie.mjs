@@ -7,10 +7,11 @@
  * curved parts. Captures must match the SwiftShader (software) render.
  *
  * Coverage:
- *  1. screenshot + element_screenshot tools (one-off launch, default env)
- *  2. open_session headless (default env)
- *  3. WSL only: open_session headed with BROWSER_MCP_GPU=0 (headed Chromium
- *     picks d3d12 + GPU raster on its own, so this path needs the fix too)
+ *  1. screenshot + element_screenshot tools (one-off launch, BROWSER_MCP_GPU=1)
+ *  2. open_session headless (BROWSER_MCP_GPU=1)
+ *  3. WSL only: open_session headed with GPU off, the default (headed
+ *     Chromium picks d3d12 + GPU raster on its own, so this path needs the
+ *     fix too)
  *
  * Run after `npm run build` (or `npx tsc`).
  */
@@ -128,10 +129,12 @@ async function section(label, capture) {
   checkCaptures(label, ...shots);
 }
 
-console.log("\n=== 1. screenshot tool, default env ===");
+process.env.BROWSER_MCP_GPU = "1";
+
+console.log("\n=== 1. screenshot tool, BROWSER_MCP_GPU=1 ===");
 await section("screenshot", async () => [await viaScreenshotTool(BOX_URL), await viaScreenshotTool(ARCS_URL)]);
 
-console.log("\n=== 1b. element_screenshot tool, default env ===");
+console.log("\n=== 1b. element_screenshot tool, BROWSER_MCP_GPU=1 ===");
 try {
   const res = await elementScreenshotTool({ url: BOX_URL, selector: "#box", viewport: VIEWPORT, outputDir: "/tmp/bm-bowtie-test" });
   const file = res.content.map((c) => c.text ?? "").join(" ").match(/Saved: (\S+)/)?.[1];
@@ -142,14 +145,14 @@ try {
   check(false, "element_screenshot: capture succeeds", e.message.split("\n")[0]);
 }
 
-console.log("\n=== 2. open_session headless, default env ===");
+console.log("\n=== 2. open_session headless, BROWSER_MCP_GPU=1 ===");
 await section("session headless", () => viaSession({ headless: true }));
 
+delete process.env.BROWSER_MCP_GPU;
+
 if (isWsl()) {
-  console.log("\n=== 3. open_session headed, BROWSER_MCP_GPU=0 (WSL) ===");
-  process.env.BROWSER_MCP_GPU = "0";
-  await section("session headed gpu=0", () => viaSession({ headless: false }));
-  delete process.env.BROWSER_MCP_GPU;
+  console.log("\n=== 3. open_session headed, GPU off by default (WSL) ===");
+  await section("session headed gpu off", () => viaSession({ headless: false }));
 }
 
 console.log(`\n=== Total: ${pass} passed, ${fail} failed ===`);
