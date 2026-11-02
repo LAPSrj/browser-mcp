@@ -24,19 +24,21 @@ export async function navigateTo(
   waitForNetworkIdle = true,
 ): Promise<NavigateResult> {
   let status: number | null = null;
+  let gotoError: string | undefined;
 
   if (!waitForNetworkIdle) {
     try {
       const resp = await page.goto(url, { waitUntil: "load" });
       status = resp?.status() ?? null;
-    } catch {
-      // proceed — page may be on an error screen; diagnosed below
+    } catch (error) {
+      gotoError = (error as Error).message;
     }
   } else {
     try {
       const resp = await page.goto(url, { waitUntil: "networkidle", timeout: NETWORK_IDLE_TIMEOUT });
       status = resp?.status() ?? null;
-    } catch {
+    } catch (error) {
+      gotoError = (error as Error).message;
       // Page is already partially loaded from the failed goto — wait for load state
       try {
         await page.waitForLoadState("load", { timeout: 15000 });
@@ -46,6 +48,6 @@ export async function navigateTo(
     }
   }
 
-  const diagnostic = await diagnosePageErrors(page, status);
+  const diagnostic = await diagnosePageErrors(page, status, gotoError);
   return { url: page.url(), status, diagnostic };
 }

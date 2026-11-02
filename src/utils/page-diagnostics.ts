@@ -27,24 +27,39 @@ const CHROMIUM_ERROR_HINTS: Record<string, string> = {
     "Navigation aborted — the page load was cancelled (redirect loop, mixed-content block, or extension interference).",
   ERR_TOO_MANY_REDIRECTS:
     "Too many redirects — the server is stuck in a redirect loop.",
+  ERR_HTTP2_PROTOCOL_ERROR:
+    "The server reset the HTTP/2 connection before sending a response. Some CDN bot protection does this to headless browsers; compare with curl from this machine.",
+  ERR_CONNECTION_RESET:
+    "The server reset the connection before sending a response.",
 };
 
+function errorCodeIn(text: string | null | undefined): string | undefined {
+  return text?.match(/\b(ERR_[A-Z0-9_]+)\b/)?.[1];
+}
+
+function messageFor(errorCode: string): string {
+  return `${errorCode}: ${CHROMIUM_ERROR_HINTS[errorCode] ?? "browser navigation error."}`;
+}
+
+/** gotoError is page.goto's error message; headless Chromium's error page has an empty body, so it's often the only source of the net::ERR_* code. */
 export async function diagnosePageErrors(
   page: Page,
   httpStatus: number | null = null,
+  gotoError?: string,
 ): Promise<PageDiagnostic | null> {
   const url = page.url();
 
   if (url === "chrome-error://chromewebdata/" || url.startsWith("chrome-error://")) {
-    let errorCode: string | undefined;
-    try {
-      const bodyText = await page.textContent("body", { timeout: 2000 });
-      errorCode = bodyText?.match(/\b(ERR_[A-Z_]+)\b/)?.[1] ?? undefined;
-    } catch {
-      // page may not be ready
+    let errorCode = errorCodeIn(gotoError);
+    if (!errorCode) {
+      try {
+        errorCode = errorCodeIn(await page.textContent("body", { timeout: 2000 }));
+      } catch {
+        // page may not be ready
+      }
     }
     const message = errorCode
-      ? (CHROMIUM_ERROR_HINTS[errorCode] ?? `Browser navigation error: ${errorCode}.`)
+      ? messageFor(errorCode)
       : "The browser could not load this page (Chrome error screen).";
     return { type: "browser-error", message, errorCode };
   }
@@ -57,9 +72,13 @@ export async function diagnosePageErrors(
   }
 
   if (url === "about:blank") {
+    const errorCode = errorCodeIn(gotoError);
+    if (errorCode) return { type: "browser-error", message: messageFor(errorCode), errorCode };
     return {
       type: "blank-page",
-      message: "Page is about:blank — navigation may have failed silently.",
+      message: gotoError
+        ? `Page is about:blank — navigation failed: ${gotoError.split("\n")[0]}`
+        : "Page is about:blank — navigation may have failed silently.",
     };
   }
 

@@ -359,7 +359,7 @@ export const navigationPrimitives: Record<string, PrimitiveDef> = {
           gotoError = (error as Error).message;
         }
 
-        const diagnostic = await diagnosePageErrors(page, status);
+        const diagnostic = await diagnosePageErrors(page, status, gotoError);
         const title = await page.title().catch(() => "");
         const result: Record<string, unknown> = {
           url: page.url(),
