@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import os from "node:os";
 import { chromium, firefox, webkit, type Browser, type BrowserType, type BrowserServer, type BrowserContext, type Page } from "playwright";
 import { connectBrowserStack, type BrowserStackCaps } from "./browserstack.js";
 import { Semaphore } from "./semaphore.js";
@@ -9,37 +10,138 @@ import type { SessionHook } from "../plugins/types.js";
 export type BrowserName = "chromium" | "firefox" | "webkit";
 
 /**
- * Build a realistic user-agent string that strips Playwright's headless
- * markers. Chromium's headless UA contains "HeadlessChrome" which sites
- * commonly detect and block — this replaces it with a standard Chrome UA
- * using the actual browser version. Firefox and WebKit headless UAs are
- * already indistinguishable from headed mode; this function returns
- * undefined for them (= use Playwright's default).
+ * The user-agent string a visible window of this Chromium sends: the
+ * headless one with "HeadlessChrome" replaced by "Chrome", using Chromium's
+ * reduced format (major version, then .0.0.0). Firefox and WebKit headless
+ * UAs are already the same as headed; this returns undefined for them
+ * (= use Playwright's default).
  *
  * Controlled by the BROWSER_MCP_REALISTIC_UA env var (default: "1").
  * Set to "0" to keep the original headless UA — useful for test
  * environments that rely on the HeadlessChrome marker.
  */
-export function realisticUserAgent(browserName: BrowserName, browserInstance: Browser): string | undefined {
+function realisticUaEnabled(): boolean {
   const flag = (process.env.BROWSER_MCP_REALISTIC_UA ?? "1").toLowerCase();
-  if (flag === "0" || flag === "false" || flag === "off" || flag === "no") {
-    return undefined;
-  }
+  return !(flag === "0" || flag === "false" || flag === "off" || flag === "no");
+}
+
+export function realisticUserAgent(browserName: BrowserName, browserInstance: Browser): string | undefined {
+  if (!realisticUaEnabled()) return undefined;
 
   if (browserName === "chromium") {
-    const version = browserInstance.version();
+    const major = browserInstance.version().split(".")[0];
     const platform = process.platform === "darwin"
       ? "(Macintosh; Intel Mac OS X 10_15_7)"
       : process.platform === "win32"
         ? "(Windows NT 10.0; Win64; x64)"
         : "(X11; Linux x86_64)";
-    return `Mozilla/5.0 ${platform} AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+    return `Mozilla/5.0 ${platform} AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
   }
 
   // Firefox and WebKit headless UAs have no "Headless" marker — Playwright
   // already uses realistic UA strings for them. Return undefined to keep
   // Playwright's default.
   return undefined;
+}
+
+interface BrandVersion { brand: string; version: string }
+
+/**
+ * Chromium's brand list for a build with no product brand (what a visible
+ * Chromium reports), per GenerateBrandVersionList / ShuffleBrandList /
+ * GetGreasedUserAgentBrandVersion in components/embedder_support/user_agent_utils.cc.
+ * The headless shell adds a "HeadlessChrome" brand, which also changes the order.
+ */
+function visibleBrands(fullVersion: string): { brands: BrandVersion[]; fullVersionList: BrandVersion[] } {
+  const major = fullVersion.split(".")[0];
+  const seed = Number(major);
+  const chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
+  const greaseBrand = `Not${chars[seed % chars.length]}A${chars[(seed + 1) % chars.length]}Brand`;
+  const greaseVersion = ["8", "99", "24"][seed % 3];
+  const order = (grease: BrandVersion, chromium: BrandVersion) => {
+    const list: BrandVersion[] = [];
+    list[seed % 2] = grease;
+    list[(seed + 1) % 2] = chromium;
+    return list;
+  };
+  return {
+    brands: order({ brand: greaseBrand, version: greaseVersion }, { brand: "Chromium", version: major }),
+    fullVersionList: order({ brand: greaseBrand, version: `${greaseVersion}.0.0.0` }, { brand: "Chromium", version: fullVersion }),
+  };
+}
+
+/** The Accept-Language header Chromium builds from a language list: each region language followed by its base language, then q-values from 0.9 down. */
+function acceptLanguageHeader(languages: readonly string[]): string {
+  const expanded: string[] = [];
+  for (const lang of languages) {
+    if (!expanded.includes(lang)) expanded.push(lang);
+    const base = lang.split("-")[0];
+    if (base !== lang && !languages.includes(base) && !expanded.includes(base)) expanded.push(base);
+  }
+  return expanded.map((l, i) => (i === 0 ? l : `${l};q=${Math.max(1, 10 - i) / 10}`)).join(",");
+}
+
+const visiblePages = new WeakMap<Page, Promise<void>>();
+const visibleContexts = new WeakMap<BrowserContext, (page: Page) => Promise<void>>();
+
+/**
+ * Make a headless Chromium context send what a visible Chromium sends:
+ * sec-ch-ua brands and userAgentData without "HeadlessChrome" (Playwright's
+ * userAgent option can't set brands), and an Accept-Language header when no
+ * locale is set (the headless shell sends none). Linux hosts only: the
+ * high-entropy platformVersion can't be computed elsewhere. Covers every
+ * page, cross-site iframes and dedicated workers, except a popup's first
+ * request (Playwright exposes a popup only after that request) and service
+ * workers.
+ */
+export async function matchVisibleChromium(
+  context: BrowserContext,
+  firstPage: Page,
+  opts: { browserName: BrowserName; headless: boolean; userAgent?: string; locale?: string },
+): Promise<void> {
+  if (opts.browserName !== "chromium" || !opts.headless || !opts.userAgent || !realisticUaEnabled() || process.platform !== "linux") return;
+  const browser = context.browser();
+  if (!browser) return;
+  const metadata = {
+    ...visibleBrands(browser.version()),
+    platform: "Linux",
+    platformVersion: "",
+    architecture: os.arch().startsWith("arm") ? "arm" : "x86",
+    bitness: os.arch().endsWith("64") ? "64" : "32",
+    model: "",
+    mobile: false,
+    wow64: false,
+    formFactors: ["Desktop"],
+  };
+  const userAgent = opts.userAgent;
+  const apply = (page: Page): Promise<void> => {
+    let done = visiblePages.get(page);
+    if (!done) {
+      done = (async () => {
+        // Never detached: the override lasts only while this CDP session is attached.
+        const cdp = await context.newCDPSession(page);
+        await cdp.send("Emulation.setUserAgentOverride", {
+          userAgent,
+          userAgentMetadata: metadata,
+          ...(opts.locale ? { acceptLanguage: opts.locale } : {}),
+        });
+      })().catch(() => {});
+      visiblePages.set(page, done);
+    }
+    return done;
+  };
+  visibleContexts.set(context, apply);
+  context.on("page", (page) => void apply(page));
+  await apply(firstPage);
+  if (!opts.locale) {
+    const languages = await firstPage.evaluate(() => navigator.languages).catch(() => [] as string[]);
+    if (languages.length) await context.setExtraHTTPHeaders({ "accept-language": acceptLanguageHeader(languages) });
+  }
+}
+
+/** Resolves once matchVisibleChromium's override is on the page; immediately for other contexts. */
+export function visibleChromiumReady(page: Page): Promise<void> {
+  return visibleContexts.get(page.context())?.(page) ?? Promise.resolve();
 }
 
 /**
@@ -422,7 +524,10 @@ export async function launchSession(options: LaunchOptions): Promise<BrowserSess
     // far longer than a local browser, so give the context a generous default.
     context.setDefaultTimeout(browserStackDevice ? 120000 : 30000);
     const page = await context.newPage();
-    if (!useBrowserStack) await warmUpFirstFrame(page, browserName);
+    if (!useBrowserStack) {
+      await matchVisibleChromium(context, page, { browserName, headless: true, userAgent: contextOptions.userAgent as string | undefined });
+      await warmUpFirstFrame(page, browserName);
+    }
 
     // Run plugin session hooks (e.g. auth) after context is ready.
     // Hooks from the tool context (resolved from the caller's `use` param)

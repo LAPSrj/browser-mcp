@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type BrowserServer, type Dialog, type Page } from "playwright";
-import { getBrowserType, gpuLaunchOverrides, realisticUserAgent, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
+import { getBrowserType, gpuLaunchOverrides, matchVisibleChromium, realisticUserAgent, visibleChromiumReady, warmUpFirstFrame, type BrowserName } from "../utils/browser.js";
 import { connectBrowserStack } from "../utils/browserstack.js";
 import { forceKillProfile, otherProcessSessionCount, setBrowserWindows, spawnAttachCdpRelay, type AttachCdpHandle, type WindowResult } from "../utils/cdp-relay.js";
 import { readSidecar, setSessionTabs, takeDeadTabs } from "../utils/browser-sidecar.js";
@@ -708,6 +708,12 @@ class SessionManager {
       context = await browser.newContext(contextOpts as any);
       context.setDefaultTimeout(30000);
       page = await context.newPage();
+      await matchVisibleChromium(context, page, {
+        browserName,
+        headless: opts.headless ?? true,
+        userAgent: opts.user_agent ? undefined : (contextOpts.userAgent as string | undefined),
+        locale: opts.locale,
+      });
       await warmUpFirstFrame(page, browserName);
     }
 
@@ -1347,6 +1353,7 @@ class SessionManager {
     // caller-supplied tab_id). Pre-seed the map with our chosen tid so the
     // context handler sees it already exists and skips re-tracking.
     const page = s.windowPid ? await openBackgroundPage(s.context, s.windowPid) : await s.context.newPage();
+    await visibleChromiumReady(page);
     // The context.on('page') handler already registered this page under a
     // freshly-allocated auto tab id. Re-key it under the caller's chosen id.
     let autoTid: string | undefined;
